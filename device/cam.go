@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	gocam "github.com/svanichkin/Gocam"
+	gocam "github.com/svanichkin/gocam"
 )
 
 // CameraFrame is the raw RGB frame type produced by the camera backend.

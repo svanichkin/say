@@ -6,7 +6,7 @@ require github.com/svanichkin/Ygg v0.4.2
 
 require (
 	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
-	github.com/svanichkin/gocam v0.0.1
+	github.com/svanichkin/gocam v0.1.0
 	golang.org/x/term v0.36.0
 )
 
