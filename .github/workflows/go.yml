@@ -1,0 +1,157 @@
+name: Build and Release Say
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build_check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.x'
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v ./...
+
+  build_linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    needs: build_check
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.x'
+
+      - name: Build linux/${{ matrix.arch }}
+        run: |
+          export GOOS=linux
+          export GOARCH=${{ matrix.arch }}
+          export CGO_ENABLED=1
+          go build -v -o say .
+          tar czvf say-linux-${{ matrix.arch }}.tar.gz say
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: say-linux-${{ matrix.arch }}
+          path: say-linux-${{ matrix.arch }}.tar.gz
+
+  build_windows:
+    name: Build Windows
+    runs-on: windows-latest
+    needs: build_check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.x'
+
+      - name: Build windows/amd64
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 1
+          CGO_CFLAGS: -Wno-stringop-overread
+        run: |
+          go env
+          go build -v -o say.exe .
+          ls -la
+          tar czvf say-windows-amd64.tar.gz say.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: say-windows-amd64
+          path: say-windows-amd64.tar.gz
+
+  build_darwin:
+    name: Build macOS
+    runs-on: macos-latest
+    needs: build_check
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.x'
+
+      - name: Install opus (macOS)
+        run: |
+          brew update
+          brew install opus pkg-config
+
+      - name: Build darwin/${{ matrix.arch }}
+        run: |
+          export GOOS=darwin
+          export GOARCH=${{ matrix.arch }}
+          export CGO_ENABLED=1
+          go build -v -o say .
+          tar czvf say-darwin-${{ matrix.arch }}.tar.gz say
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: say-darwin-${{ matrix.arch }}
+          path: say-darwin-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Release
+    needs:
+      - build_linux
+      - build_windows
+      - build_darwin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' | while read file; do
+            echo "Checksum for $file"
+            openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"
+          done
+          ls -laR
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        with:
+          token: ${{ secrets.GH_RELEASE_TOKEN }}
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.sha256
+          generate_release_notes: true
