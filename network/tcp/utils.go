@@ -24,6 +24,16 @@ type framedConn struct {
 	mu sync.Mutex
 }
 
+// WriteFrame serializes framed writes across goroutines sharing the same connection.
+func (fc *framedConn) WriteFrame(t byte, payload []byte) error {
+	if fc == nil {
+		return fmt.Errorf("framedConn is nil")
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return writeFrame(fc.Conn, t, payload)
+}
+
 // writeFrame encodes and writes a single framed message as:
 // [1 byte type][2 bytes big-endian length][payload bytes].
 func writeFrame(w net.Conn, t byte, payload []byte) error {
