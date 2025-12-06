@@ -16,11 +16,17 @@ external Yggdrasil daemon or web stack.
 
 ## Filters
 
-![Red](./red.webm)
+<video src="./red.webm" width="360" muted autoplay loop playsinline>
+  Your browser does not support the video tag.
+</video>
 
-![Pink](./pink.webm)
+<video src="./pink.webm" width="360" muted autoplay loop playsinline>
+  Your browser does not support the video tag.
+</video>
 
-![Blue](./blue.webm)
+<video src="./blue.webm" width="360" muted autoplay loop playsinline>
+  Your browser does not support the video tag.
+</video>
 
 ## Features
 
