@@ -16,15 +16,15 @@ external Yggdrasil daemon or web stack.
 
 ## Filters
 
-<video src="./red.webm" width="360" muted autoplay loop playsinline>
+<video src="https://github.com/svanichkin/say/blob/main/red.webm" width="360" muted autoplay loop playsinline>
   Your browser does not support the video tag.
 </video>
 
-<video src="./pink.webm" width="360" muted autoplay loop playsinline>
+<video src="https://github.com/svanichkin/say/blob/main/pink.webm" width="360" muted autoplay loop playsinline>
   Your browser does not support the video tag.
 </video>
 
-<video src="./blue.webm" width="360" muted autoplay loop playsinline>
+<video src="https://github.com/svanichkin/say/blob/main/blue.webm" width="360" muted autoplay loop playsinline>
   Your browser does not support the video tag.
 </video>
 
