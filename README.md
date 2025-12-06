@@ -4,8 +4,8 @@ Say is a terminal‑first voice and video call utility that builds an embedded
 Yggdrasil node and speaks directly to other peers over the Ygg overlay network.
 Audio is captured with [malgo](https://github.com/gen2brain/malgo) (miniaudio),
 encoded as G.722, and optionally sent via UDP for lower latency. Video frames are
-sourced through [gocam](https://github.com/svanichkin/gocam), compressed to JPEG,
-and rendered in the current terminal session using Unicode half blocks.
+sourced through [gocam](https://github.com/svanichkin/gocam), compressed then 
+rendered in the current terminal session using Unicode glyphs.
 
 ![Screenshot](./sample.png)
 
@@ -17,8 +17,7 @@ external Yggdrasil daemon or web stack.
 
 - Embedded Yggdrasil node – no separate daemon required.
 - G.722 voice (8 kHz / 48 kbps) with configurable frame size and UDP/TCP transports.
-- Optional JPEG video streaming directly in the terminal (single or two‑pane
-  layout).
+- Video streaming directly in the terminal two‑pane layout.
 - Simple newline text bridge when media is disabled.
 - Friend list bootstrap via the same `config.json` that holds the Yggdrasil
   settings.
@@ -49,12 +48,14 @@ go run .
 
 ## Configuration
 
-Say stores its configuration at `$XDG_CONFIG_HOME/say/config.json` (or
-`~/.config/say/config.json` if `XDG_CONFIG_HOME` is unset). You can point to a
-different path with `-config /path/to/config.json`.
+Say stores its configuration under your OS config directory: on Linux this is
+typically `$XDG_CONFIG_HOME/say/config.json` (or `~/.config/say/config.json` if
+`XDG_CONFIG_HOME` is unset), while on macOS it resolves to
+`~/Library/Application Support/say/config.json`. You can point to a different
+path with `-config /path/to/config.json`.
 
 The configuration file is a regular Yggdrasil node config plus an optional
-`friends` array that Say understands:
+`contacts_dir` key understood by Say:
 
 ```json
 {
@@ -62,14 +63,33 @@ The configuration file is a regular Yggdrasil node config plus an optional
     "tls://example.yggnode.net:443",
     "quic://203.0.113.10:8443"
   ],
-  "friends": [
-    {"name": "Alice", "address": "200:abcd:..."}
-  ]
+  "contacts_dir": "/Users/me/Contacts"
 }
 ```
 
-Pass the same config file to Say – the embedded node uses it to bootstrap, and
-friends (if present) are printed when verbose mode is on.
+Pass the same config file to Say – the embedded node uses it to bootstrap. When
+`contacts_dir` is supplied (or overridden via `-contacts`), Say recursively
+scans that directory. Each friend is represented as a folder that contains a
+`say` subdirectory with text files holding IPv6 addresses:
+
+```
+~/Contacts/
+  Alice G/
+    say/
+      laptop
+  Bob D/
+    say/
+      phone
+      console
+```
+
+- Если в `say` лежит единственный файл, его адрес добавляется как `Alice G`.
+- Если файлов несколько, каждый превращается в отдельный контакт вида
+  `Bob D/phone`, `Bob D/console`, где часть после слеша берётся из имени файла.
+
+При клике друга по имени в CLI используйте те же подписи (`"Bob D/phone"`).
+Если вы запускаете `say` с `-contacts /path/to/contacts`, этот путь сохраняется
+в активный конфиг, поэтому повторный запуск может обойтись без флага.
 
 The utility automatically updates the list of peers each time it starts.
 
@@ -88,14 +108,6 @@ dial you:
 ./say "[200:abcd:1234:...]"
 ```
 
-To switch between multiple profiles quickly, pass the config name as the first
-argument (no flag needed):
-
-```sh
-./say config2              # uses $XDG_CONFIG_HOME/say/config2.json
-./say config2 "[200:...]"  # same config, but also dials the peer
-```
-
 Optionally pass the port as a separate argument, in any order:
 
 ```sh
@@ -103,15 +115,18 @@ Optionally pass the port as a separate argument, in any order:
 ./say 7777 "[200:abcd:1234:...]"
 ```
 
-If your peer is referenced by a bare hostname with no dots or colons, include
-the port explicitly (e.g. `./say friend 7777`) so the CLI knows it is a dial
-target rather than a config profile.
+Select alternative configs explicitly via `-config work` (which maps to
+`$XDG_CONFIG_HOME/say/work.json`). Positional arguments are interpreted as
+either a dial target (`"[200:abcd:...]"`) or a friend name from contacts
+(`"Alice G"`, `"Bob D/phone"`). To run the server with another profile, always
+pass `-config`; bare tokens are no longer treated as profile names.
 
 Audio and video are always enabled when hardware is present; no extra flags are
 required. Relevant CLI switches:
 
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
+- `-contacts` – override the contacts directory defined in the config.
 - `-v` – verbose logging.
 - Color filters: `-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-purple`, `-pink`, `-gray`, `-bw` – apply a tinted (or neutral) monochrome filter to the local/remote viewports (purely visual, codec stream stays untouched). Use at most one flag; if several are present the last one wins.
 

@@ -58,6 +58,8 @@ github.com/svanichkin/gocam v0.0.1 h1:a57ukK/RdNZr1+yIn5hfaxM9pWupQn9j0kwSbRRdJn
 github.com/svanichkin/gocam v0.0.1/go.mod h1:7N3JFSUQA/c3JTgxVVgn2cXJs3xEDb7rIAOlA8VpIHs=
 github.com/svanichkin/gocam v0.1.0 h1:aepAppxSm8uG0D7mVlVYn4alAXHUlSYS8UGNPzzKnNw=
 github.com/svanichkin/gocam v0.1.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
+github.com/svanichkin/ygg v0.4.5 h1:yKj2KXMgl05pAmcV0HITtS10ZMCX/Ve4vCg25mM5dOU=
+github.com/svanichkin/ygg v0.4.5/go.mod h1:IzG5vC5FDAjctgegMrfzcA879thHbUUUSy6bhIlGDvI=
 github.com/twmb/murmur3 v1.1.6 h1:mqrRot1BRxm+Yct+vavLMou2/iJt0tNVTTC0QoIjaZg=
 github.com/twmb/murmur3 v1.1.6/go.mod h1:Qq/R7NUyOfr65zD+6Q5IHKsJLwP7exErjN6lyyq3OSQ=
 github.com/yggdrasil-network/yggdrasil-go v0.5.12 h1:SaQ8d59JP+uFy+nOWXTx1ETM5r2uCfe1Gt/d+IodHJw=

@@ -20,12 +20,12 @@ import (
 	"syscall"
 	"time"
 
-	ygg "github.com/svanichkin/Ygg"
+	ygg "github.com/svanichkin/ygg"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "say: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[say] %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -78,7 +78,7 @@ func run() (err error) {
 	}
 
 	initialStatus := "Server starting…"
-	if opts.DialAddr != "" {
+	if opts.Mode == conf.ModeClient {
 		initialStatus = "Client starting…"
 	}
 
@@ -143,14 +143,33 @@ func run() (err error) {
 		}
 	}
 
-	friends, loadErr := conf.LoadFriendsFromConfig(opts.ConfigPath)
+	_, contactsFromCfg, loadErr := conf.LoadFriendsFromConfig(opts.ConfigPath)
 	if loadErr != nil {
 		log.Printf("[cfg] couldn't read friends from %s: %v", opts.ConfigPath, loadErr)
-	} else if len(friends) > 0 {
-		logs.LogV("[cfg] friends loaded:")
-		if conf.Verbose {
-			for _, f := range friends {
-				log.Printf("  - %s <%s>", f.Name, f.Address)
+	}
+	friends := make([]conf.Friend, 0)
+	contactsDir := opts.ContactsDir
+	if contactsDir == "" {
+		contactsDir = contactsFromCfg
+	}
+	if contactsDir != "" {
+		if contactFriends, err := conf.LoadFriendsFromContacts(contactsDir); err != nil {
+			log.Printf("[contacts] %v", err)
+		} else if len(contactFriends) > 0 {
+			logs.LogV("[contacts] %d entries from %s", len(contactFriends), contactsDir)
+			friends = mergeFriendLists(friends, contactFriends)
+		}
+	}
+	if opts.FriendName != "" {
+		if opts.Mode != conf.ModeClient {
+			log.Printf("[contacts] friend %q ignored in listen mode", opts.FriendName)
+		} else {
+			addr := lookupFriendAddress(friends, opts.FriendName)
+			if addr == "" {
+				return fmt.Errorf("friend %q not found in contacts", opts.FriendName)
+			}
+			if opts.DialAddr == "" {
+				opts.DialAddr = addr
 			}
 		}
 	}
@@ -204,6 +223,39 @@ func run() (err error) {
 	}
 }
 
+func lookupFriendAddress(friends []conf.Friend, name string) string {
+	for _, f := range friends {
+		if strings.EqualFold(f.Name, name) {
+			return strings.TrimSpace(f.Address)
+		}
+	}
+	return ""
+}
+
+func mergeFriendLists(base, extra []conf.Friend) []conf.Friend {
+	if len(extra) == 0 {
+		return base
+	}
+	merged := make([]conf.Friend, 0, len(base)+len(extra))
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	appendUnique := func(list []conf.Friend) {
+		for _, f := range list {
+			key := strings.ToLower(strings.TrimSpace(f.Name))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, f)
+		}
+	}
+	appendUnique(base)
+	appendUnique(extra)
+	return merged
+}
+
 func initLogSink(configPath string) (io.Writer, func() error, string, error) {
 	dir := filepath.Dir(configPath)
 	if dir == "" {
@@ -228,12 +280,11 @@ func formatSayHint(addr string, port int) string {
 	if host == "" {
 		host = "<address>"
 	}
-	if port != network.DefaultListenPort && port > 0 {
-		quoted := host
+	if port > 0 && port != network.DefaultListenPort {
 		if strings.Contains(host, ":") {
-			quoted = fmt.Sprintf("[%s]", host)
+			host = fmt.Sprintf("[%s]", host)
 		}
-		return fmt.Sprintf("say \"%s\" %d", quoted, port)
+		host = fmt.Sprintf("%s:%d", host, port)
 	}
 	return fmt.Sprintf("say \"%s\"", host)
 }

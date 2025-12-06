@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	ygg "github.com/svanichkin/Ygg"
+	ygg "github.com/svanichkin/ygg"
 )
 
 // StartSignalClientTCP connects to peerAddr (Yggdrasil IPv6) on the given port and performs

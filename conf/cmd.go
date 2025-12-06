@@ -2,8 +2,9 @@ package conf
 
 import (
 	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +37,24 @@ type Friend struct {
 // cfg is a bare filename without an extension (e.g. "profile"), it is treated as
 // profile name inside the default config directory ("profile.json").
 func resolveConfigPath(cfg string) (string, error) {
+	resolved, err := resolveConfigPathRaw(cfg)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(resolved)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// previewConfigPath resolves the config path without touching the filesystem.
+// It is used to test whether a profile already exists before finalizing the choice.
+func previewConfigPath(cfg string) (string, error) {
+	return resolveConfigPathRaw(cfg)
+}
+
+func resolveConfigPathRaw(cfg string) (string, error) {
 	raw := strings.TrimSpace(cfg)
 
 	switch {
@@ -55,7 +74,6 @@ func resolveConfigPath(cfg string) (string, error) {
 
 	cfg = raw
 
-	// Expand leading ~ if user passed it
 	if strings.HasPrefix(cfg, "~/") {
 		h, err := os.UserHomeDir()
 		if err == nil {
@@ -65,11 +83,6 @@ func resolveConfigPath(cfg string) (string, error) {
 	abs, err := filepath.Abs(cfg)
 	if err == nil {
 		cfg = abs
-	}
-	// Ensure parent directory exists
-	dir := filepath.Dir(cfg)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
 	}
 	return cfg, nil
 }
@@ -114,32 +127,117 @@ func ParseDialTarget(raw string, defPort int) (string, int, error) {
 	return strings.Trim(s, "[]"), defPort, nil
 }
 
-// LoadFriendsFromConfig reads the user config file and extracts the optional "friends"
-// array containing known peers. It does not modify or influence how Yggdrasil itself
-// interprets the same config file.
-func LoadFriendsFromConfig(cfgPath string) ([]Friend, error) {
+// LoadFriendsFromConfig currently only extracts the optional "contacts_dir" value.
+// Inline friend definitions have been deprecated in favor of filesystem contacts.
+func LoadFriendsFromConfig(cfgPath string) ([]Friend, string, error) {
 	if cfgPath == "" {
-		return nil, nil
+		return nil, "", nil
 	}
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, "", err
+	}
+	var contactsDir string
+	if v, ok := raw["contacts_dir"]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			contactsDir = strings.TrimSpace(s)
+		}
+	}
+	return nil, contactsDir, nil
+}
+
+// LoadFriendsFromContacts recursively scans the provided directory for friend folders.
+// Each folder that contains a file named "say" contributes a friend entry where the
+// folder name is treated as the friend name and the file contents hold the IPv6 address.
+func LoadFriendsFromContacts(root string) ([]Friend, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, nil
+	}
+	resolved, err := resolvePathAllowingHome(root)
+	if err != nil {
 		return nil, err
 	}
-	var out []Friend
-	if v, ok := raw["friends"]; ok && v != nil {
-		bs, err := json.Marshal(v)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(bs, &out); err != nil {
-			return nil, err
-		}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	if !info.IsDir() {
+		return nil, fmt.Errorf("contacts path %q is not a directory", resolved)
+	}
+	var friends []Friend
+	seen := make(map[string]struct{})
+	err = filepath.WalkDir(resolved, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(d.Name(), "say") {
+			return nil
+		}
+		friendFolder := filepath.Dir(path)
+		friendName := filepath.Base(friendFolder)
+		if friendName == "" {
+			return filepath.SkipDir
+		}
+		addFriend := func(name, addr string) {
+			key := normalizeFriendKey(name)
+			if key == "" || addr == "" {
+				return
+			}
+			if _, ok := seen[key]; ok {
+				return
+			}
+			seen[key] = struct{}{}
+			friends = append(friends, Friend{Name: name, Address: addr})
+		}
+		if !d.IsDir() {
+			addr, err := readAddressFile(path)
+			if err != nil {
+				return err
+			}
+			addFriend(friendName, addr)
+			return nil
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		var devices []fs.DirEntry
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			devices = append(devices, entry)
+		}
+		if len(devices) == 0 {
+			return filepath.SkipDir
+		}
+		if len(devices) == 1 {
+			addr, err := readAddressFile(filepath.Join(path, devices[0].Name()))
+			if err != nil {
+				return err
+			}
+			addFriend(friendName, addr)
+			return filepath.SkipDir
+		}
+		for _, entry := range devices {
+			addr, err := readAddressFile(filepath.Join(path, entry.Name()))
+			if err != nil {
+				return err
+			}
+			label := fmt.Sprintf("%s/%s", friendName, entry.Name())
+			addFriend(label, addr)
+		}
+		return filepath.SkipDir
+	})
+	if err != nil {
+		return nil, err
+	}
+	return friends, nil
 }
 
 // HostnameOr returns the system hostname or the provided default string on failure.
@@ -157,97 +255,152 @@ type AppOptions struct {
 	ConfigPath  string
 	ListenPort  int
 	DialAddr    string
+	FriendName  string
+	ContactsDir string
+	Mode        AppMode
 	ColorFilter string
+}
+
+// AppMode describes whether the CLI determined that Say should run as client or server.
+type AppMode int
+
+const (
+	ModeAuto AppMode = iota
+	ModeServer
+	ModeClient
+)
+
+// ParseCLI parses command-line flags into an AppOptions structure and resolves
+// the final configuration path. It performs only argument parsing and normalization.
+
+type flagParseState struct {
+	contactsOverride bool
 }
 
 // ParseCLI parses command-line flags into an AppOptions structure and resolves
 // the final configuration path. It performs only argument parsing and normalization.
 func ParseCLI() (*AppOptions, error) {
-	opts := &AppOptions{}
+	opts := &AppOptions{ListenPort: network.DefaultListenPort}
 
-	flag.BoolVar(&opts.Verbose, "v", false, "enable verbose logging")
-	flag.StringVar(&opts.ConfigPath, "config", "", "path to config.json (empty = auto)")
-	flag.IntVar(&opts.ListenPort, "port", network.DefaultListenPort, "TCP/UDP port for incoming p2p")
-	colorFlagPtrs := make(map[string]*bool, len(colorFilterKeys))
-	for _, key := range colorFilterKeys {
-		colorFlagPtrs[key] = flag.Bool(key, false, fmt.Sprintf("render viewport with %s tint", key))
+	rawArgs := compactArgs(os.Args[1:])
+	noArgs := len(rawArgs) == 0
+	flagTokens, consumed := collectDashPrefixedArgs(rawArgs)
+	state := &flagParseState{}
+	if err := applyFlagTokens(flagTokens, opts, state); err != nil {
+		return nil, err
 	}
-	flag.Parse()
-
-	for _, key := range colorFilterKeys {
-		if ptr := colorFlagPtrs[key]; ptr != nil && *ptr {
-			opts.ColorFilter = key
+	if noArgs {
+		if err := opts.setMode(ModeServer); err != nil {
+			return nil, err
+		}
+		if opts.ConfigPath == "" {
+			if dir, err := defaultConfigDir(); err == nil {
+				opts.ConfigPath = filepath.Join(dir, "config.json")
+			}
 		}
 	}
-
-	extraArgs := flag.Args()
-	if filter, remaining := extractColorFilterArg(extraArgs); filter != "" {
+	extraArgs := remainingArgs(rawArgs, consumed)
+	var filter string
+	filter, extraArgs = extractColorFilterArg(extraArgs)
+	if filter != "" {
 		opts.ColorFilter = filter
-		extraArgs = remaining
 	}
-	if opts.ConfigPath == "" {
-		if cfg, remaining := extractConfigArg(extraArgs); cfg != "" {
-			opts.ConfigPath = cfg
-			extraArgs = remaining
-		}
-	}
-
-	if port, remaining := extractListenPortArg(extraArgs); port > 0 {
+	var port int
+	port, extraArgs = extractListenPortArg(extraArgs)
+	if port > 0 {
 		opts.ListenPort = port
-		extraArgs = remaining
 	}
 
-	opts.DialAddr = parseDialArgv(extraArgs)
+	configArg := opts.ConfigPath
+	var friendName string
+	var pendingArg string
+	var pendingDial bool
+	remaining := extraArgs
+	if len(remaining) > 0 {
+		if len(remaining) > 1 {
+			return nil, fmt.Errorf("unexpected extra positional arguments: %v", remaining[1:])
+		}
+		if looksLikePort(remaining[0]) {
+			return nil, fmt.Errorf("extra numeric argument %q", remaining[0])
+		}
+		pendingArg = remaining[0]
+		pendingDial = isLikelyDial(pendingArg)
+	}
 
-	// Normalize config path
-	resolvedCfg, err := resolveConfigPath(opts.ConfigPath)
+	resolvedCfg, err := resolveConfigPath(configArg)
 	if err != nil {
 		return nil, fmt.Errorf("config path error: %w", err)
 	}
 	opts.ConfigPath = resolvedCfg
+	var contactsFromCfg string
+	if _, cfgDir, err := LoadFriendsFromConfig(resolvedCfg); err == nil {
+		contactsFromCfg = strings.TrimSpace(cfgDir)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	if opts.ContactsDir != "" {
+		if state.contactsOverride {
+			persistContactsDir(resolvedCfg, opts.ContactsDir)
+		}
+	} else if contactsFromCfg != "" {
+		opts.ContactsDir = contactsFromCfg
+	}
+	effectiveContactsDir := opts.ContactsDir
+	if pendingArg != "" {
+		if pendingDial {
+			if opts.DialAddr != "" {
+				return nil, fmt.Errorf("dial address already provided")
+			}
+			opts.DialAddr = pendingArg
+			if err := opts.setMode(ModeClient); err != nil {
+				return nil, err
+			}
+		} else {
+			if effectiveContactsDir == "" {
+				return nil, fmt.Errorf("friend %q requires contacts_dir", pendingArg)
+			}
+			friendsPreview, err := LoadFriendsFromContacts(effectiveContactsDir)
+			if err != nil {
+				return nil, err
+			}
+			if !friendExistsByName(friendsPreview, pendingArg) {
+				return nil, fmt.Errorf("friend %q not found in contacts", pendingArg)
+			}
+			friendName = pendingArg
+			if err := opts.setMode(ModeClient); err != nil {
+				return nil, err
+			}
+		}
+	}
+	opts.FriendName = friendName
+
+	if opts.Mode == ModeAuto {
+		if opts.DialAddr == "" && friendName == "" {
+			if err := opts.setMode(ModeServer); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if opts.Mode == ModeAuto {
+		return nil, fmt.Errorf("unable to determine mode from arguments")
+	}
+	if opts.Mode == ModeClient && opts.DialAddr == "" && friendName == "" {
+		return nil, fmt.Errorf("client mode requires friend name or dial address")
+	}
 
 	Verbose = opts.Verbose
 	return opts, nil
 }
 
-func parseDialArgv(args []string) string {
-	if len(args) == 0 {
-		return ""
+func (opts *AppOptions) setMode(mode AppMode) error {
+	if mode == ModeAuto {
+		return nil
 	}
-	if len(args) == 1 {
-		return strings.TrimSpace(args[0])
+	if opts.Mode == ModeAuto || opts.Mode == mode {
+		opts.Mode = mode
+		return nil
 	}
-
-	var (
-		host string
-		port string
-	)
-
-	for _, arg := range args {
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			continue
-		}
-		if host == "" && !looksLikePort(arg) {
-			host = arg
-			continue
-		}
-		if port == "" && looksLikePort(arg) {
-			port = arg
-			continue
-		}
-		if host == "" {
-			host = arg
-		}
-	}
-
-	if host == "" {
-		return strings.TrimSpace(args[0])
-	}
-	if port == "" {
-		return host
-	}
-	return stringifyHostPort(host, port)
+	return fmt.Errorf("conflicting mode request: %v -> %v", opts.Mode, mode)
 }
 
 func looksLikePort(s string) bool {
@@ -264,26 +417,6 @@ func looksLikePort(s string) bool {
 	return n > 0 && n <= 65535
 }
 
-func stringifyHostPort(host, port string) string {
-	h := strings.TrimSpace(host)
-	p := strings.TrimSpace(port)
-	if h == "" || p == "" {
-		return h
-	}
-
-	raw := strings.Trim(h, "[]")
-	if strings.HasPrefix(h, "[") && strings.HasSuffix(h, "]") {
-		return fmt.Sprintf("%s:%s", h, p)
-	}
-	if ip := net.ParseIP(raw); ip != nil && ip.To4() == nil && strings.Contains(raw, ":") {
-		return fmt.Sprintf("[%s]:%s", raw, p)
-	}
-	if strings.Contains(h, ":") {
-		return fmt.Sprintf("[%s]:%s", raw, p)
-	}
-	return fmt.Sprintf("%s:%s", h, p)
-}
-
 func extractColorFilterArg(args []string) (string, []string) {
 	if len(args) == 0 {
 		return "", args
@@ -291,12 +424,19 @@ func extractColorFilterArg(args []string) (string, []string) {
 	filtered := make([]string, 0, len(args))
 	var filter string
 	for _, arg := range args {
-		normalized := normalizeColorFlag(arg)
-		if normalized != "" {
-			filter = normalized
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" {
 			continue
 		}
-		filtered = append(filtered, arg)
+		if strings.HasPrefix(trimmed, "-") {
+			if normalized := normalizeColorFlag(trimmed); normalized != "" {
+				filter = normalized
+				continue
+			}
+			filtered = append(filtered, trimmed)
+			continue
+		}
+		filtered = append(filtered, trimmed)
 	}
 	return filter, filtered
 }
@@ -330,45 +470,278 @@ func defaultConfigDir() (string, error) {
 	return filepath.Join(d, "say"), nil
 }
 
-func extractConfigArg(args []string) (string, []string) {
+func extractListenPortArg(args []string) (int, []string) {
+	if len(args) == 0 {
+		return 0, args
+	}
+	filtered := make([]string, 0, len(args))
+	var port int
+	for _, raw := range args {
+		token := strings.TrimSpace(raw)
+		if token == "" {
+			continue
+		}
+		if port == 0 && looksLikePort(token) {
+			if p, err := strconv.Atoi(token); err == nil {
+				port = p
+				continue
+			}
+		}
+		filtered = append(filtered, token)
+	}
+	return port, filtered
+}
+
+func compactArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for _, raw := range args {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func extractDialAddressArg(args []string) (string, []string) {
 	if len(args) == 0 {
 		return "", args
 	}
-	first := strings.TrimSpace(args[0])
-	if first == "" {
-		return "", args[1:]
+	filtered := make([]string, 0, len(args))
+	var dial string
+	consumed := false
+	for _, token := range args {
+		trimmed := strings.TrimSpace(token)
+		if trimmed == "" {
+			continue
+		}
+		if !consumed && isLikelyDial(trimmed) {
+			dial = trimmed
+			consumed = true
+			continue
+		}
+		filtered = append(filtered, trimmed)
 	}
-	if strings.HasPrefix(first, "-") {
-		return "", args
-	}
-
-	if strings.ContainsRune(first, os.PathSeparator) || strings.Contains(first, "/") || strings.HasSuffix(first, ".json") {
-		return first, args[1:]
-	}
-	if looksLikePort(first) || looksLikeAddress(first) {
-		return "", args
-	}
-	return first, args[1:]
+	return dial, filtered
 }
 
-func extractListenPortArg(args []string) (int, []string) {
-	if len(args) != 1 {
-		return 0, args
-	}
-	token := strings.TrimSpace(args[0])
-	if !looksLikePort(token) {
-		return 0, args
-	}
-	port, err := strconv.Atoi(token)
-	if err != nil {
-		return 0, args
-	}
-	return port, args[:0]
-}
-
-func looksLikeAddress(token string) bool {
+func isLikelyDial(token string) bool {
 	if token == "" {
 		return false
 	}
-	return strings.ContainsAny(token, ":[].")
+	if looksLikePort(token) {
+		return false
+	}
+	if strings.ContainsAny(token, "[]:") {
+		return true
+	}
+	return strings.Contains(token, ".")
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	return false
+}
+
+func readAddressFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	addr := strings.TrimSpace(string(b))
+	return addr, nil
+}
+
+func normalizeFriendKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func resolvePathAllowingHome(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		h, err := os.UserHomeDir()
+		if err == nil {
+			path = filepath.Join(h, path[2:])
+		}
+	}
+	return filepath.Abs(path)
+}
+
+func persistContactsDir(configPath, contactsDir string) {
+	if contactsDir == "" || configPath == "" {
+		return
+	}
+	data := map[string]any{}
+	content, err := os.ReadFile(configPath)
+	if err == nil && len(content) > 0 {
+		_ = json.Unmarshal(content, &data)
+	}
+	if prev, ok := data["contacts_dir"].(string); ok && prev == contactsDir {
+		return
+	}
+	data["contacts_dir"] = contactsDir
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(configPath, append(b, '\n'), 0o644)
+}
+
+func friendExistsByName(friends []Friend, name string) bool {
+	target := normalizeFriendKey(name)
+	if target == "" {
+		return false
+	}
+	for _, f := range friends {
+		if normalizeFriendKey(f.Name) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func collectDashPrefixedArgs(args []string) ([]string, map[int]struct{}) {
+	consumed := make(map[int]struct{})
+	if len(args) == 0 {
+		return nil, consumed
+	}
+	flags := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if token == "--" {
+			consumed[i] = struct{}{}
+			break
+		}
+		if !strings.HasPrefix(token, "-") || token == "-" {
+			continue
+		}
+		consumed[i] = struct{}{}
+		keyToken := token
+		if idx := strings.Index(token, "="); idx != -1 {
+			keyToken = token[:idx]
+		}
+		key := normalizeFlagKey(keyToken)
+		combined := token
+		if !strings.Contains(token, "=") && flagRequiresValue(key) && i+1 < len(args) {
+			next := args[i+1]
+			if next != "--" && !strings.HasPrefix(next, "-") {
+				consumed[i+1] = struct{}{}
+				combined = fmt.Sprintf("%s=%s", token, next)
+				i++
+			}
+		}
+		flags = append(flags, combined)
+	}
+	return flags, consumed
+}
+
+func remainingArgs(args []string, consumed map[int]struct{}) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	extra := make([]string, 0, len(args))
+	for idx, token := range args {
+		if _, ok := consumed[idx]; ok {
+			continue
+		}
+		trimmed := strings.TrimSpace(token)
+		if trimmed == "" {
+			continue
+		}
+		extra = append(extra, trimmed)
+	}
+	return extra
+}
+
+func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) error {
+	for _, token := range tokens {
+		key, value, hasValue := splitFlagToken(token)
+		switch key {
+		case "v", "verbose":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -v: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.Verbose = boolVal
+		case "config":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-config requires a value")
+			}
+			if opts.ConfigPath != "" && opts.ConfigPath != value {
+				return fmt.Errorf("-config specified multiple times")
+			}
+			opts.ConfigPath = value
+		case "contacts":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-contacts requires a value")
+			}
+			opts.ContactsDir = value
+			if state != nil {
+				state.contactsOverride = true
+			}
+			if err := opts.setMode(ModeClient); err != nil {
+				return err
+			}
+		case "port":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-port requires a value")
+			}
+			p, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid port %q", value)
+			}
+			if p <= 0 || p > 65535 {
+				return fmt.Errorf("port %d out of range", p)
+			}
+			opts.ListenPort = p
+		default:
+			if key == "" {
+				return fmt.Errorf("unknown flag %q", token)
+			}
+			if _, ok := colorFilterSet[key]; ok {
+				opts.ColorFilter = key
+				continue
+			}
+			return fmt.Errorf("unknown flag %q", token)
+		}
+	}
+	return nil
+}
+
+func splitFlagToken(token string) (string, string, bool) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(trimmed, "=", 2)
+	key := normalizeFlagKey(parts[0])
+	if len(parts) == 1 {
+		return key, "", false
+	}
+	return key, parts[1], true
+}
+
+func normalizeFlagKey(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimLeft(trimmed, "-")
+	return strings.ToLower(trimmed)
+}
+
+func flagRequiresValue(key string) bool {
+	switch key {
+	case "config", "contacts", "port":
+		return true
+	default:
+		return false
+	}
 }

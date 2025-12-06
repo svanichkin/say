@@ -3,7 +3,7 @@ package network
 import (
 	"log"
 
-	ygg "github.com/svanichkin/Ygg"
+	ygg "github.com/svanichkin/ygg"
 )
 
 // SetupYgg initializes an embedded Yggdrasil node using the provided configuration.
