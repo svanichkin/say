@@ -92,13 +92,12 @@ scans that directory. Each friend is represented as a folder that contains a
       console
 ```
 
-- Если в `say` лежит единственный файл, его адрес добавляется как `Alice G`.
-- Если файлов несколько, каждый превращается в отдельный контакт вида
-  `Bob D/phone`, `Bob D/console`, где часть после слеша берётся из имени файла.
+- If in folder `say` only one file, its IPv6 address resolves as `Alice G` from example above.
+- If there are several files, each of them becomes
+  `Bob D/phone`, `Bob D/console` from example above.
 
-При клике друга по имени в CLI используйте те же подписи (`"Bob D/phone"`).
-Если вы запускаете `say` с `-contacts /path/to/contacts`, этот путь сохраняется
-в активный конфиг, поэтому повторный запуск может обойтись без флага.
+If you run `say` with the `-contacts /path/to/contacts` flag, the path will be saved 
+in the configuration file, so next time you can run `say` without the `-contacts` flag. 
 
 The utility automatically updates the list of peers each time it starts.
 
