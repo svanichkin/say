@@ -14,6 +14,14 @@ The project is intended as a lightweight experiment: share your Yggdrasil
 address, run `say` on both ends, and you have voice/video without deploying an
 external Yggdrasil daemon or web stack.
 
+## Filters
+
+![Red](./red.webm)
+
+![Pink](./pink.webm)
+
+![Blue](./blue.webm)
+
 ## Features
 
 - Embedded Yggdrasil node – no separate daemon required.
