@@ -1,7 +1,8 @@
 # Say
 
 Say is a terminal‑first voice and video call utility that builds an embedded
-Yggdrasil node and speaks directly to other peers over the Ygg overlay network.
+Yggdrasil node via [ygg](https://github.com/svanichkin/ygg) and speaks directly
+to other peers over the Ygg overlay network.
 Audio is captured with [malgo](https://github.com/gen2brain/malgo) (miniaudio),
 encoded as G.722, and optionally sent via UDP for lower latency. Video frames are
 sourced through [gocam](https://github.com/svanichkin/gocam), compressed then 
