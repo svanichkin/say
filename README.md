@@ -48,7 +48,7 @@ external Yggdrasil daemon or web stack.
 ```sh
 git clone https://github.com/svanichkin/say.git
 cd Say
-go build -o say ./...
+go build -o say .
 ```
 
 You can also run the tool without building a binary:
@@ -135,19 +135,20 @@ The program prints your Yggdrasil address. Share it with a friend and have them
 dial you:
 
 ```sh
-./say "[200:abcd:1234:...]"
+./say "200:abcd:1234:..."
 ```
 
-Optionally pass the port as a separate argument, in any order:
+Optionally pass the port as инлине ор separate argument, in any order:
 
 ```sh
-./say "[200:abcd:1234:...]" 7777
-./say 7777 "[200:abcd:1234:...]"
+./say "[200:abcd:1234:...]:7777"
+./say 7777 "200:abcd:1234:..."
+./say "200:abcd:1234:..." 7777
 ```
 
 Select alternative configs explicitly via `-config work` (which maps to
 `$XDG_CONFIG_HOME/say/work.json`). Positional arguments are interpreted as
-either a dial target (`"[200:abcd:...]"`) or a friend name from contacts
+either a dial target (`"200:abcd:..."`) or a friend name from contacts
 (`"Alice G"`, `"Bob D/phone"`). To run the server with another profile, always
 pass `-config`; bare tokens are no longer treated as profile names.
 
@@ -167,20 +168,8 @@ bridge over the established TCP session.
 
 1. Both peers ensure their configs contain working Yggdrasil peers.
 2. Alice runs `./say`.
-3. Bob runs `./say "[alice-ygg-addr]"`.
+3. Bob runs `./say "alice-ygg-addr"`.
 4. Speak! Use `Ctrl+C` to terminate; the app restores the terminal state.
-
-## Development
-
-Standard Go tooling works:
-
-```sh
-go test ./...
-golangci-lint run       # if you use golangci-lint
-```
-
-Audio/video capture and terminal drawing depend on the current OS; on a headless
-machine you’ll need to mock or stub out the camera/microphone layers.
 
 ## License
 
