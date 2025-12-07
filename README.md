@@ -57,6 +57,26 @@ You can also run the tool without building a binary:
 go run .
 ```
 
+### Install from a GitHub release
+
+Clone the repository (or download `scripts/install-release.sh`) and run:
+
+```sh
+./scripts/install-release.sh
+```
+
+The script detects your platform, downloads the latest release artifact from
+GitHub, and installs `say` into a sensible default directory:
+
+- macOS/Linux/BSD: `$HOME/.local/bin` for non‑root users, `/usr/local/bin` otherwise.
+- Windows (MSYS/mingw/git-bash environments): `%USERPROFILE%\AppData\Local\Programs\say`.
+
+Override the target via `INSTALL_DIR=/custom/path ./scripts/install-release.sh`.
+Supply a specific tag with `VERSION=v0.4.0 ./scripts/install-release.sh`, or
+point to a fork using `REPO=myuser/say ./scripts/install-release.sh`. Ensure
+`curl`, `tar`, and (for Windows archives) `unzip` are available, and add the
+chosen install directory to your `PATH` if needed.
+
 ## Configuration
 
 Say stores its configuration under your OS config directory: on Linux this is
@@ -86,8 +106,7 @@ scans that directory. Each friend is represented as a folder that contains a
 ```
 ~/Contacts/
   Alice G/
-    say/
-      laptop
+      say
   Bob D/
     say/
       phone
