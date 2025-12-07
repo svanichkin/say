@@ -10,6 +10,8 @@ rendered in the current terminal session using Unicode glyphs.
 
 ![Screenshot](./sample.png)
 
+![Preview](./color.webp)
+
 The project is intended as a lightweight experiment: share your Yggdrasil
 address, run `say` on both ends, and you have voice/video without deploying an
 external Yggdrasil daemon or web stack.
@@ -92,13 +94,13 @@ scans that directory. Each friend is represented as a folder that contains a
       console
 ```
 
-- Если в `say` лежит единственный файл, его адрес добавляется как `Alice G`.
-- Если файлов несколько, каждый превращается в отдельный контакт вида
-  `Bob D/phone`, `Bob D/console`, где часть после слеша берётся из имени файла.
+- If the `say` directory holds a single file, its address is added as `Alice G`.
+- If there are multiple files, each becomes a separate contact such as
+  `Bob D/phone` or `Bob D/console`, where the suffix comes from the filename.
 
-При клике друга по имени в CLI используйте те же подписи (`"Bob D/phone"`).
-Если вы запускаете `say` с `-contacts /path/to/contacts`, этот путь сохраняется
-в активный конфиг, поэтому повторный запуск может обойтись без флага.
+When selecting a friend inside the CLI, use those exact labels (`"Bob D/phone"`).
+If you start `say` with `-contacts /path/to/contacts`, that path is persisted
+into the active config so future runs can omit the flag.
 
 The utility automatically updates the list of peers each time it starts.
 
