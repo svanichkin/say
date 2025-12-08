@@ -48,7 +48,7 @@ external Yggdrasil daemon or web stack.
 ```sh
 git clone https://github.com/svanichkin/say.git
 cd Say
-go build -o say .
+env CGO_ENABLED=1 go build -o say .
 ```
 
 You can also run the tool without building a binary:
