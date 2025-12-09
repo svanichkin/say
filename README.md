@@ -231,3 +231,7 @@ bridge over the established TCP session.
 ## License
 
 This project is distributed under the terms of the [MIT License](LICENSE).
+
+### Donate
+
+Monero 41uoDd1PNKm7j4LaBHHZ77ZPbEwEJzaRHhjEqFtKLZeWjd4sNfs3mtpbw1mcQrnNLBKWSJgui9ELEUz217Ui6kF13SmF4t5
