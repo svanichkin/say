@@ -69,6 +69,11 @@ main() {
 	esac
 	INSTALL_DIR="${INSTALL_DIR:-$default_dir}"
 
+	SUDO=""
+	if [ "$os" = "darwin" ] && [ "$INSTALL_DIR" = "/opt/local/bin" ] && [ "$(id -u)" -ne 0 ]; then
+		SUDO="sudo"
+	fi
+
 	local tag version
 	if [ "$REQUESTED_VERSION" = "latest" ]; then
 		tag="$(get_latest_tag)"
@@ -78,7 +83,7 @@ main() {
 	[ -n "$tag" ] || { echo "Failed to determine release tag"; exit 1; }
 	version="${tag#v}"
 
-	local archive_ext archive_name binary_name download_url tmpdir
+	local archive_ext archive_name binary_name download_url
 
 	# All release archives are named like:
 	#   say-darwin-amd64.tar.gz
@@ -96,7 +101,7 @@ main() {
 	download_url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
 
 	tmpdir="$(mktemp -d)"
-	trap 'rm -rf "$tmpdir"' EXIT
+	trap 'rm -rf "${tmpdir:-}"' EXIT
 
 	echo "Downloading ${download_url}"
 	curl -fL "$download_url" -o "${tmpdir}/${archive_name}"
@@ -109,9 +114,9 @@ main() {
 	fi
 
 	ensure_dir
-	install -m 755 "${tmpdir}/${binary_name}" "${INSTALL_DIR}/${binary_name}"
+	${SUDO:-} install -m 755 "${tmpdir}/${binary_name}" "${INSTALL_DIR}/${binary_name}"
 
-	echo "Installed ${binary_name} to ${INSTALL_DIR}"
+	echo "Binary installed to ${INSTALL_DIR}/${binary_name}"
 }
 
 main "$@"
