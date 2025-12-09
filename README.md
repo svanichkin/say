@@ -43,6 +43,34 @@ external Yggdrasil daemon or web stack.
   dev packages are available; on macOS you just need Xcode command line tools).
 - Permission to access camera and microphone for the terminal session.
 
+## Install manual
+
+Go to [Releases](https://github.com/svanichkin/say/releases) download adn start it
+
+## Install with install script from a GitHub release
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
+```
+
+OR
+
+```sh
+wget -qO- https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
+```
+
+The script detects your platform, downloads the latest release artifact from
+GitHub, and installs `say` into a sensible default directory:
+
+- macOS/Linux/BSD: `$HOME/.local/bin` for non‑root users, `/usr/local/bin` otherwise.
+- Windows (MSYS/mingw/git-bash environments): `%USERPROFILE%\AppData\Local\Programs\say`.
+
+Override the target via `INSTALL_DIR=/custom/path ./scripts/install-release.sh`.
+Supply a specific tag with `VERSION=v0.4.0 ./scripts/install-release.sh`, or
+point to a fork using `REPO=myuser/say ./scripts/install-release.sh`. Ensure
+`curl`, `tar`, and (for Windows archives) `unzip` are available, and add the
+chosen install directory to your `PATH` if needed.
+
 ## Installation with Go install
 
 Very simple for linux/macos
@@ -105,30 +133,6 @@ Windows with Powershell
 $env:CGO_ENABLED = "1"
 go run .
 ```
-
-## Install with install script from a GitHub release
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
-```
-
-OR
-
-```sh
-wget -qO- https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
-```
-
-The script detects your platform, downloads the latest release artifact from
-GitHub, and installs `say` into a sensible default directory:
-
-- macOS/Linux/BSD: `$HOME/.local/bin` for non‑root users, `/usr/local/bin` otherwise.
-- Windows (MSYS/mingw/git-bash environments): `%USERPROFILE%\AppData\Local\Programs\say`.
-
-Override the target via `INSTALL_DIR=/custom/path ./scripts/install-release.sh`.
-Supply a specific tag with `VERSION=v0.4.0 ./scripts/install-release.sh`, or
-point to a fork using `REPO=myuser/say ./scripts/install-release.sh`. Ensure
-`curl`, `tar`, and (for Windows archives) `unzip` are available, and add the
-chosen install directory to your `PATH` if needed.
 
 ## Configuration
 
