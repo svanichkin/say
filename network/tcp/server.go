@@ -7,9 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
-	"say/conf"
-	"say/logs"
-	"say/ui"
+	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/ui"
 	"strings"
 	"time"
 )

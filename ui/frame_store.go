@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"say/codec"
+	"github.com/svanichkin/say/codec"
 	"sync"
 	"time"
 )

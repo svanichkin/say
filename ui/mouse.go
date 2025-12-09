@@ -7,9 +7,9 @@ import (
 	"os"
 	"sync"
 
+	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/mediactrl"
 	"golang.org/x/term"
-	"say/logs"
-	"say/mediactrl"
 )
 
 type mouseEvent struct {

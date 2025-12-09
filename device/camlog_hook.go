@@ -4,7 +4,7 @@ import (
 	"log"
 	"strings"
 
-	"say/logs"
+	"github.com/svanichkin/say/logs"
 	_ "unsafe"
 )
 

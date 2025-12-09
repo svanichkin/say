@@ -8,7 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"say/network"
+	"github.com/svanichkin/say/network"
 	"strconv"
 	"strings"
 )

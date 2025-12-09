@@ -2,7 +2,7 @@ package logs
 
 import (
 	"log"
-	"say/conf"
+	"github.com/svanichkin/say/conf"
 )
 
 // LogV prints a formatted log message only when verbose logging is enabled.

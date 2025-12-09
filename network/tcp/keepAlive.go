@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"say/logs"
+	"github.com/svanichkin/say/logs"
 	"sync"
 	"time"
 )

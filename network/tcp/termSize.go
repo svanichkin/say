@@ -6,7 +6,7 @@ import (
 	"log"
 	"net"
 
-	"say/codec"
+	"github.com/svanichkin/say/codec"
 )
 
 // TermSize describes a viewport request in character cells.

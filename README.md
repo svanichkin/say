@@ -43,26 +43,67 @@ external Yggdrasil daemon or web stack.
   dev packages are available; on macOS you just need Xcode command line tools).
 - Permission to access camera and microphone for the terminal session.
 
-## Installation
+## Installation with Go install
+
+Very simple for linux/macos
+
+```sh
+CGO_ENABLED=1 go install github.com/svanichkin/say@latest
+```
+
+Windows with CMD
+
+```sh
+set CGO_ENABLED=1
+go install github.com/svanichkin/say@latest
+```
+
+Windows with Powershell
+
+```sh
+$env:CGO_ENABLED = "1"
+go install github.com/svanichkin/say@latest
+```
+
+## Installation with Git
 
 ```sh
 git clone https://github.com/svanichkin/say.git
 cd Say
-env CGO_ENABLED=1 go build -o say .
+make
 ```
 
-You can also run the tool without building a binary:
+You can also run the tool without building a binary linux/macos:
 
 ```sh
+env CGO_ENABLED=1 
 go run .
 ```
 
-### Install from a GitHub release
-
-Clone the repository (or download `scripts/install-release.sh`) and run:
+Windows with CMD
 
 ```sh
-./scripts/install-release.sh
+set CGO_ENABLED=1
+go run .
+```
+
+Windows with Powershell
+
+```sh
+$env:CGO_ENABLED = "1"
+go run .
+```
+
+## Install with install script from a GitHub release
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
+```
+
+OR
+
+```sh
+wget -qO- https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-release.sh | bash
 ```
 
 The script detects your platform, downloads the latest release artifact from

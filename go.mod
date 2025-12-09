@@ -1,4 +1,4 @@
-module say
+module github.com/svanichkin/say
 
 go 1.24.2
 

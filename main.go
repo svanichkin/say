@@ -10,15 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"say/conf"
-	"say/logs"
-	"say/network"
-	tcpsignal "say/network/tcp"
-	udptransport "say/network/udp"
-	"say/ui"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/network"
+	tcpsignal "github.com/svanichkin/say/network/tcp"
+	udptransport "github.com/svanichkin/say/network/udp"
+	"github.com/svanichkin/say/ui"
 
 	ygg "github.com/svanichkin/ygg"
 )

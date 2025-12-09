@@ -1,6 +1,6 @@
 package udp
 
-import "say/codec"
+import "github.com/svanichkin/say/codec"
 
 // initVideoCodec возвращает набор кодеков для локального предпросмотра и сетевой отправки.
 // Выделяем отдельную функцию, чтобы инициализация видеокодеков была симметрична audio.go.
