@@ -54,7 +54,12 @@ main() {
 				default_dir="./bin"
 			fi
 			;;
+		darwin)
+			# Install into MacPorts-style path
+			default_dir="/opt/local/bin"
+			;;
 		*)
+			# Linux / BSD fallback logic unchanged
 			if command -v id >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ] && [ -n "${HOME:-}" ]; then
 				default_dir="$HOME/.local/bin"
 			else
