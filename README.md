@@ -51,6 +51,12 @@ Very simple for linux/macos
 CGO_ENABLED=1 go install github.com/svanichkin/say@latest
 ```
 
+Then use
+
+```sh
+~/go/bin/say
+```
+
 Windows with CMD
 
 ```sh
@@ -65,11 +71,17 @@ $env:CGO_ENABLED = "1"
 go install github.com/svanichkin/say@latest
 ```
 
+Then use 
+
+```sh
+C:\Users\USERNAME\go\bin\say.exe
+```
+
 ## Installation with Git
 
 ```sh
 git clone https://github.com/svanichkin/say.git
-cd Say
+cd say
 make
 ```
 

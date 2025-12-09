@@ -74,15 +74,20 @@ main() {
 	version="${tag#v}"
 
 	local archive_ext archive_name binary_name download_url tmpdir
+
+	# All release archives are named like:
+	#   say-darwin-amd64.tar.gz
+	#   say-linux-amd64.tar.gz
+	#   say-windows-amd64.tar.gz
+	archive_ext="tar.gz"
+
 	if [ "$os" = "windows" ]; then
-		archive_ext="zip"
 		binary_name="say.exe"
 	else
-		archive_ext="tar.gz"
 		binary_name="say"
 	fi
 
-	archive_name="say-${version}-${os}-${arch}.${archive_ext}"
+	archive_name="say-${os}-${arch}.${archive_ext}"
 	download_url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
 
 	tmpdir="$(mktemp -d)"
