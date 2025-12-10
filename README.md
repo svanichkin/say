@@ -105,6 +105,14 @@ Then use
 C:\Users\USERNAME\go\bin\say.exe
 ```
 
+## Installation with AUR
+
+The package is also available on the AUR, if you use an AUR helper, you can install it for example with:
+
+```sh
+yay -S say
+```
+
 ## Installation with Git
 
 ```sh
