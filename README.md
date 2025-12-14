@@ -203,7 +203,7 @@ dial you:
 ./say "200:abcd:1234:..."
 ```
 
-Optionally pass the port as инлине ор separate argument, in any order:
+Optionally pass the port as a separate argument, in any order:
 
 ```sh
 ./say "[200:abcd:1234:...]:7777"
