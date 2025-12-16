@@ -6,26 +6,30 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"time"
+
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 	"github.com/svanichkin/say/ui"
-	"sync"
-	"time"
 
 	g722 "github.com/gotranspile/g722"
 )
 
 var (
-	useVoice = true
-	useVideo bool
+	useVoice    = true
+	useVideo    bool
+	maxVideoFPS = defaultVideoFPS
 )
 
 const (
-	frameAudio  byte = 0x01
-	frameVideo  byte = 0x02
-	maxVideoFPS      = 30
+	defaultVideoFPS       = 25
+	minVideoFPS           = 5
+	maxVideoFPSLimit      = 30
+	frameAudio       byte = 0x01
+	frameVideo       byte = 0x02
 
 	audioSeqBytes           = 2    // uint16 sequence number per audio frame
 	audioBufferLeadFrames   = 32   // frames to queue before starting playback (~0.64s)
@@ -40,6 +44,17 @@ const (
 func Configure(enableVoice, enableVideo bool) {
 	useVoice = enableVoice
 	useVideo = enableVideo
+}
+
+// SetMaxVideoFPS clamps and sets the desired max FPS for video capture/encoding.
+func SetMaxVideoFPS(fps int) {
+	if fps < minVideoFPS {
+		fps = minVideoFPS
+	}
+	if fps > maxVideoFPSLimit {
+		fps = maxVideoFPSLimit
+	}
+	maxVideoFPS = fps
 }
 
 // dataSession represents a running UDP voice session that may also multiplex
@@ -206,15 +221,17 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 					if tv == nil {
 						continue
 					}
-					ui.SetLocalFrame(tv)
-					ui.RequestRedraw()
+					if ui.SetLocalFrame(tv) {
+						ui.RequestRedraw()
+					}
 
 				case tv := <-videoPeerScreenOut:
 					if tv == nil {
 						continue
 					}
-					ui.SetRemoteFrame(tv)
-					ui.RequestRedraw()
+					if ui.SetRemoteFrame(tv) {
+						ui.RequestRedraw()
+					}
 				}
 			}
 		}()

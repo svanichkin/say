@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,11 @@ import (
 	ygg "github.com/svanichkin/ygg"
 )
 
+var version = "dev"
+
+const donateMonero = "Monero: 41uoDd1PNKm7j4LaBHHZ77ZPbEwEJzaRHhjEqFtKLZeWjd4sNfs3mtpbw1mcQrnNLBKWSJgui9ELEUz217Ui6kF13SmF4t5"
+const support = "Say support: https://github.com/svanichkin/say"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "[say] %v\n", err)
@@ -36,6 +42,23 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
+	if opts.ShowVersion {
+		printVersion()
+		if !opts.ShowDonate {
+			return nil
+		}
+	}
+	if opts.ShowDonate {
+		printDonateInfo()
+		return nil
+	}
+	if opts.Support {
+		printSupportInfo()
+		return nil
+	}
+
+	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
+	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
 
 	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath)
 	if closeLog != nil {
@@ -395,4 +418,30 @@ func waitForConnectivity(ctx context.Context, ch <-chan struct{}, timeout time.D
 	case <-timer.C:
 		return fmt.Errorf("ygg connectivity timeout after %s", timeout)
 	}
+}
+
+func appVersion() string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		v = "dev"
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if ver := strings.TrimSpace(bi.Main.Version); ver != "" && ver != "(devel)" {
+			v = ver
+		}
+	}
+	return v
+}
+
+func printVersion() {
+	fmt.Printf("say %s\n", appVersion())
+}
+
+func printDonateInfo() {
+	fmt.Println("Donate:")
+	fmt.Println(donateMonero)
+}
+
+func printSupportInfo() {
+	fmt.Println(support)
 }

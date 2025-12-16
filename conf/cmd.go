@@ -8,9 +8,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"github.com/svanichkin/say/network"
 	"strconv"
 	"strings"
+
+	"github.com/svanichkin/say/network"
 )
 
 var Verbose bool
@@ -30,6 +31,11 @@ type Friend struct {
 	Name    string `json:"name"`
 	Address string `json:"address"` // Ygg IPv6 like: 200:...:....:....
 }
+
+const (
+	minAllowedFPS = 5
+	maxAllowedFPS = 30
+)
 
 // resolveConfigPath normalizes the config file path, expanding "~", converting it
 // to an absolute path, and ensuring the parent directory exists. When cfg is empty,
@@ -259,6 +265,10 @@ type AppOptions struct {
 	ContactsDir string
 	Mode        AppMode
 	ColorFilter string
+	MaxVideoFPS int
+	ShowVersion bool
+	ShowDonate  bool
+	Support     bool
 }
 
 // AppMode describes whether the CLI determined that Say should run as client or server.
@@ -280,7 +290,10 @@ type flagParseState struct {
 // ParseCLI parses command-line flags into an AppOptions structure and resolves
 // the final configuration path. It performs only argument parsing and normalization.
 func ParseCLI() (*AppOptions, error) {
-	opts := &AppOptions{ListenPort: network.DefaultListenPort}
+	opts := &AppOptions{
+		ListenPort:  network.DefaultListenPort,
+		MaxVideoFPS: 25,
+	}
 
 	rawArgs := compactArgs(os.Args[1:])
 	noArgs := len(rawArgs) == 0
@@ -704,6 +717,48 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("port %d out of range", p)
 			}
 			opts.ListenPort = p
+		case "fps":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-fps requires a value")
+			}
+			fps, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid fps %q", value)
+			}
+			if fps < minAllowedFPS || fps > maxAllowedFPS {
+				return fmt.Errorf("fps must be between %d and %d", minAllowedFPS, maxAllowedFPS)
+			}
+			opts.MaxVideoFPS = fps
+		case "version":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -version: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.ShowVersion = boolVal
+		case "donate":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -donate: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.ShowDonate = boolVal
+		case "support":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -support: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.Support = boolVal
 		default:
 			if key == "" {
 				return fmt.Errorf("unknown flag %q", token)
@@ -739,7 +794,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "contacts", "port":
+	case "config", "contacts", "port", "fps":
 		return true
 	default:
 		return false

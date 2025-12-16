@@ -221,9 +221,13 @@ Audio and video are always enabled when hardware is present; no extra flags are
 required. Relevant CLI switches:
 
 - `-port` – listening TCP/UDP port (defaults to `7777`).
+- `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-contacts` – override the contacts directory defined in the config.
 - `-v` – verbose logging.
+- `-version` – print version and exit.
+- `-donate` – print donation information and exit.
+- `-support` – print support link and exit.
 - Color filters: `-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-purple`, `-pink`, `-gray`, `-bw` – apply a tinted (or neutral) monochrome filter to the local/remote viewports (purely visual, codec stream stays untouched). Use at most one flag; if several are present the last one wins.
 
 When media is disabled on both ends, Say falls back to a simple line‑based text

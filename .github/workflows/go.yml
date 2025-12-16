@@ -104,11 +104,6 @@ jobs:
         with:
           go-version: '1.x'
 
-      - name: Install opus (macOS)
-        run: |
-          brew update
-          brew install opus pkg-config
-
       - name: Build darwin/${{ matrix.arch }}
         run: |
           export GOOS=darwin
