@@ -426,11 +426,48 @@ func appVersion() string {
 		v = "dev"
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
-		if ver := strings.TrimSpace(bi.Main.Version); ver != "" && ver != "(devel)" {
-			v = ver
+		if v == "dev" {
+			if ver := strings.TrimSpace(bi.Main.Version); ver != "" && ver != "(devel)" {
+				return ver
+			}
+		}
+		if v == "dev" {
+			if derived := vcsVersion(bi); derived != "" {
+				return derived
+			}
 		}
 	}
 	return v
+}
+
+func vcsVersion(bi *debug.BuildInfo) string {
+	revision := buildInfoSetting(bi, "vcs.revision")
+	if revision == "" {
+		return ""
+	}
+	short := revision
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	dirty := ""
+	if buildInfoSetting(bi, "vcs.modified") == "true" {
+		dirty = "+dirty"
+	}
+	if ts := buildInfoSetting(bi, "vcs.time"); ts != "" {
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			return fmt.Sprintf("v0.0.0-%s-%s%s", t.UTC().Format("20060102150405"), short, dirty)
+		}
+	}
+	return short + dirty
+}
+
+func buildInfoSetting(bi *debug.BuildInfo, key string) string {
+	for _, setting := range bi.Settings {
+		if setting.Key == key {
+			return setting.Value
+		}
+	}
+	return ""
 }
 
 func printVersion() {

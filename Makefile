@@ -4,6 +4,12 @@ TEST_PKG := ./...
 BIN_DIR := bin
 GO := go
 
+VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null)
+BUILD_FLAGS :=
+ifneq ($(strip $(VERSION)),)
+	BUILD_FLAGS := -ldflags "-X main.version=$(VERSION)"
+endif
+
 HOST_OS := $(shell $(GO) env GOOS)
 HOST_ARCH := $(shell $(GO) env GOARCH)
 HOST_BIN := $(BIN_DIR)/$(APP_NAME)$(if $(filter windows,$(HOST_OS)),.exe,)
@@ -24,7 +30,7 @@ TARGETS := \
 
 build:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=1 $(GO) build -o $(HOST_BIN) $(BUILD_PKG)
+	CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -o $(HOST_BIN) $(BUILD_PKG)
 
 run:
 	$(GO) run .
@@ -49,4 +55,4 @@ $(TARGETS:%=build-%):
 	$(eval TARGET_DIR := $(BIN_DIR)/$(TARGET_OS)-$(TARGET_ARCH))
 	$(eval TARGET_BIN := $(TARGET_DIR)/$(APP_NAME)$(if $(filter windows,$(TARGET_OS)),.exe,))
 	@mkdir -p $(TARGET_DIR)
-	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) CGO_ENABLED=1 $(GO) build -o $(TARGET_BIN) $(BUILD_PKG)
+	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -o $(TARGET_BIN) $(BUILD_PKG)
