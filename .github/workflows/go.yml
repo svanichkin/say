@@ -143,9 +143,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
-          token: ${{ secrets.GH_RELEASE_TOKEN }}
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.sha256
