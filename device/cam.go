@@ -3,12 +3,18 @@ package device
 import (
 	"context"
 	"fmt"
+	"time"
 
 	gocam "github.com/svanichkin/gocam"
 )
 
-// CameraFrame is the raw RGB frame type produced by the camera backend.
-type CameraFrame = gocam.Frame
+// CameraFrame is an RGB frame with the monotonic time at which camera capture
+// delivered it to this process.
+type CameraFrame struct {
+	Data          []byte
+	Width, Height int
+	CapturedAt    time.Time
+}
 
 // StartCameraStream starts camera capture using gocam and returns a frame channel.
 // Frames are center-cropped to CIF aspect and resized to 352x288 before being sent to consumers.
@@ -18,7 +24,7 @@ func StartCameraStream(ctx context.Context) (<-chan CameraFrame, error) {
 		return nil, fmt.Errorf("camera start: %w", err)
 	}
 
-	out := make(chan CameraFrame, 8)
+	out := make(chan CameraFrame, 1)
 	go func() {
 		defer close(out)
 		for {
@@ -29,12 +35,15 @@ func StartCameraStream(ctx context.Context) (<-chan CameraFrame, error) {
 				if !ok {
 					return
 				}
+				capturedAt := time.Now()
+				frame := CameraFrame{Data: f.Data, Width: f.Width, Height: f.Height, CapturedAt: capturedAt}
 				// 1) center-crop to CIF aspect, 2) resize to 352x288
-				cropped := centerCropToAspect(f, 352, 288)
+				cropped := centerCropToAspect(frame, 352, 288)
 				rf, err := resizeFrameRGB(cropped, 352, 288)
 				if err != nil {
 					continue
 				}
+				rf.CapturedAt = capturedAt
 				select {
 				case out <- rf:
 				default:

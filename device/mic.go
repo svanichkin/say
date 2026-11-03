@@ -4,13 +4,21 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
 	malgo "github.com/gen2brain/malgo"
 )
 
+// AudioCaptureFrame is a microphone block and the monotonic time at which
+// capture delivered its first sample.
+type AudioCaptureFrame struct {
+	Samples    []int16
+	CapturedAt time.Time
+}
+
 // StartMicrophoneStream starts capturing microphone PCM samples with the given sample rate and channel count.
-func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-chan []int16, error) {
-	out := make(chan []int16, 16)
+func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-chan AudioCaptureFrame, error) {
+	out := make(chan AudioCaptureFrame, 8)
 
 	mCtx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		log.Printf("[audio/mic] malgo: %s", message)
@@ -33,10 +41,22 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			if len(pInput) == 0 {
 				return
 			}
+			capturedAt := time.Now()
 			samples := bytesToInt16Mic(pInput)
+			frame := AudioCaptureFrame{Samples: samples, CapturedAt: capturedAt}
 			select {
-			case out <- samples:
+			case out <- frame:
 			default:
+				// Keep the newest capture time when downstream is late. The gap is
+				// visible to the media timeline instead of silently compressing audio.
+				select {
+				case <-out:
+				default:
+				}
+				select {
+				case out <- frame:
+				default:
+				}
 			}
 		},
 	}

@@ -2,10 +2,10 @@ package udp
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,13 +31,14 @@ const (
 	frameAudio       byte = 0x01
 	frameVideo       byte = 0x02
 
-	audioSeqBytes           = 2    // uint16 sequence number per audio frame
-	audioBufferLeadFrames   = 32   // frames to queue before starting playback (~0.64s)
-	audioBufferResumeFrames = 16   // rebuffer threshold after an underrun (~0.32s)
-	audioBufferMaxFrames    = 256  // cap (~5s) to absorb very high jitter
-	audioMaxConsecutivePLCs = 8    // safety cap to avoid infinite PLC loops
-	audioMaxSeqGap          = 2000 // treat large forward gaps as resync (packets skipped)
-	audioSeqStaleWindow     = 0x8000
+	// UDP media datagrams use [kind][uint8 media index][encoded payload].
+	mediaIndexBytes         = 1
+	mediaTickDuration       = 4 * time.Millisecond
+	mediaTickSamples        = 32 // 4 ms at the 8 kHz audio clock
+	audioFrameTicks         = 5  // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames   = 4  // 80 ms startup jitter buffer
+	audioBufferMaxFrames    = 8  // 160 ms cap
+	audioMaxConsecutivePLCs = 8  // safety cap to avoid infinite PLC loops
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -55,6 +56,20 @@ func SetMaxVideoFPS(fps int) {
 		fps = maxVideoFPSLimit
 	}
 	maxVideoFPS = fps
+}
+
+// mediaIndex maps local monotonic capture time onto the compact common media
+// timeline. It wraps at uint8; signed modular deltas are unambiguous for
+// differences shorter than 512 ms.
+func mediaIndex(epoch, capturedAt time.Time) uint8 {
+	if capturedAt.IsZero() {
+		capturedAt = time.Now()
+	}
+	elapsed := capturedAt.Sub(epoch)
+	if elapsed <= 0 {
+		return 0
+	}
+	return uint8(elapsed / mediaTickDuration)
 }
 
 // dataSession represents a running UDP voice session that may also multiplex
@@ -114,13 +129,14 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		enc          *g722.Encoder
 		dec          *g722.Decoder
 		frameSamples int
+		mediaEpoch   = time.Now()
 
 		micCancel context.CancelFunc = func() {}
 
-		audioMicIn <-chan []int16
+		audioMicIn <-chan device.AudioCaptureFrame
 
 		audioNetIn      chan []byte
-		audioSpeakerOut chan []int16
+		audioSpeakerOut chan device.PlaybackFrame
 
 		speaker *device.Speaker
 	)
@@ -143,10 +159,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			return nil, fmt.Errorf("mic stream: %w", err)
 		}
 
-		audioSpeakerOut = make(chan []int16, 128)
-		audioNetIn = make(chan []byte, 256)
+		audioSpeakerOut = make(chan device.PlaybackFrame, 4)
+		audioNetIn = make(chan []byte, 4)
 
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, audioSpeakerOut, stopCh, stop)
+		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
@@ -196,16 +212,16 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			log.Printf("[video] camera stream disabled: %v", err)
 		}
 
-		videoSelfScreenOut = make(chan *codec.TextFrame, 32)
-		videoPeerScreenOut = make(chan *codec.TextFrame, 32)
-		videoNetIn = make(chan []byte, 32)
+		videoSelfScreenOut = make(chan *codec.TextFrame, 1)
+		videoPeerScreenOut = make(chan *codec.TextFrame, 1)
+		videoNetIn = make(chan []byte, 1)
 	}
 
 	if useVideo {
 		ui.EnsureRenderer(context.Background())
 	}
 
-	startSender(&wg, pc, stop, stopCh, getPeer, enc, frameSamples, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
+	startSender(&wg, pc, stop, stopCh, getPeer, enc, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
 
 	// ======== Video screen layer: queues → local/remote slots ========
 	if useVideo && (videoSelfScreenOut != nil || videoPeerScreenOut != nil) {
@@ -244,7 +260,11 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut)
 	}
 	if useVideo && videoNetIn != nil {
-		startVideoReceiver(&wg, stopCh, videoNetIn, videoPeerScreenOut)
+		var playbackIndex func() (uint8, bool)
+		if speaker != nil {
+			playbackIndex = speaker.PlaybackIndex
+		}
+		startVideoReceiver(&wg, stopCh, videoNetIn, videoPeerScreenOut, playbackIndex)
 	}
 
 	done := make(chan struct{})
@@ -268,21 +288,21 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 //   - video: camera → TextFrame → UDP (frameVideo)
 func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder, frameSamples int,
-	audioMicIn <-chan []int16, videoCamIn <-chan device.CameraFrame,
+	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
 ) {
 	if useVoice {
-		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, frameSamples, audioMicIn)
+		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, frameSamples, mediaEpoch, audioMicIn)
 	}
 	if useVideo {
-		startVideoSender(wg, pc, stop, stopCh, getPeer, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
+		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
 	}
 }
 
 // startAudioSender: mic → G.722 → UDP (frameAudio)
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder,
-	frameSamples int, audioMicIn <-chan []int16,
+	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
 ) {
 	if !useVoice || enc == nil || audioMicIn == nil {
 		return
@@ -295,9 +315,9 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 		var (
 			sentPkts, sentBytes uint64
-			seq                 uint16
 		)
 		var pcmBuf []int16 // post-processed PCM ready for encoding
+		var pcmStartAt time.Time
 
 		tick := time.NewTicker(time.Second)
 		lastRateSample := time.Now()
@@ -305,7 +325,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 		need := frameSamples * audioChannels
 
-		sendChunk := func(chunk []int16) bool {
+		sendChunk := func(chunk []int16, capturedAt time.Time) bool {
 			addr := getPeer()
 			if addr == nil {
 				return true
@@ -330,11 +350,10 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 
-			out := make([]byte, written+1+audioSeqBytes)
+			out := make([]byte, written+1+mediaIndexBytes)
 			out[0] = frameAudio
-			binary.BigEndian.PutUint16(out[1:], seq)
-			copy(out[1+audioSeqBytes:], buf[:written])
-			seq++
+			out[1] = mediaIndex(mediaEpoch, capturedAt)
+			copy(out[1+mediaIndexBytes:], buf[:written])
 
 			n, err := pc.WriteTo(out, addr)
 			if err != nil {
@@ -349,8 +368,8 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 			sentPkts++
-			if n > 1+audioSeqBytes {
-				sentBytes += uint64(n - 1 - audioSeqBytes) // exclude frame type + seq header
+			if n > 1+mediaIndexBytes {
+				sentBytes += uint64(n - 1 - mediaIndexBytes) // exclude frame type + media index
 			}
 			return true
 		}
@@ -359,9 +378,10 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			for len(pcmBuf) >= need {
 				chunk := pcmBuf[:need]
 				pcmBuf = pcmBuf[need:]
-				if !sendChunk(chunk) {
+				if !sendChunk(chunk, pcmStartAt) {
 					return false
 				}
+				pcmStartAt = pcmStartAt.Add(time.Duration(need) * time.Second / time.Duration(audioSampleRate))
 			}
 			return true
 		}
@@ -382,7 +402,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				sentPkts, sentBytes = 0, 0
 				lastRateSample = time.Now()
 
-			case frame, ok := <-audioMicIn:
+			case capture, ok := <-audioMicIn:
 				if !ok {
 					if !drainAvailable() {
 						return
@@ -390,7 +410,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					return
 				}
 
-				if frame == nil {
+				if len(capture.Samples) == 0 {
 					continue
 				}
 
@@ -399,7 +419,18 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					continue
 				}
 
-				pcmBuf = append(pcmBuf, frame...)
+				if len(pcmBuf) == 0 {
+					pcmStartAt = capture.CapturedAt
+				} else {
+					expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
+					if delta := capture.CapturedAt.Sub(expected); delta > 4*time.Millisecond || delta < -4*time.Millisecond {
+						// Do not concatenate samples across a capture gap. The next packet's
+						// media index carries the discontinuity to the receiver.
+						pcmBuf = pcmBuf[:0]
+						pcmStartAt = capture.CapturedAt
+					}
+				}
+				pcmBuf = append(pcmBuf, capture.Samples...)
 
 				if !drainAvailable() {
 					return
@@ -412,7 +443,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 // startVideoSender: camera → TextFrame → UDP (frameVideo)
 func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr,
-	videoCamIn <-chan device.CameraFrame,
+	mediaEpoch time.Time, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
 ) {
 	_ = videoPeerScreenOut
@@ -548,9 +579,10 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						continue
 					}
 
-					out := make([]byte, len(dataNet)+1)
+					out := make([]byte, len(dataNet)+1+mediaIndexBytes)
 					out[0] = frameVideo
-					copy(out[1:], dataNet)
+					out[1] = mediaIndex(mediaEpoch, frame.CapturedAt)
+					copy(out[1+mediaIndexBytes:], dataNet)
 
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
@@ -666,12 +698,12 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 			switch t {
 			case frameAudio:
 				payloadLen := len(payload)
-				if payloadLen <= audioSeqBytes {
+				if payloadLen <= mediaIndexBytes {
 					logs.LogV("[voice/udp] drop rx audio frame (payload too small)")
 					continue
 				}
 				rxAudioPkts++
-				rxAudioBytes += uint64(payloadLen - audioSeqBytes)
+				rxAudioBytes += uint64(payloadLen - mediaIndexBytes)
 				if netAudioIn == nil {
 					continue
 				}
@@ -699,8 +731,11 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 
 			case frameVideo:
 				payloadLen := len(payload)
+				if payloadLen <= mediaIndexBytes {
+					continue
+				}
 				rxVideoPkts++
-				rxVideoBytes += uint64(payloadLen)
+				rxVideoBytes += uint64(payloadLen - mediaIndexBytes)
 				if netVideoIn == nil {
 					continue
 				}
@@ -711,8 +746,16 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				select {
 				case netVideoIn <- pkt:
 				default:
-					// Drop frame if video decoder is too slow; do not block audio.
-					logs.LogV("[video/udp] drop rx video frame (queue full)")
+					// Keep the newest frames so decode backlog cannot turn into latency.
+					select {
+					case <-netVideoIn:
+					default:
+					}
+					select {
+					case netVideoIn <- pkt:
+					default:
+						logs.LogV("[video/udp] drop rx video frame (queue full)")
+					}
 				}
 
 			default:
@@ -725,75 +768,84 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 // startAudioReceiver launches a goroutine that decodes G.722 payloads from netAudioIn into PCM frames
 // and feeds them into speakerOut.
 func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
-	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut chan []int16) {
+	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut chan device.PlaybackFrame) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
-		frameDuration := time.Duration(frameSamples) * time.Second / audioSampleRate
-		if frameDuration <= 0 {
-			frameDuration = 20 * time.Millisecond
-		}
-		ticker := time.NewTicker(frameDuration)
-		defer ticker.Stop()
-
-		buffer := make([][]int16, 0, audioBufferMaxFrames)
+		buffer := make([]device.PlaybackFrame, 0, audioBufferMaxFrames)
 		bufferReady := false
+		bufferedSamples := 0
 
 		var (
-			pendingSeq    uint16
+			pendingIndex  uint8
 			pendingData   []byte
 			havePending   bool
 			plcStreak     int
 			lastGoodFrame []int16
 			pcmScratch    = make([]int16, frameSamples)
+			lastPacketAt  time.Time
 		)
+
+		clearSpeakerQueue := func() {
+			for {
+				select {
+				case <-speakerOut:
+				default:
+					return
+				}
+			}
+		}
 
 		resetState := func() {
 			buffer = buffer[:0]
 			bufferReady = false
+			bufferedSamples = 0
+			clearSpeakerQueue()
 			pendingData = nil
 			havePending = false
 			plcStreak = 0
 			lastGoodFrame = nil
 		}
 
-		enqueueFrame := func(pcm []int16) {
+		enqueueFrame := func(pcm []int16, index uint8) {
 			if len(buffer) >= audioBufferMaxFrames {
+				bufferedSamples -= len(buffer[0].Samples)
 				buffer = buffer[1:]
 				logs.LogV("[voice/udp] drop rx audio frame (buffer overflow)")
 			}
-			buffer = append(buffer, pcm)
-			if !bufferReady && len(buffer) >= audioBufferLeadFrames {
+			buffer = append(buffer, device.PlaybackFrame{Samples: pcm, MediaIndex: index})
+			bufferedSamples += len(pcm)
+			if !bufferReady && bufferedSamples >= frameSamples*audioBufferLeadFrames {
 				bufferReady = true
 			}
 		}
 
-		popFrame := func() ([]int16, bool) {
+		popFrame := func() (device.PlaybackFrame, bool) {
 			if len(buffer) == 0 {
-				return nil, false
+				return device.PlaybackFrame{}, false
 			}
 			frame := buffer[0]
 			buffer = buffer[1:]
-			if bufferReady && len(buffer) < audioBufferResumeFrames {
-				bufferReady = false
-			}
+			bufferedSamples -= len(frame.Samples)
 			return frame, true
 		}
 
-		generatePLC := func() []int16 {
+		generatePLC := func(sampleCount int) []int16 {
 			if plcStreak >= audioMaxConsecutivePLCs {
 				return nil
 			}
 			plcStreak++
-			frame := make([]int16, frameSamples)
+			frame := make([]int16, sampleCount)
 			if lastGoodFrame != nil {
-				copy(frame, lastGoodFrame)
+				for offset := 0; offset < len(frame); {
+					offset += copy(frame[offset:], lastGoodFrame)
+				}
 			}
 			return frame
 		}
 
-		decodeAndEnqueue := func(data []byte) bool {
+		decodeAndEnqueue := func(data []byte, index uint8) bool {
 			if len(data) == 0 {
 				return false
 			}
@@ -821,7 +873,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 				lastGoodFrame = make([]int16, frameSamples)
 			}
 			copy(lastGoodFrame, frame)
-			enqueueFrame(frame)
+			enqueueFrame(frame, index)
 			return true
 		}
 
@@ -829,17 +881,17 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 			if !havePending {
 				return
 			}
-			if !decodeAndEnqueue(pendingData) {
-				if frame := generatePLC(); frame != nil {
-					enqueueFrame(frame)
+			if !decodeAndEnqueue(pendingData, pendingIndex) {
+				if frame := generatePLC(frameSamples); frame != nil {
+					enqueueFrame(frame, pendingIndex)
 				}
 			}
 			havePending = false
 			pendingData = nil
 		}
 
-		feedSpeaker := func(frame []int16) {
-			if frame == nil {
+		feedSpeaker := func(frame device.PlaybackFrame) {
+			if frame.Samples == nil {
 				return
 			}
 			select {
@@ -857,6 +909,18 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 				default:
 					logs.LogV("[voice/udp] drop local audio frame (speakerOut full, dropped newest)")
 				}
+			}
+		}
+		feedBuffered := func() {
+			if !bufferReady {
+				return
+			}
+			for len(buffer) > 0 {
+				frame, ok := popFrame()
+				if !ok {
+					return
+				}
+				feedSpeaker(frame)
 			}
 		}
 
@@ -877,79 +941,73 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					resetState()
 					continue
 				}
-				if len(pkt) <= audioSeqBytes {
+				if len(pkt) <= mediaIndexBytes {
 					continue
 				}
 
-				seq := binary.BigEndian.Uint16(pkt[:audioSeqBytes])
-				payload := pkt[audioSeqBytes:]
+				index := pkt[0]
+				payload := pkt[mediaIndexBytes:]
 				if len(payload) == 0 {
 					continue
 				}
 
 				if !havePending {
-					pendingSeq = seq
+					pendingIndex = index
 					pendingData = payload
 					havePending = true
+					lastPacketAt = time.Now()
 					continue
 				}
-
-				if !decodeAndEnqueue(pendingData) {
-					if frame := generatePLC(); frame != nil {
-						enqueueFrame(frame)
-					}
-				}
-
-				gap := uint16(seq - pendingSeq)
-				if gap == 0 {
-					// duplicate packet; wait for the next unique sequence.
-					continue
-				}
-				if gap > audioSeqStaleWindow {
-					// stale/out-of-order packet, drop it.
-					continue
-				}
-				if gap > audioMaxSeqGap {
-					// large jump: resync decoder state.
-					pendingSeq = seq
+				if time.Since(lastPacketAt) > 500*time.Millisecond {
+					// The byte index is ambiguous after half a cycle without media.
+					resetState()
+					pendingIndex = index
 					pendingData = payload
+					havePending = true
+					lastPacketAt = time.Now()
 					continue
 				}
-				if gap > 1 {
-					missing := int(gap) - 1
-					for i := 0; i < missing; i++ {
-						if frame := generatePLC(); frame != nil {
-							enqueueFrame(frame)
-						}
+
+				delta := index - pendingIndex
+				if delta == 0 {
+					// Duplicate or reordered packet. Keep waiting for a frame after
+					// the current one before advancing the decoder.
+					continue
+				}
+				if int8(delta) < 0 {
+					continue
+				}
+
+				if !decodeAndEnqueue(pendingData, pendingIndex) {
+					if frame := generatePLC(frameSamples); frame != nil {
+						enqueueFrame(frame, pendingIndex)
 					}
 				}
 
-				pendingSeq = seq
+				missingTicks := int(delta) - audioFrameTicks
+				if missingTicks > audioMaxConsecutivePLCs*audioFrameTicks {
+					// A long loss burst is better handled by jumping to the live edge
+					// than by playing stale audio after a long PLC run.
+					buffer = buffer[:0]
+					bufferReady = false
+					bufferedSamples = 0
+					clearSpeakerQueue()
+					pendingIndex = index
+					pendingData = payload
+					lastPacketAt = time.Now()
+					continue
+				}
+				if missingTicks > 0 {
+					if frame := generatePLC(missingTicks * mediaTickSamples); frame != nil {
+						enqueueFrame(frame, pendingIndex+uint8(audioFrameTicks))
+					}
+				}
+
+				pendingIndex = index
 				pendingData = payload
 				havePending = true
-
-			case <-ticker.C:
-				if !mediactrl.PlaybackEnabled() {
-					resetState()
-					continue
-				}
-
-				if !bufferReady {
-					if len(buffer) < audioBufferLeadFrames {
-						continue
-					}
-					bufferReady = true
-				}
-
-				frame, ok := popFrame()
-				if !ok {
-					if plc := generatePLC(); plc != nil {
-						feedSpeaker(plc)
-					}
-					continue
-				}
-
-				feedSpeaker(frame)
+				lastPacketAt = time.Now()
+				feedBuffered()
 			}
 		}
 	}()
@@ -958,16 +1016,79 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 // startVideoReceiver launches a goroutine that decodes textFrame video frames from netVideoIn
 // and updates the remote preview independently of the audio receive loop.
 func startVideoReceiver(wg *sync.WaitGroup,
-	stopCh <-chan struct{}, netVideoIn <-chan []byte, screenOut chan *codec.TextFrame) {
+	stopCh <-chan struct{}, netVideoIn <-chan []byte, screenOut chan *codec.TextFrame,
+	playbackIndex func() (uint8, bool)) {
 	decoder := codec.NewDecoder()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		type timedFrame struct {
+			index uint8
+			frame *codec.TextFrame
+		}
+		queue := make([]timedFrame, 0, 2)
+		lastFrameAt := time.Time{}
+		ticker := time.NewTicker(4 * time.Millisecond)
+		defer ticker.Stop()
+
+		display := func(frame *codec.TextFrame) {
+			if frame == nil || screenOut == nil {
+				return
+			}
+			select {
+			case screenOut <- frame:
+			default:
+				select {
+				case <-screenOut:
+				default:
+				}
+				select {
+				case screenOut <- frame:
+				default:
+				}
+			}
+		}
+
+		presentDue := func() {
+			if !mediactrl.PlaybackEnabled() {
+				queue = queue[:0]
+				return
+			}
+			if len(queue) == 0 {
+				return
+			}
+			if playbackIndex == nil {
+				display(queue[len(queue)-1].frame)
+				queue = queue[:0]
+				return
+			}
+			current, ok := playbackIndex()
+			if !ok {
+				return
+			}
+			selected := -1
+			for i := range queue {
+				if int8(current-queue[i].index) >= 0 {
+					selected = i
+				}
+			}
+			if selected < 0 {
+				return
+			}
+			candidate := queue[selected]
+			queue = append(queue[:0], queue[selected+1:]...)
+			// A frame that missed the audio playhead by more than 250 ms is stale.
+			if int8(current-candidate.index) <= 62 {
+				display(candidate.frame)
+			}
+		}
 
 		for {
 			select {
 			case <-stopCh:
 				return
+			case <-ticker.C:
+				presentDue()
 			case pkt, ok := <-netVideoIn:
 				if !ok {
 					return
@@ -978,29 +1099,27 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				if !mediactrl.PlaybackEnabled() {
 					continue
 				}
-				tv, err := decoder.Decode(pkt)
+				if len(pkt) <= mediaIndexBytes {
+					continue
+				}
+				index := pkt[0]
+				if !lastFrameAt.IsZero() && time.Since(lastFrameAt) > 500*time.Millisecond {
+					queue = queue[:0]
+				}
+				lastFrameAt = time.Now()
+				tv, err := decoder.Decode(pkt[mediaIndexBytes:])
 				if err != nil {
 					log.Printf("[video/udp] textFrame decode: %v", err)
 					continue
 				}
 
-				if screenOut == nil {
-					continue
-				}
-
-				select {
-				case screenOut <- tv:
-				default:
-					select {
-					case <-screenOut:
-						logs.LogV("[video/udp] drop remote frame (videoRemoteOut full, dropped oldest)")
-					default:
-					}
-					select {
-					case screenOut <- tv:
-					default:
-						logs.LogV("[video/udp] drop remote frame (videoRemoteOut full, dropped newest)")
-					}
+				queue = append(queue, timedFrame{index: index, frame: tv})
+				sort.Slice(queue, func(i, j int) bool {
+					return int8(queue[i].index-queue[j].index) < 0
+				})
+				if len(queue) > 2 {
+					queue = queue[len(queue)-2:]
+					logs.LogV("[video/udp] drop stale queued frame")
 				}
 			}
 		}
