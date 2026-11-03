@@ -158,6 +158,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	var (
 		enc          *gopus.Encoder
 		dec          *gopus.Decoder
+		aec          *audioEcho
 		frameSamples int
 		mediaEpoch   = time.Now()
 
@@ -178,6 +179,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, err
 		}
+		aec, err = newAudioEcho(frameSamples)
+		if err != nil {
+			return nil, fmt.Errorf("echo canceller: %w", err)
+		}
 
 		micCtx, cancel := context.WithCancel(context.Background())
 		micCancel = cancel
@@ -192,7 +197,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioSpeakerOut = make(chan device.PlaybackFrame, 4)
 		audioNetIn = make(chan []byte, 4)
 
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, stop)
+		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, aec.playback, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
@@ -251,7 +256,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		ui.EnsureRenderer(context.Background())
 	}
 
-	startSender(&wg, pc, stop, stopCh, getPeer, enc, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
+	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
 
 	// ======== Video screen layer: queues → local/remote slots ========
 	if useVideo && (videoSelfScreenOut != nil || videoPeerScreenOut != nil) {
@@ -317,12 +322,12 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 //   - audio: mic → Opus → UDP (mediaKindAudio)
 //   - video: camera → TextFrame → UDP (mediaKindVideo)
 func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, frameSamples int,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, aec *audioEcho, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
 ) {
 	if useVoice {
-		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, frameSamples, mediaEpoch, audioMicIn)
+		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn)
 	}
 	if useVideo {
 		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
@@ -331,7 +336,7 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 // startAudioSender: mic → Opus → UDP (mediaKindAudio)
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, aec *audioEcho,
 	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
 ) {
 	if !useVoice || enc == nil || audioMicIn == nil {
@@ -354,8 +359,18 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		defer tick.Stop()
 
 		need := frameSamples * audioChannels
+		aecSamples := make([]int16, need)
 
 		sendChunk := func(chunk []int16, capturedAt time.Time) bool {
+			pcm := chunk
+			if aec != nil {
+				if err := aec.capture(chunk, aecSamples); err != nil {
+					log.Printf("[audio/aec] capture frame: %v", err)
+				} else {
+					pcm = aecSamples
+				}
+			}
+
 			addr := getPeer()
 			if addr == nil {
 				return true
@@ -366,7 +381,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			}
 
 			buf := make([]byte, maxOpusPacket)
-			written, err := enc.EncodeInt16(chunk, buf)
+			written, err := enc.EncodeInt16(pcm, buf)
 			if err != nil || written <= 0 {
 				log.Printf("[voice/udp] Opus encode error: bytes=%d err=%v", written, err)
 				if stop != nil {
@@ -440,8 +455,14 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				}
 
 				if !mediactrl.CaptureEnabled() {
+					if aec != nil {
+						aec.setCaptureEnabled(false)
+					}
 					pcmBuf = pcmBuf[:0]
 					continue
+				}
+				if aec != nil {
+					aec.setCaptureEnabled(true)
 				}
 
 				if len(pcmBuf) == 0 {

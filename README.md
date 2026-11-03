@@ -3,10 +3,11 @@
 Say is a terminal‑first voice and video call utility that builds an embedded
 Yggdrasil node via [ygg](https://github.com/svanichkin/ygg) and speaks directly
 to other peers over the Ygg overlay network.
-Audio is captured with [malgo](https://github.com/gen2brain/malgo) (miniaudio),
-encoded as G.722, and optionally sent via UDP for lower latency. Video frames are
-sourced through [gocam](https://github.com/svanichkin/gocam), compressed then 
-rendered in the current terminal session using Unicode glyphs.
+Audio is captured and played with [malgo](https://github.com/gen2brain/malgo)
+(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go Opus,
+and sent via UDP for low latency. Video frames are sourced through
+[gocam](https://github.com/svanichkin/gocam), compressed, then rendered in the
+current terminal session using Unicode glyphs.
 
 ![Screenshot](./sample.png)
 
@@ -27,7 +28,7 @@ external Yggdrasil daemon or web stack.
 ## Features
 
 - Embedded Yggdrasil node – no separate daemon required.
-- G.722 voice (8 kHz / 48 kbps) with configurable frame size and UDP/TCP transports.
+- Opus voice (8 kHz mono, 12 kbps target, VBR and DTX) with pure-Go acoustic echo cancellation.
 - Video streaming directly in the terminal two‑pane layout.
 - Simple newline text bridge when media is disabled.
 - Friend list bootstrap via the same `config.json` that holds the Yggdrasil

@@ -27,7 +27,7 @@ type PlaybackFrame struct {
 // StartSpeaker initializes a playback device that consumes PCM frames from speakerIn.
 // stopCh is observed to output silence when the session stops, and onStop is invoked when
 // the underlying device stops unexpectedly.
-func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, speakerIn <-chan PlaybackFrame, stopCh <-chan struct{}, onStop func()) (*Speaker, error) {
+func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, speakerIn <-chan PlaybackFrame, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		log.Printf("[malgo] %s", message)
 	})
@@ -47,6 +47,10 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	var pending []int16
 	var pendingIndex uint16
 	var pendingSamples int
+	var renderPending []int16
+	if onRender != nil {
+		renderPending = make([]int16, 0, frameSamples*channels*2)
+	}
 	speaker := &Speaker{ctx: ctx}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
@@ -114,6 +118,15 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 			if len(b) < len(pOutput) {
 				for i := len(b); i < len(pOutput); i++ {
 					pOutput[i] = 0
+				}
+			}
+			if onRender != nil {
+				renderPending = append(renderPending, outSamples...)
+				frameSize := frameSamples * channels
+				for len(renderPending) >= frameSize {
+					onRender(renderPending[:frameSize])
+					copy(renderPending, renderPending[frameSize:])
+					renderPending = renderPending[:len(renderPending)-frameSize]
 				}
 			}
 		},
