@@ -798,20 +798,43 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		ui.UpdateRxAudioLoss(0)
 
 		buffer := make([]device.PlaybackFrame, 0, audioBufferMaxFrames)
 		bufferReady := false
 		bufferedSamples := 0
 
 		var (
-			pendingIndex  uint16
-			pendingData   []byte
-			havePending   bool
-			plcStreak     int
-			lastGoodFrame []int16
-			pcmScratch    = make([]int16, frameSamples)
-			lastPacketAt  time.Time
+			pendingIndex    uint16
+			pendingData     []byte
+			havePending     bool
+			plcStreak       int
+			lastGoodFrame   []int16
+			pcmScratch      = make([]int16, frameSamples)
+			lastPacketAt    time.Time
+			lossWindowStart = time.Now()
+			lossExpected    uint64
+			lossMissing     uint64
 		)
+
+		recordAudioLoss := func(delta int32) {
+			expected := (delta + audioFrameTicks/2) / audioFrameTicks
+			if expected < 1 {
+				expected = 1
+			}
+			lossExpected += uint64(expected)
+			lossMissing += uint64(expected - 1)
+			now := time.Now()
+			if now.Sub(lossWindowStart) >= time.Second {
+				loss := 0.0
+				if lossExpected > 0 {
+					loss = float64(lossMissing) / float64(lossExpected)
+				}
+				ui.UpdateRxAudioLoss(loss)
+				lossExpected, lossMissing = 0, 0
+				lossWindowStart = now
+			}
+		}
 
 		clearSpeakerQueue := func() {
 			for {
@@ -965,6 +988,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 				}
 				if !mediactrl.PlaybackEnabled() {
 					resetState()
+					ui.UpdateRxAudioLoss(0)
 					continue
 				}
 				if len(pkt) <= mediaIndexBytes {
@@ -1003,6 +1027,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 				if delta < 0 {
 					continue
 				}
+				recordAudioLoss(delta)
 
 				if !decodeAndEnqueue(pendingData, pendingIndex) {
 					if frame := generatePLC(frameSamples); frame != nil {

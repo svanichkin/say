@@ -13,7 +13,8 @@ import (
 const (
 	frameAudio     byte = 0x01
 	frameVideo     byte = 0x02
-	frameTick      byte = 0x03
+	framePing      byte = 0x03
+	framePong      byte = 0x04
 	frameTermSize  byte = 0x05
 	frameChat      byte = 0x06
 	frameFileStart byte = 0x07

@@ -15,8 +15,10 @@ type netRates struct {
 }
 
 var (
-	currentRates netRates
-	peerLatency  time.Duration
+	currentRates         netRates
+	peerLatency          time.Duration
+	rxAudioLoss          float64
+	rxAudioLossUpdatedAt time.Time
 )
 
 func UpdateTxAudioRate(kBps float64) {
@@ -59,4 +61,25 @@ func PeerLatencySnapshot() time.Duration {
 	netRateMu.RLock()
 	defer netRateMu.RUnlock()
 	return peerLatency
+}
+
+// UpdateRxAudioLoss records the estimated fraction of missing incoming audio frames.
+func UpdateRxAudioLoss(loss float64) {
+	if loss < 0 {
+		loss = 0
+	}
+	if loss > 1 {
+		loss = 1
+	}
+	netRateMu.Lock()
+	rxAudioLoss = loss
+	rxAudioLossUpdatedAt = time.Now()
+	netRateMu.Unlock()
+}
+
+// RxAudioLossSnapshot returns the latest incoming audio loss estimate and its sample time.
+func RxAudioLossSnapshot() (loss float64, updatedAt time.Time) {
+	netRateMu.RLock()
+	defer netRateMu.RUnlock()
+	return rxAudioLoss, rxAudioLossUpdatedAt
 }

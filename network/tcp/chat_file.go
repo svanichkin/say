@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,9 +16,88 @@ import (
 )
 
 const fileChunkBytes = 8 * 1024
-const fileSendBytesPerSecond = 64 * 1024
+
+const (
+	fileRateMin       = 16 * 1024
+	fileRateStart     = 64 * 1024
+	fileRateMax       = 256 * 1024
+	fileRateStep      = 8 * 1024
+	fileLossThreshold = 0.02
+	rttBaselineWindow = 30 * time.Second
+)
 
 var nextTransferID atomic.Uint32
+
+type adaptiveFilePacer struct {
+	mu          sync.Mutex
+	rate        int
+	baseRTT     time.Duration
+	baseRTTAt   time.Time
+	goodReports int
+	pauseUntil  time.Time
+}
+
+func newAdaptiveFilePacer() *adaptiveFilePacer {
+	return &adaptiveFilePacer{rate: fileRateStart}
+}
+
+func (p *adaptiveFilePacer) observe(rtt time.Duration, loss float64) {
+	if p == nil || rtt <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if p.baseRTT == 0 || now.Sub(p.baseRTTAt) > rttBaselineWindow {
+		p.baseRTT = rtt
+		p.baseRTTAt = now
+	} else if rtt < p.baseRTT {
+		p.baseRTT = rtt
+		p.baseRTTAt = now
+	}
+	congestionRTT := p.baseRTT + 100*time.Millisecond
+	if scaled := p.baseRTT + p.baseRTT/2; scaled > congestionRTT {
+		congestionRTT = scaled
+	}
+	congested := loss >= fileLossThreshold || rtt > congestionRTT
+	if congested {
+		p.rate /= 2
+		if p.rate < fileRateMin {
+			p.rate = fileRateMin
+		}
+		p.goodReports = 0
+		if loss >= 0.05 || rtt > p.baseRTT+250*time.Millisecond {
+			p.pauseUntil = time.Now().Add(400 * time.Millisecond)
+		}
+		return
+	}
+	p.goodReports++
+	if p.goodReports >= 3 {
+		p.rate += fileRateStep
+		if p.rate > fileRateMax {
+			p.rate = fileRateMax
+		}
+		p.goodReports = 0
+	}
+}
+
+func (p *adaptiveFilePacer) waitAfterChunk(n int) {
+	if p == nil || n <= 0 {
+		return
+	}
+	p.mu.Lock()
+	rate := p.rate
+	pause := time.Until(p.pauseUntil)
+	p.mu.Unlock()
+	if rate < 1 {
+		rate = fileRateMin
+	}
+	delay := time.Duration((int64(n)*int64(time.Second) + int64(rate) - 1) / int64(rate))
+	if pause > 0 {
+		delay += pause
+	}
+	time.Sleep(delay)
+}
 
 type incomingFile struct {
 	id       uint32
@@ -28,13 +108,13 @@ type incomingFile struct {
 	file     *os.File
 }
 
-func installChatActions(conn net.Conn) {
+func installChatActions(conn net.Conn, pacer *adaptiveFilePacer) {
 	ui.SetChatActions(func(text string) {
 		if err := writeFrameSafe(conn, frameChat, []byte(text)); err != nil {
 			ui.AddChatMessage("Message send failed: "+err.Error(), false)
 			return
 		}
-	}, func(path string) { sendFile(conn, path) })
+	}, func(path string) { sendFile(conn, path, pacer) })
 }
 
 func handleChatFrame(t byte, payload []byte, incoming **incomingFile) {
@@ -125,7 +205,7 @@ func abortIncoming(incoming **incomingFile) {
 	*incoming = nil
 }
 
-func sendFile(conn net.Conn, path string) {
+func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 	f, err := os.Open(path)
 	if err != nil {
 		ui.SetTransferProgress(filepath.Base(path), 0, 1, true)
@@ -160,7 +240,6 @@ func sendFile(conn net.Conn, path string) {
 	ui.AddChatMessage("Sending "+name, true)
 	buf := make([]byte, fileChunkBytes)
 	var sent int64
-	started := time.Now()
 	for {
 		n, readErr := f.Read(buf)
 		if n > 0 {
@@ -175,10 +254,7 @@ func sendFile(conn net.Conn, path string) {
 			}
 			sent += int64(n)
 			ui.SetTransferProgress(name, sent, info.Size(), false)
-			delay := time.Duration(sent*int64(time.Second)/fileSendBytesPerSecond) - time.Since(started)
-			if delay > 0 {
-				time.Sleep(delay)
-			}
+			pacer.waitAfterChunk(n)
 		}
 		if readErr == io.EOF {
 			break

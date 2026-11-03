@@ -105,7 +105,8 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 
 	// Reply OK and keep the socket open (this is our P2P channel for future audio)
 	fmt.Fprintf(conn, "OK %s\n", conf.HostnameOr("me"))
-	installChatActions(conn)
+	pacer := newAdaptiveFilePacer()
+	installChatActions(conn, pacer)
 	defer ui.SetChatActions(nil, nil)
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
@@ -141,9 +142,6 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 			}
 			return
 		}
-		if tcpKA != nil {
-			tcpKA.touch()
-		}
 		switch t {
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd:
 			handleChatFrame(t, payload, &incoming)
@@ -155,12 +153,19 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 			if cols, rows, ok := decodeTermSizeFrame(payload); ok && termSync != nil {
 				termSync.notifyPeer(cols, rows)
 			}
-		case frameTick:
-			if latency, ok := decodeTickLatency(payload); ok {
-				ui.UpdatePeerLatency(latency)
-				logs.LogV("[keepalive] tick received (server data) latency=%s", latency)
-			} else {
-				logs.LogV("[keepalive] tick received (server data)")
+		case framePing:
+			pong := tcpKA.pongPayload(payload)
+			if pong != nil {
+				if err := writeFrameSafe(conn, framePong, pong); err != nil {
+					log.Printf("[keepalive] pong send failed: %v", err)
+					return
+				}
+			}
+		case framePong:
+			if rtt, loss, ok := tcpKA.acceptPong(payload); ok {
+				ui.UpdatePeerLatency(rtt)
+				pacer.observe(rtt, loss)
+				logs.LogV("[keepalive] pong received: RTT=%s peer audio loss=%.1f%%", rtt, loss*100)
 			}
 		default:
 			// unknown frame type; ignore
