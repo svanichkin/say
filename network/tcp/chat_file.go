@@ -20,7 +20,6 @@ const fileChunkBytes = 8 * 1024
 const (
 	fileRateMin       = 16 * 1024
 	fileRateStart     = 64 * 1024
-	fileRateMax       = 256 * 1024
 	fileRateStep      = 8 * 1024
 	fileLossThreshold = 0.02
 	rttBaselineWindow = 30 * time.Second
@@ -30,15 +29,38 @@ var nextTransferID atomic.Uint32
 
 type adaptiveFilePacer struct {
 	mu          sync.Mutex
-	rate        int
+	rate        int64
 	baseRTT     time.Duration
 	baseRTTAt   time.Time
 	goodReports int
 	pauseUntil  time.Time
+	activeFiles int
 }
 
 func newAdaptiveFilePacer() *adaptiveFilePacer {
 	return &adaptiveFilePacer{rate: fileRateStart}
+}
+
+func (p *adaptiveFilePacer) beginFile() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.activeFiles++
+	p.goodReports = 0
+	p.mu.Unlock()
+}
+
+func (p *adaptiveFilePacer) endFile() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.activeFiles > 0 {
+		p.activeFiles--
+	}
+	p.goodReports = 0
+	p.mu.Unlock()
 }
 
 func (p *adaptiveFilePacer) observe(rtt time.Duration, loss float64) {
@@ -54,6 +76,9 @@ func (p *adaptiveFilePacer) observe(rtt time.Duration, loss float64) {
 	} else if rtt < p.baseRTT {
 		p.baseRTT = rtt
 		p.baseRTTAt = now
+	}
+	if p.activeFiles == 0 {
+		return
 	}
 	congestionRTT := p.baseRTT + 100*time.Millisecond
 	if scaled := p.baseRTT + p.baseRTT/2; scaled > congestionRTT {
@@ -74,9 +99,6 @@ func (p *adaptiveFilePacer) observe(rtt time.Duration, loss float64) {
 	p.goodReports++
 	if p.goodReports >= 3 {
 		p.rate += fileRateStep
-		if p.rate > fileRateMax {
-			p.rate = fileRateMax
-		}
 		p.goodReports = 0
 	}
 }
@@ -206,6 +228,9 @@ func abortIncoming(incoming **incomingFile) {
 }
 
 func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
+	pacer.beginFile()
+	defer pacer.endFile()
+
 	f, err := os.Open(path)
 	if err != nil {
 		ui.SetTransferProgress(filepath.Base(path), 0, 1, true)
