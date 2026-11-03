@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/svanichkin/say/logs"
@@ -41,9 +42,11 @@ func startMouseTracker(ctx context.Context) {
 
 		enableMouseReporting()
 
+		fmt.Fprint(os.Stdout, "\x1b[?2004h")
 		go func() {
 			<-ctx.Done()
 			disableMouseReporting()
+			fmt.Fprint(os.Stdout, "\x1b[?2004l")
 			if restore != nil {
 				restore()
 			}
@@ -61,10 +64,50 @@ func mouseEventLoop() {
 			return
 		}
 		if b != 0x1b { // ESC
+			chatKey(b)
 			continue
 		}
-		if evt, ok := parseSGRMouse(reader); ok {
-			handleMouseEvent(evt)
+		a, err := reader.ReadByte()
+		if err != nil || a != '[' {
+			continue
+		}
+		kind, err := reader.ReadByte()
+		if err != nil {
+			return
+		}
+		switch kind {
+		case '<':
+			if evt, ok := parseSGRMouseTail(reader); ok {
+				handleMouseEvent(evt)
+			}
+		case '2':
+			seq := []byte{kind}
+			for len(seq) < 4 {
+				c, e := reader.ReadByte()
+				if e != nil {
+					return
+				}
+				seq = append(seq, c)
+			}
+			if string(seq) == "200~" {
+				var paste strings.Builder
+				window := make([]byte, 0, 6)
+				for {
+					c, e := reader.ReadByte()
+					if e != nil {
+						return
+					}
+					window = append(window, c)
+					if len(window) > 6 {
+						paste.WriteByte(window[0])
+						window = window[1:]
+					}
+					if string(window) == "\x1b[201~" {
+						break
+					}
+				}
+				chatPaste(paste.String())
+			}
 		}
 	}
 }
@@ -79,6 +122,11 @@ func parseSGRMouse(r *bufio.Reader) (mouseEvent, bool) {
 	if err != nil || next != '<' {
 		return evt, false
 	}
+	return parseSGRMouseTail(r)
+}
+
+func parseSGRMouseTail(r *bufio.Reader) (mouseEvent, bool) {
+	var evt mouseEvent
 	btn, sep, err := readMouseComponent(r)
 	if err != nil || sep != ';' {
 		return evt, false
@@ -205,6 +253,9 @@ func viewportForPoint(col, row int) viewportID {
 			return viewportSelf
 		}
 		return viewportPeer
+	}
+	if row >= canvasTop+slots.selfSlot.rows {
+		return viewportNone
 	}
 
 	slotWidth := slots.selfSlot.cols

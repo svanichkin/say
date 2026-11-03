@@ -28,17 +28,20 @@ const (
 	defaultVideoFPS       = 25
 	minVideoFPS           = 5
 	maxVideoFPSLimit      = 30
-	frameAudio       byte = 0x01
-	frameVideo       byte = 0x02
+	mediaKindAudio   byte = 0
+	mediaKindVideo   byte = 1
 
-	// UDP media datagrams use [kind][uint8 media index][encoded payload].
-	mediaIndexBytes         = 1
-	mediaTickDuration       = 4 * time.Millisecond
-	mediaTickSamples        = 32 // 4 ms at the 8 kHz audio clock
-	audioFrameTicks         = 5  // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames   = 4  // 80 ms startup jitter buffer
-	audioBufferMaxFrames    = 8  // 160 ms cap
-	audioMaxConsecutivePLCs = 8  // safety cap to avoid infinite PLC loops
+	// Datagram header is [kind:1 | timestamp high:7][timestamp low:8].
+	mediaHeaderBytes               = 2 // packed kind and 15-bit timestamp
+	mediaIndexBytes                = 2 // timestamp bytes in internal audio/video queues
+	mediaIndexMask          uint16 = 0x7fff
+	mediaIndexHalf          uint16 = 0x4000
+	mediaTickDuration              = 4 * time.Millisecond
+	mediaTickSamples               = 32 // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5  // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames          = 4  // 80 ms startup jitter buffer
+	audioBufferMaxFrames           = 8  // 160 ms cap
+	audioMaxConsecutivePLCs        = 8  // safety cap to avoid infinite PLC loops
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -58,10 +61,10 @@ func SetMaxVideoFPS(fps int) {
 	maxVideoFPS = fps
 }
 
-// mediaIndex maps local monotonic capture time onto the compact common media
-// timeline. It wraps at uint8; signed modular deltas are unambiguous for
-// differences shorter than 512 ms.
-func mediaIndex(epoch, capturedAt time.Time) uint8 {
+// mediaIndex maps local monotonic capture time onto the common media timeline.
+// It wraps at 15 bits; modular deltas are unambiguous for differences shorter
+// than half the 131.072 second cycle.
+func mediaIndex(epoch, capturedAt time.Time) uint16 {
 	if capturedAt.IsZero() {
 		capturedAt = time.Now()
 	}
@@ -69,7 +72,35 @@ func mediaIndex(epoch, capturedAt time.Time) uint8 {
 	if elapsed <= 0 {
 		return 0
 	}
-	return uint8(elapsed / mediaTickDuration)
+	return uint16(elapsed/mediaTickDuration) & mediaIndexMask
+}
+
+func encodeMediaHeader(kind byte, index uint16) [mediaHeaderBytes]byte {
+	return [mediaHeaderBytes]byte{
+		(kind&1)<<7 | byte((index&mediaIndexMask)>>8),
+		byte(index),
+	}
+}
+
+func decodeMediaHeader(header []byte) (kind byte, index uint16, ok bool) {
+	if len(header) < mediaHeaderBytes {
+		return 0, 0, false
+	}
+	kind = header[0] >> 7
+	index = (uint16(header[0]&0x7f)<<8 | uint16(header[1])) & mediaIndexMask
+	return kind, index, true
+}
+
+func mediaIndexDelta(newer, older uint16) int32 {
+	delta := (newer - older) & mediaIndexMask
+	if delta >= mediaIndexHalf {
+		return int32(delta) - int32(mediaIndexMask+1)
+	}
+	return int32(delta)
+}
+
+func advanceMediaIndex(index uint16, ticks int32) uint16 {
+	return uint16((int32(index) + ticks) & int32(mediaIndexMask))
 }
 
 // dataSession represents a running UDP voice session that may also multiplex
@@ -260,7 +291,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut)
 	}
 	if useVideo && videoNetIn != nil {
-		var playbackIndex func() (uint8, bool)
+		var playbackIndex func() (uint16, bool)
 		if speaker != nil {
 			playbackIndex = speaker.PlaybackIndex
 		}
@@ -284,8 +315,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 }
 
 // startSender launches goroutines responsible for sending:
-//   - audio: mic → G.722 → UDP (frameAudio)
-//   - video: camera → TextFrame → UDP (frameVideo)
+//   - audio: mic → G.722 → UDP (mediaKindAudio)
+//   - video: camera → TextFrame → UDP (mediaKindVideo)
 func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
@@ -299,7 +330,7 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 }
 
-// startAudioSender: mic → G.722 → UDP (frameAudio)
+// startAudioSender: mic → G.722 → UDP (mediaKindAudio)
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder,
 	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
@@ -350,10 +381,10 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 
-			out := make([]byte, written+1+mediaIndexBytes)
-			out[0] = frameAudio
-			out[1] = mediaIndex(mediaEpoch, capturedAt)
-			copy(out[1+mediaIndexBytes:], buf[:written])
+			header := encodeMediaHeader(mediaKindAudio, mediaIndex(mediaEpoch, capturedAt))
+			out := make([]byte, mediaHeaderBytes+written)
+			copy(out[:mediaHeaderBytes], header[:])
+			copy(out[mediaHeaderBytes:], buf[:written])
 
 			n, err := pc.WriteTo(out, addr)
 			if err != nil {
@@ -368,8 +399,8 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 			sentPkts++
-			if n > 1+mediaIndexBytes {
-				sentBytes += uint64(n - 1 - mediaIndexBytes) // exclude frame type + media index
+			if n > mediaHeaderBytes {
+				sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
 			}
 			return true
 		}
@@ -440,7 +471,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}()
 }
 
-// startVideoSender: camera → TextFrame → UDP (frameVideo)
+// startVideoSender: camera → TextFrame → UDP (mediaKindVideo)
 func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr,
 	mediaEpoch time.Time, videoCamIn <-chan device.CameraFrame,
@@ -579,10 +610,10 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						continue
 					}
 
-					out := make([]byte, len(dataNet)+1+mediaIndexBytes)
-					out[0] = frameVideo
-					out[1] = mediaIndex(mediaEpoch, frame.CapturedAt)
-					copy(out[1+mediaIndexBytes:], dataNet)
+					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
+					out := make([]byte, mediaHeaderBytes+len(dataNet))
+					copy(out[:mediaHeaderBytes], header[:])
+					copy(out[mediaHeaderBytes:], dataNet)
 
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
@@ -597,8 +628,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						return
 					}
 					sentPkts++
-					if n > 1 {
-						sentBytes += uint64(n - 1) // exclude frame type marker
+					if n > mediaHeaderBytes {
+						sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
 					}
 				}
 			}
@@ -689,27 +720,26 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				}
 			}
 
-			if n < 1 {
+			if n < mediaHeaderBytes+1 {
 				continue
 			}
-			t := buf[0]
-			payload := buf[1:n]
+			t, index, ok := decodeMediaHeader(buf[:mediaHeaderBytes])
+			if !ok {
+				continue
+			}
+			payload := buf[mediaHeaderBytes:n]
 
 			switch t {
-			case frameAudio:
-				payloadLen := len(payload)
-				if payloadLen <= mediaIndexBytes {
-					logs.LogV("[voice/udp] drop rx audio frame (payload too small)")
-					continue
-				}
+			case mediaKindAudio:
 				rxAudioPkts++
-				rxAudioBytes += uint64(payloadLen - mediaIndexBytes)
+				rxAudioBytes += uint64(len(payload))
 				if netAudioIn == nil {
 					continue
 				}
-				// Copy payload because buf is reused on the next ReadFrom.
-				pkt := make([]byte, payloadLen)
-				copy(pkt, payload)
+				// Preserve the media index for the audio decoder; buf is reused on next ReadFrom.
+				pkt := make([]byte, mediaIndexBytes+len(payload))
+				pkt[0], pkt[1] = byte(index>>8), byte(index)
+				copy(pkt[mediaIndexBytes:], payload)
 				select {
 				case netAudioIn <- pkt:
 				default:
@@ -729,20 +759,16 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 					}
 				}
 
-			case frameVideo:
-				payloadLen := len(payload)
-				if payloadLen <= mediaIndexBytes {
-					continue
-				}
+			case mediaKindVideo:
 				rxVideoPkts++
-				rxVideoBytes += uint64(payloadLen - mediaIndexBytes)
+				rxVideoBytes += uint64(len(payload))
 				if netVideoIn == nil {
 					continue
 				}
-				// Enqueue textFrame payload for asynchronous decode/render.
-				// Copy because buf is reused on the next ReadFrom.
-				pkt := make([]byte, payloadLen)
-				copy(pkt, payload)
+				// Preserve the media index for the video scheduler; buf is reused on next ReadFrom.
+				pkt := make([]byte, mediaIndexBytes+len(payload))
+				pkt[0], pkt[1] = byte(index>>8), byte(index)
+				copy(pkt[mediaIndexBytes:], payload)
 				select {
 				case netVideoIn <- pkt:
 				default:
@@ -778,7 +804,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 		bufferedSamples := 0
 
 		var (
-			pendingIndex  uint8
+			pendingIndex  uint16
 			pendingData   []byte
 			havePending   bool
 			plcStreak     int
@@ -808,7 +834,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 			lastGoodFrame = nil
 		}
 
-		enqueueFrame := func(pcm []int16, index uint8) {
+		enqueueFrame := func(pcm []int16, index uint16) {
 			if len(buffer) >= audioBufferMaxFrames {
 				bufferedSamples -= len(buffer[0].Samples)
 				buffer = buffer[1:]
@@ -845,7 +871,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 			return frame
 		}
 
-		decodeAndEnqueue := func(data []byte, index uint8) bool {
+		decodeAndEnqueue := func(data []byte, index uint16) bool {
 			if len(data) == 0 {
 				return false
 			}
@@ -945,7 +971,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					continue
 				}
 
-				index := pkt[0]
+				index := uint16(pkt[0])<<8 | uint16(pkt[1])
 				payload := pkt[mediaIndexBytes:]
 				if len(payload) == 0 {
 					continue
@@ -958,8 +984,8 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					lastPacketAt = time.Now()
 					continue
 				}
-				if time.Since(lastPacketAt) > 500*time.Millisecond {
-					// The byte index is ambiguous after half a cycle without media.
+				if time.Since(lastPacketAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
+					// The 15-bit index is ambiguous after half a cycle without media.
 					resetState()
 					pendingIndex = index
 					pendingData = payload
@@ -968,13 +994,13 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					continue
 				}
 
-				delta := index - pendingIndex
+				delta := mediaIndexDelta(index, pendingIndex)
 				if delta == 0 {
 					// Duplicate or reordered packet. Keep waiting for a frame after
 					// the current one before advancing the decoder.
 					continue
 				}
-				if int8(delta) < 0 {
+				if delta < 0 {
 					continue
 				}
 
@@ -984,7 +1010,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					}
 				}
 
-				missingTicks := int(delta) - audioFrameTicks
+				missingTicks := delta - audioFrameTicks
 				if missingTicks > audioMaxConsecutivePLCs*audioFrameTicks {
 					// A long loss burst is better handled by jumping to the live edge
 					// than by playing stale audio after a long PLC run.
@@ -998,8 +1024,8 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 					continue
 				}
 				if missingTicks > 0 {
-					if frame := generatePLC(missingTicks * mediaTickSamples); frame != nil {
-						enqueueFrame(frame, pendingIndex+uint8(audioFrameTicks))
+					if frame := generatePLC(int(missingTicks) * mediaTickSamples); frame != nil {
+						enqueueFrame(frame, advanceMediaIndex(pendingIndex, audioFrameTicks))
 					}
 				}
 
@@ -1017,13 +1043,13 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 // and updates the remote preview independently of the audio receive loop.
 func startVideoReceiver(wg *sync.WaitGroup,
 	stopCh <-chan struct{}, netVideoIn <-chan []byte, screenOut chan *codec.TextFrame,
-	playbackIndex func() (uint8, bool)) {
+	playbackIndex func() (uint16, bool)) {
 	decoder := codec.NewDecoder()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		type timedFrame struct {
-			index uint8
+			index uint16
 			frame *codec.TextFrame
 		}
 		queue := make([]timedFrame, 0, 2)
@@ -1068,7 +1094,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 			selected := -1
 			for i := range queue {
-				if int8(current-queue[i].index) >= 0 {
+				if mediaIndexDelta(current, queue[i].index) >= 0 {
 					selected = i
 				}
 			}
@@ -1078,7 +1104,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			candidate := queue[selected]
 			queue = append(queue[:0], queue[selected+1:]...)
 			// A frame that missed the audio playhead by more than 250 ms is stale.
-			if int8(current-candidate.index) <= 62 {
+			if mediaIndexDelta(current, candidate.index) <= 62 {
 				display(candidate.frame)
 			}
 		}
@@ -1102,8 +1128,8 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				if len(pkt) <= mediaIndexBytes {
 					continue
 				}
-				index := pkt[0]
-				if !lastFrameAt.IsZero() && time.Since(lastFrameAt) > 500*time.Millisecond {
+				index := uint16(pkt[0])<<8 | uint16(pkt[1])
+				if !lastFrameAt.IsZero() && time.Since(lastFrameAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
 					queue = queue[:0]
 				}
 				lastFrameAt = time.Now()
@@ -1115,7 +1141,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 
 				queue = append(queue, timedFrame{index: index, frame: tv})
 				sort.Slice(queue, func(i, j int) bool {
-					return int8(queue[i].index-queue[j].index) < 0
+					return mediaIndexDelta(queue[i].index, queue[j].index) < 0
 				})
 				if len(queue) > 2 {
 					queue = queue[len(queue)-2:]

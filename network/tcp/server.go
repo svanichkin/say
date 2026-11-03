@@ -7,11 +7,12 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
+	"time"
+
 	"github.com/svanichkin/say/conf"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/ui"
-	"strings"
-	"time"
 )
 
 // StartSignalServerTCP accepts incoming P2P control connections on ln.
@@ -104,6 +105,10 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 
 	// Reply OK and keep the socket open (this is our P2P channel for future audio)
 	fmt.Fprintf(conn, "OK %s\n", conf.HostnameOr("me"))
+	installChatActions(conn)
+	defer ui.SetChatActions(nil, nil)
+	var incoming *incomingFile
+	defer abortIncoming(&incoming)
 
 	// Start media session (audio/video) on incoming side, learning peer address from first packet.
 	if mediaFactory != nil {
@@ -140,6 +145,8 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 			tcpKA.touch()
 		}
 		switch t {
+		case frameChat, frameFileStart, frameFileChunk, frameFileEnd:
+			handleChatFrame(t, payload, &incoming)
 		case frameVideo:
 			// ignore here; video handled via UDP
 		case frameAudio:

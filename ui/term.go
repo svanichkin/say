@@ -3,12 +3,11 @@ package ui
 import (
 	"context"
 	"fmt"
-	"math"
-	"math/rand"
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
-	"github.com/svanichkin/say/mediactrl"
+	"math"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -946,165 +945,116 @@ func renderTermFrames() {
 	if havePeerViewport {
 		broadcastViewportSize(peerCols, peerRows)
 	}
-
-	width := cols - 2*termBorder
-	height := rows - 2*termBorder
-	if width <= 4 || height <= 2 {
-		return
+	local, _, _ := localFrameSnapshot()
+	remote, _, _ := remoteFrameSnapshot()
+	chatData := renderChatScreen(cols, rows, local, remote)
+	if chatData != "" {
+		enqueueFrame(&device.TerminalFrame{Data: chatData})
 	}
+}
 
-	local, _, localUpdated := localFrameSnapshot()
-	remote, _, remoteUpdated := remoteFrameSnapshot()
-	status := currentStatusMessage()
-	if local == nil && remote == nil {
-		updateNoiseAnimation(false)
-		if status == "" {
-			return
-		}
-		data := buildStatusScreen(cols, rows, status)
-		if data == "" {
-			return
-		}
-		lastDrawMu.Lock()
-		lastDraw.w, lastDraw.h, lastDraw.orient = 0, 0, 0
-		lastDrawMu.Unlock()
-		enqueueFrame(&device.TerminalFrame{Data: data})
-		return
+// renderChatScreen draws the call's video panes, conversation, and input line.
+func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
+	vs, ok := calcViewportSlots(cols, rows)
+	if !ok {
+		return ""
 	}
-	statusClickClearAreas()
-
-	var orient byte
-	if local != nil && remote != nil {
-		if float64(height) > float64(width)*termCellWidthToHeight {
-			orient = 'V'
-		} else {
-			orient = 'H'
-		}
+	canvasLeft, canvasTop := termBorder+1, termBorder+1
+	chatTop := canvasTop + vs.selfSlot.rows + termSeparator
+	inputRow := rows - termBorder
+	chatBottom := inputRow - 2
+	chatRows := chatBottom - chatTop + 1
+	if chatRows < 1 {
+		return ""
 	}
-
-	localSlot := slotSize{cols: width, rows: height}
-	remoteSlot := slotSize{cols: width, rows: height}
-	if local != nil && remote != nil {
-		if vs, ok := calcViewportSlots(cols, rows); ok {
-			localSlot = vs.selfSlot
-			remoteSlot = vs.peerSlot
-		}
-	}
-
-	fullClear := false
-	lastDrawMu.Lock()
-	if lastDraw.orient != orient {
-		fullClear = true
-	}
-	lastDraw.w, lastDraw.h, lastDraw.orient = width, height, orient
-	lastDrawMu.Unlock()
-
-	now := time.Now()
-	localFrozen := local != nil && !localUpdated.IsZero() && now.Sub(localUpdated) > frameFreezeThreshold
-	remoteFrozen := remote != nil && !remoteUpdated.IsZero() && now.Sub(remoteUpdated) > frameFreezeThreshold
-
-	localPatternActive := false
-	if localFrozen && local != nil {
-		localPatternActive = updateIdlePatternSlot(localFrameType, true, now)
+	var out strings.Builder
+	out.WriteString("\x1b[2J\x1b[H")
+	appendBorderClear(&out, cols, rows)
+	sepCol := canvasLeft + vs.selfSlot.cols
+	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows, sepCol)
+	appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, chatTop-1)
+	if local != nil {
+		writeTextFrame(&out, local, canvasTop, canvasLeft)
 	} else {
-		updateIdlePatternSlot(localFrameType, false, now)
+		writeChatPanePlaceholder(&out, canvasTop, canvasLeft, vs.selfSlot, "Your video")
 	}
-	remotePatternActive := false
-	if remoteFrozen && remote != nil {
-		remotePatternActive = updateIdlePatternSlot(remoteFrameType, true, now)
+	if remote != nil {
+		writeTextFrame(&out, remote, canvasTop, sepCol+termSeparator)
 	} else {
-		updateIdlePatternSlot(remoteFrameType, false, now)
+		writeChatPanePlaceholder(&out, canvasTop, sepCol+termSeparator, vs.peerSlot, "Peer video")
 	}
 
-	localLabel := currentFPSLabel(localFrameType)
-	remoteLabel := currentFPSLabel(remoteFrameType)
-	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
-	latency := PeerLatencySnapshot()
-	latencyLabel := buildLatencyLabel(latency)
-	localRate := buildRateLabel("TX", '↑', txAudio, txVideo)
-	remoteRate := buildRateLabel("RX", '↓', rxAudio, rxVideo)
-	localOverlay := frameOverlay{fps: localLabel, rate: localRate}
-	remoteOverlay := frameOverlay{fps: remoteLabel, rate: remoteRate, latency: latencyLabel}
-	if !mediactrl.CaptureEnabled() {
-		localOverlay.fps = "MUTED"
-		localOverlay.rate = ""
+	chatState.RLock()
+	messages := append([]ChatMessage(nil), chatState.messages...)
+	input, transfer := chatState.input, chatState.transfer
+	chatState.RUnlock()
+	start := len(messages) - chatRows
+	if start < 0 {
+		start = 0
 	}
-	if !mediactrl.PlaybackEnabled() {
-		remoteOverlay.fps = "PAUSED"
-		remoteOverlay.rate = ""
-		remoteOverlay.latency = ""
-	}
-
-	updateNoiseAnimation(localFrozen || remoteFrozen)
-
-	renderLocal := local
-	renderRemote := remote
-
-	if localFrozen && local != nil {
-		if localOverlay.fps == localLabel {
-			localOverlay.fps = "NO SIGNAL"
-			localOverlay.rate = ""
-		}
-		noiseCols := localSlot.cols
-		noiseRows := localSlot.rows
-		if noiseCols <= 0 || noiseRows <= 0 {
-			noiseCols = local.Cols
-			noiseRows = local.Rows
-		}
-		if localPatternActive {
-			if gf := testCardTextFrame(noiseCols, noiseRows); gf != nil {
-				renderLocal = gf
-				localOverlay.centerLabel = "NO SIGNAL"
+	for i, msg := range messages[start:] {
+		row := chatTop + i
+		text := strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return ' '
 			}
-		} else if nf := noiseTextFrame(noiseCols, noiseRows); nf != nil {
-			renderLocal = nf
-			localOverlay.centerLabel = "NO SIGNAL"
+			return r
+		}, msg.Text)
+		limit := cols - 2*termBorder
+		if len([]rune(text)) > limit {
+			text = string([]rune(text)[:limit])
 		}
+		width := len([]rune(text))
+		col := canvasLeft
+		color := "\x1b[38;2;160;220;255m"
+		if msg.Local {
+			col += max(0, limit-width)
+			color = "\x1b[38;2;190;255;190m"
+		}
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s\x1b[2K%s%s\x1b[0m", row, col, color, text, ""))
 	}
-	if remoteFrozen && remote != nil {
-		if remoteOverlay.fps == remoteLabel {
-			remoteOverlay.fps = "NO SIGNAL"
-			remoteOverlay.rate = ""
-		}
-		noiseCols := remoteSlot.cols
-		noiseRows := remoteSlot.rows
-		if noiseCols <= 0 || noiseRows <= 0 {
-			noiseCols = remote.Cols
-			noiseRows = remote.Rows
-		}
-		if remotePatternActive {
-			if gf := testCardTextFrame(noiseCols, noiseRows); gf != nil {
-				renderRemote = gf
-				remoteOverlay.centerLabel = "NO SIGNAL"
-			}
-		} else if nf := noiseTextFrame(noiseCols, noiseRows); nf != nil {
-			renderRemote = nf
-			remoteOverlay.centerLabel = "NO SIGNAL"
-		}
+	sepInput := inputRow - 1
+	if sepInput > chatTop {
+		appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, sepInput)
+		out.WriteString(fmt.Sprintf("\x1b[%d;1H", inputRow))
 	}
+	line := input
+	if transfer != "" {
+		line = transfer
+	} else {
+		line = "> " + line
+	}
+	line = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, line)
+	if len([]rune(line)) > cols-2*termBorder {
+		line = string([]rune(line)[len([]rune(line))-(cols-2*termBorder):])
+	}
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[2K\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, canvasLeft, line))
+	return out.String()
+}
 
-	var data string
-	switch {
-	case renderLocal != nil && renderRemote != nil:
-		if orient == 'V' {
-			data = buildVerticalFrame(cols, rows, renderLocal, renderRemote, localOverlay, remoteOverlay, fullClear)
-		} else {
-			data = buildHorizontalFrame(cols, rows, renderLocal, renderRemote, localOverlay, remoteOverlay, fullClear)
-		}
-	default:
-		frame := renderLocal
-		overlay := localOverlay
-		if frame == nil {
-			frame = renderRemote
-			overlay = remoteOverlay
-		}
-		data = buildSingleFrame(cols, rows, frame, overlay, fullClear)
+func writeChatPanePlaceholder(out *strings.Builder, top, left int, slot slotSize, fallback string) {
+	label := currentStatusMessage()
+	if label == "" || strings.EqualFold(label, "Client starting…") || strings.EqualFold(label, "Server starting…") {
+		label = fallback
 	}
-
-	if data == "" {
-		return
+	label = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, label)
+	runes := []rune(label)
+	if len(runes) > slot.cols {
+		runes = runes[:slot.cols]
 	}
-	enqueueFrame(&device.TerminalFrame{Data: data})
+	row := top + slot.rows/2
+	col := left + max(0, (slot.cols-len(runes))/2)
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, string(runes)))
 }
 
 var noisePaletteYCbCr = [2][3]byte{
@@ -1990,54 +1940,23 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 		return
 	}
 
-	// Выбираем ориентацию так же, как в рендерере.
-	if float64(height) > float64(width)*termCellWidthToHeight {
-		vs.orient = 'V'
-	} else {
-		vs.orient = 'H'
+	vs.orient = 'H'
+	availableCols := width - separator
+	if availableCols < 4 {
+		return
 	}
-
-	switch vs.orient {
-	case 'V':
-		// Два слота друг над другом.
-		availableRows := height - separator
-		if availableRows < 2 {
-			return
-		}
-		topRows := availableRows / 2
-		bottomRows := availableRows - topRows
-
-		vs.selfSlot = slotSize{
-			cols:   width,
-			rows:   topRows,
-			orient: vs.orient,
-		}
-		vs.peerSlot = slotSize{
-			cols:   width,
-			rows:   bottomRows,
-			orient: vs.orient,
-		}
-
-	default: // 'H'
-		// Два слота рядом.
-		availableCols := width - separator
-		if availableCols < 4 {
-			return
-		}
-		leftCols := availableCols / 2
-		rightCols := availableCols - leftCols
-
-		vs.selfSlot = slotSize{
-			cols:   leftCols,
-			rows:   height,
-			orient: vs.orient,
-		}
-		vs.peerSlot = slotSize{
-			cols:   rightCols,
-			rows:   height,
-			orient: vs.orient,
-		}
+	leftCols := availableCols / 2
+	rightCols := availableCols - leftCols
+	paneRows := int(math.Round(float64(leftCols) * termCellWidthToHeight * 3 / 4))
+	maxPaneRows := height - 4
+	if paneRows > maxPaneRows {
+		paneRows = maxPaneRows
 	}
+	if paneRows < 1 {
+		return
+	}
+	vs.selfSlot = slotSize{cols: leftCols, rows: paneRows, orient: vs.orient}
+	vs.peerSlot = slotSize{cols: rightCols, rows: paneRows, orient: vs.orient}
 
 	if vs.selfSlot.cols <= 0 || vs.selfSlot.rows <= 0 ||
 		vs.peerSlot.cols <= 0 || vs.peerSlot.rows <= 0 {

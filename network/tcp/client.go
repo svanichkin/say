@@ -84,6 +84,10 @@ func clientHandleIncoming(conn net.Conn, host string, port int, termSync *TermSi
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer conn.Close()
+	installChatActions(conn)
+	defer ui.SetChatActions(nil, nil)
+	var incoming *incomingFile
+	defer abortIncoming(&incoming)
 
 	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, 2*time.Second, 6*time.Second, true)
 	defer stopKeepalive()
@@ -151,6 +155,8 @@ func clientHandleIncoming(conn net.Conn, host string, port int, termSync *TermSi
 				_ = deadlineConn.SetReadDeadline(time.Time{})
 			}
 			switch t {
+			case frameChat, frameFileStart, frameFileChunk, frameFileEnd:
+				handleChatFrame(t, payload, &incoming)
 			case frameTick:
 				if latency, ok := decodeTickLatency(payload); ok {
 					ui.UpdatePeerLatency(latency)

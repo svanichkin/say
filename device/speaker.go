@@ -21,7 +21,7 @@ type Speaker struct {
 // PlaybackFrame is decoded PCM aligned to the sender's media timeline.
 type PlaybackFrame struct {
 	Samples    []int16
-	MediaIndex uint8
+	MediaIndex uint16
 }
 
 // StartSpeaker initializes a playback device that consumes PCM frames from speakerIn.
@@ -45,7 +45,7 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	}
 
 	var pending []int16
-	var pendingIndex uint8
+	var pendingIndex uint16
 	var pendingSamples int
 	speaker := &Speaker{ctx: ctx}
 	if samplesPerMediaTick > 0 {
@@ -144,11 +144,11 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 
 // PlaybackIndex estimates the media index currently audible, compensating for
 // the configured device buffer latency.
-func (s *Speaker) PlaybackIndex() (uint8, bool) {
+func (s *Speaker) PlaybackIndex() (uint16, bool) {
 	if s == nil || !s.playbackSet.Load() {
 		return 0, false
 	}
-	return uint8(s.playbackTick.Load() - s.playbackLatencyTicks), true
+	return uint16(s.playbackTick.Load()-s.playbackLatencyTicks) & 0x7fff, true
 }
 
 // Close stops playback and releases device resources.

@@ -11,10 +11,14 @@ import (
 // Frame type identifiers for the simple binary framing protocol used on top of the TCP connection.
 // Each frame starts with a 1-byte type followed by a 2-byte big-endian payload length and the payload itself.
 const (
-	frameAudio    byte = 0x01
-	frameVideo    byte = 0x02
-	frameTick     byte = 0x03
-	frameTermSize byte = 0x05
+	frameAudio     byte = 0x01
+	frameVideo     byte = 0x02
+	frameTick      byte = 0x03
+	frameTermSize  byte = 0x05
+	frameChat      byte = 0x06
+	frameFileStart byte = 0x07
+	frameFileChunk byte = 0x08
+	frameFileEnd   byte = 0x09
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -41,12 +45,25 @@ func writeFrame(w net.Conn, t byte, payload []byte) error {
 		return fmt.Errorf("frame too large: %d", len(payload))
 	}
 	hdr := []byte{t, byte(len(payload) >> 8), byte(len(payload))}
-	if _, err := w.Write(hdr); err != nil {
+	if err := writeAll(w, hdr); err != nil {
 		return err
 	}
 	if len(payload) > 0 {
-		_, err := w.Write(payload)
-		return err
+		return writeAll(w, payload)
+	}
+	return nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
 	}
 	return nil
 }
