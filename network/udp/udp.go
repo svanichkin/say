@@ -14,8 +14,7 @@ import (
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 	"github.com/svanichkin/say/ui"
-
-	g722 "github.com/gotranspile/g722"
+	"github.com/thesyncim/gopus"
 )
 
 var (
@@ -126,7 +125,7 @@ func (vs *dataSession) Done() <-chan struct{} {
 	return vs.done
 }
 
-// StartSession establishes a unidirectional or bidirectional UDP voice channel using G.722
+// StartSession establishes a unidirectional or bidirectional UDP voice channel using Opus
 // for audio and malgo for playback. If a camera stream is active and enableVideo is true,
 // TextFrame-encoded video frames are also sent over the same PacketConn, prefixed with a frame
 // type byte.
@@ -157,8 +156,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 
 	// ======== Audio codec and buffers ========
 	var (
-		enc          *g722.Encoder
-		dec          *g722.Decoder
+		enc          *gopus.Encoder
+		dec          *gopus.Decoder
 		frameSamples int
 		mediaEpoch   = time.Now()
 
@@ -175,7 +174,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	if useVoice {
 		// Init codec
 		var err error
-		enc, dec, frameSamples, err = initAudioCodec(0, 0)
+		enc, dec, frameSamples, err = initAudioCodec()
 		if err != nil {
 			return nil, err
 		}
@@ -315,10 +314,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 }
 
 // startSender launches goroutines responsible for sending:
-//   - audio: mic → G.722 → UDP (mediaKindAudio)
+//   - audio: mic → Opus → UDP (mediaKindAudio)
 //   - video: camera → TextFrame → UDP (mediaKindVideo)
 func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder, frameSamples int,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
 ) {
@@ -330,16 +329,16 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 }
 
-// startAudioSender: mic → G.722 → UDP (mediaKindAudio)
+// startAudioSender: mic → Opus → UDP (mediaKindAudio)
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *g722.Encoder,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder,
 	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
 ) {
 	if !useVoice || enc == nil || audioMicIn == nil {
 		return
 	}
 
-	// ======== Audio sender: mic → G.722 → UDP ========
+	// ======== Audio sender: mic → Opus → UDP ========
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -366,15 +365,10 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return true
 			}
 
-			encodedLen := (len(chunk)*g722BitsPerSample + 7) / 8
-			if encodedLen <= 0 {
-				return true
-			}
-
-			buf := make([]byte, encodedLen)
-			written := enc.Encode(buf, chunk)
-			if written <= 0 {
-				log.Printf("[voice/udp] encode error: produced %d bytes", written)
+			buf := make([]byte, maxOpusPacket)
+			written, err := enc.EncodeInt16(chunk, buf)
+			if err != nil || written <= 0 {
+				log.Printf("[voice/udp] Opus encode error: bytes=%d err=%v", written, err)
 				if stop != nil {
 					stop()
 				}
@@ -791,9 +785,9 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 	}()
 }
 
-// startAudioReceiver launches a goroutine that decodes G.722 payloads from netAudioIn into PCM frames
+// startAudioReceiver launches a goroutine that decodes Opus payloads from netAudioIn into PCM frames
 // and feeds them into speakerOut.
-func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
+func startAudioReceiver(wg *sync.WaitGroup, dec *gopus.Decoder, frameSamples int,
 	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut chan device.PlaybackFrame) {
 	wg.Add(1)
 	go func() {
@@ -881,16 +875,27 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 		}
 
 		generatePLC := func(sampleCount int) []int16 {
-			if plcStreak >= audioMaxConsecutivePLCs {
+			if sampleCount <= 0 || sampleCount%frameSamples != 0 || plcStreak >= audioMaxConsecutivePLCs {
 				return nil
 			}
-			plcStreak++
-			frame := make([]int16, sampleCount)
-			if lastGoodFrame != nil {
-				for offset := 0; offset < len(frame); {
-					offset += copy(frame[offset:], lastGoodFrame)
+			frames := sampleCount / frameSamples
+			if frames > audioMaxConsecutivePLCs-plcStreak {
+				frames = audioMaxConsecutivePLCs - plcStreak
+			}
+			frame := make([]int16, frames*frameSamples)
+			for i := 0; i < frames; i++ {
+				out := pcmScratch[:frameSamples]
+				written, err := dec.DecodeInt16(nil, out)
+				if err == nil && written > 0 {
+					if written > frameSamples {
+						written = frameSamples
+					}
+					copy(frame[i*frameSamples:i*frameSamples+written], out[:written])
+				} else if lastGoodFrame != nil {
+					copy(frame[i*frameSamples:(i+1)*frameSamples], lastGoodFrame)
 				}
 			}
+			plcStreak += frames
 			return frame
 		}
 
@@ -901,9 +906,9 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *g722.Decoder, frameSamples int,
 			if len(pcmScratch) < frameSamples {
 				pcmScratch = make([]int16, frameSamples)
 			}
-			written := dec.Decode(pcmScratch[:frameSamples], data)
-			if written <= 0 {
-				logs.LogV("[voice/udp] decode error: produced %d samples (len=%d)", written, len(data))
+			written, err := dec.DecodeInt16(data, pcmScratch[:frameSamples])
+			if err != nil || written <= 0 {
+				logs.LogV("[voice/udp] Opus decode error: produced %d samples (len=%d): %v", written, len(data), err)
 				return false
 			}
 			plcStreak = 0

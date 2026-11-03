@@ -35,7 +35,7 @@ external Yggdrasil daemon or web stack.
 
 ## Requirements
 
-- Go **1.24** (minimum) with cgo enabled.
+- Go **1.27.3** (minimum) with cgo enabled for native audio I/O. The Opus codec itself is pure Go.
 - A working microphone for voice calls and, if you enable video, a webcam that
   is supported by your OS (V4L2 on Linux, AVFoundation on macOS, Media
   Foundation on Windows).
