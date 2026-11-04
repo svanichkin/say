@@ -234,6 +234,7 @@ of the current media protocol. Relevant CLI switches:
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP).
 - `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
+- `-novideo` – audio and chat only: the camera is not opened and no video is encoded or drawn.
 - `-aec=false` – disable acoustic echo cancellation (enabled by default), e.g. with headphones or to compare voice quality.
 - `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.

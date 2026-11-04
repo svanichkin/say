@@ -118,7 +118,7 @@ func run() (err error) {
 		initialStatus = "Client starting…"
 	}
 
-	udptransport.Configure(true, true)
+	udptransport.Configure(true, !opts.NoVideo)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {
