@@ -63,6 +63,17 @@ func Configure(enableVoice, enableVideo bool) {
 	useVideo = enableVideo
 }
 
+// LogAudioConfig logs the audio pipeline settings (temporary diagnostics).
+func LogAudioConfig() {
+	log.Printf("[diag] audio codec=%s aec=%v rate=%dHz channels=%d frame=%dms opusBitrate=%d amrMode=4.75kbps(DTX) "+
+		"speakerPeriod=%dms jitterLead=%dms concealBelow=%dms queueTrim=%d->%dms maxPLC=%dms captureResync=%v tick=%v",
+		audioCodec, echoCancel, audioSampleRate, audioChannels, audioFrameMillis, audioBitrate,
+		audioSpeakerPeriodFrames*audioFrameMillis, audioBufferLeadFrames*audioFrameMillis, audioPlayoutLowFrames*audioFrameMillis,
+		audioQueueMaxFrames*audioFrameMillis, audioQueueTargetFrames*audioFrameMillis, audioMaxConsecutivePLCs*audioFrameMillis,
+		audioCaptureResync, mediaTickDuration)
+	log.Printf("[diag] video maxFPS=%d datagramLimit=%d", maxVideoFPS, maxMediaDatagram)
+}
+
 // SetEchoCancellation enables or disables acoustic echo cancellation for
 // future voice sessions.
 func SetEchoCancellation(enabled bool) {
@@ -244,6 +255,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, err
 		}
+		log.Printf("[diag] session audio: codec=%s frameSamples=%d aec=%v remote=%v", audioCodec, frameSamples, echoCancel, remote)
 		if echoCancel {
 			aec, err = newAudioEcho(frameSamples)
 			if err != nil {
