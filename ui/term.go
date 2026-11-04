@@ -1036,8 +1036,8 @@ func renderChatScreen(cols, rows int) string {
 	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows+1, sepCol)
 	appendHorizontalSeparator(&out, canvasLeft, canvasCols, chatTop-1)
 	now := time.Now()
-	localIdle := writeChatPane(&out, local, localAt, localFrameType, now, canvasTop, videoLeft, vs.selfSlot)
-	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, now, canvasTop, peerLeft, vs.peerSlot)
+	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
+	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel+" PEER", now, canvasTop, peerLeft, vs.peerSlot)
 	// Animate the noise while a pane has no signal.
 	updateNoiseAnimation(localIdle || remoteIdle)
 
@@ -1047,12 +1047,6 @@ func renderChatScreen(cols, rows int) string {
 	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
 	if latencyLabel != "" {
 		remoteCaption += " " + latencyLabel
-	}
-	if localIdle {
-		localCaption = noSignalLabel
-	}
-	if remoteIdle {
-		remoteCaption = noSignalLabel
 	}
 	if !mediactrl.CaptureEnabled() {
 		localCaption = "MUTED"
@@ -1143,14 +1137,15 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 
 // writeChatPane fills a video slot: the frame when available (centered and
 // clipped to the slot), otherwise a blank pane with a placeholder label.
-// noSignalLabel marks a pane without live video, as in v0.1.3.
+// noSignalLabel marks a pane without live video, as in v0.1.3; the pane name
+// (CAM or PEER) follows it. The caption below keeps showing the link stats.
 const noSignalLabel = "NO SIGNAL"
 
 // writeChatPane fills a video slot with the frame (centered and clipped to
 // the slot). Without a frame yet, or when frames stopped for longer than
 // frameFreezeThreshold, it shows animated noise and, after testCardDelay, the
 // TV test card, labelled NO SIGNAL. It reports whether the pane has no signal.
-func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.Time, frameType string, now time.Time, top, left int, slot slotSize) bool {
+func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.Time, frameType, label string, now time.Time, top, left int, slot slotSize) bool {
 	idle := frame == nil || (!updatedAt.IsZero() && now.Sub(updatedAt) > frameFreezeThreshold)
 	if idle {
 		if updateIdlePatternSlot(frameType, true, now) {
@@ -1176,7 +1171,7 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 		}
 	}
 	if idle {
-		writeCenterLabel(out, noSignalLabel, top, left, slot.cols, slot.rows)
+		writeCenterLabel(out, label, top, left, slot.cols, slot.rows)
 	}
 	return idle
 }

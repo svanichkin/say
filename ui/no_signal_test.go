@@ -14,11 +14,11 @@ func TestPanesShowNoSignalNoiseThenTestCard(t *testing.T) {
 	}
 	start := time.Now()
 	var out strings.Builder
-	if !writeChatPane(&out, nil, time.Time{}, remoteFrameType, start, 2, 2, vs.peerSlot) {
+	if !writeChatPane(&out, nil, time.Time{}, remoteFrameType, "NO SIGNAL PEER", start, 2, 2, vs.peerSlot) {
 		t.Fatal("pane without frames is not idle")
 	}
-	if !strings.Contains(out.String(), noSignalLabel) {
-		t.Fatal("no NO SIGNAL label at call start")
+	if !strings.Contains(out.String(), "NO SIGNAL PEER") {
+		t.Fatal("no NO SIGNAL PEER label at call start")
 	}
 	if updateIdlePatternSlot(remoteFrameType, true, start.Add(time.Second)) {
 		t.Fatal("test card before testCardDelay")
@@ -29,14 +29,14 @@ func TestPanesShowNoSignalNoiseThenTestCard(t *testing.T) {
 	// A live frame clears the idle state.
 	frame := noiseTextFrame(vs.peerSlot.cols, vs.peerSlot.rows)
 	out.Reset()
-	if writeChatPane(&out, frame, start.Add(4*time.Second), remoteFrameType, start.Add(4*time.Second), 2, 2, vs.peerSlot) {
+	if writeChatPane(&out, frame, start.Add(4*time.Second), remoteFrameType, "NO SIGNAL PEER", start.Add(4*time.Second), 2, 2, vs.peerSlot) {
 		t.Fatal("pane with a fresh frame is idle")
 	}
 	if strings.Contains(out.String(), noSignalLabel) {
 		t.Fatal("NO SIGNAL shown over a live frame")
 	}
 	// Frames stop: idle again after frameFreezeThreshold.
-	if !writeChatPane(&out, frame, start.Add(4*time.Second), remoteFrameType, start.Add(4*time.Second+frameFreezeThreshold+time.Millisecond), 2, 2, vs.peerSlot) {
+	if !writeChatPane(&out, frame, start.Add(4*time.Second), remoteFrameType, "NO SIGNAL PEER", start.Add(4*time.Second+frameFreezeThreshold+time.Millisecond), 2, 2, vs.peerSlot) {
 		t.Fatal("frozen pane is not idle")
 	}
 }
