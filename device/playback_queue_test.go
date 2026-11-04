@@ -14,7 +14,7 @@ func TestPlaybackQueueBoundsLatencyBySamples(t *testing.T) {
 	if got := q.QueuedSamples(); got != 32*frame {
 		t.Fatalf("queued %d samples (%d ms), want exactly the newest concealment frame", got, got/8)
 	}
-	if f, ok := q.pop(); !ok || f.MediaIndex != 31 {
+	if f, _, ok := q.pop(); !ok || f.MediaIndex != 31 {
 		t.Fatalf("kept frame %d (ok=%v), want the newest frame 31", f.MediaIndex, ok)
 	} else {
 		q.consumed(len(f.Samples))
@@ -30,7 +30,7 @@ func TestPlaybackQueueBoundsLatencyBySamples(t *testing.T) {
 	}
 	// The speaker's accounting returns the counter to zero once all is played.
 	for {
-		f, ok := q.pop()
+		f, _, ok := q.pop()
 		if !ok {
 			break
 		}

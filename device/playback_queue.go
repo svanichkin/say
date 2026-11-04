@@ -10,6 +10,9 @@ import "sync/atomic"
 type PlaybackQueue struct {
 	ch      chan PlaybackFrame
 	samples atomic.Int64
+	// gap is set when queued audio was discarded, so the next frame the
+	// speaker takes does not continue the one it is playing.
+	gap atomic.Bool
 }
 
 // NewPlaybackQueue creates a queue holding at most capacity frames.
@@ -49,6 +52,7 @@ func (q *PlaybackQueue) DropOldest() bool {
 	select {
 	case frame := <-q.ch:
 		q.samples.Add(-int64(len(frame.Samples)))
+		q.gap.Store(true)
 		return true
 	default:
 		return false
@@ -85,13 +89,14 @@ func (q *PlaybackQueue) TrimLatency(maxSamples, targetSamples int) int {
 }
 
 // pop takes the next frame for the speaker without changing the sample count;
-// the speaker reports played samples through consumed.
-func (q *PlaybackQueue) pop() (PlaybackFrame, bool) {
+// the speaker reports played samples through consumed. discontinuous is true
+// when frames before it were discarded.
+func (q *PlaybackQueue) pop() (frame PlaybackFrame, discontinuous, ok bool) {
 	select {
-	case frame, ok := <-q.ch:
-		return frame, ok
+	case frame, ok = <-q.ch:
+		return frame, ok && q.gap.Swap(false), ok
 	default:
-		return PlaybackFrame{}, false
+		return PlaybackFrame{}, false, false
 	}
 }
 
@@ -104,7 +109,7 @@ func (q *PlaybackQueue) consumed(n int) {
 // TakeFrame removes and accounts for the next whole frame, for consumers
 // that play complete frames at once (offline rendering, tests).
 func (q *PlaybackQueue) TakeFrame() (PlaybackFrame, bool) {
-	frame, ok := q.pop()
+	frame, _, ok := q.pop()
 	if ok {
 		q.consumed(len(frame.Samples))
 	}

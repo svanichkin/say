@@ -28,7 +28,7 @@ type PlaybackFrame struct {
 // It reports every played sample back to speakerIn so its latency accounting stays exact.
 // stopCh is observed to output silence when the session stops, and onStop is invoked when
 // the underlying device stops unexpectedly.
-func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
+func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		log.Printf("[malgo] %s", message)
 	})
@@ -40,10 +40,10 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	// Keep the device callback cadence equal to the AEC processing frame.
-	// Feeding two 20 ms render frames at a time while capture is processed
-	// every 20 ms can leave SpeexDSP's small playback queue out of step.
-	deviceConfig.PeriodSizeInFrames = uint32(frameSamples)
+	// periodSamples is the device period. A small period leaves little slack
+	// for the Go callback on the real-time audio thread; underruns are heard
+	// as crackling.
+	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
 	if deviceConfig.Periods < 2 {
 		deviceConfig.Periods = 2
 	}
@@ -54,6 +54,9 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	// Reused by the audio callback so it never allocates (an allocation can
 	// stall the real-time thread on GC assist work).
 	var outSamples []int16
+	var declick crossfade
+	var lastOut int16 // last sample written to the device
+	var starved bool  // the previous callback ran out of audio
 	speaker := &Speaker{ctx: ctx}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
@@ -85,18 +88,29 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 
 			for filled < samplesNeeded {
 				if len(pending) == 0 {
-					if frame, ok := speakerIn.pop(); ok && frame.Samples != nil {
+					if frame, gap, ok := speakerIn.pop(); ok && frame.Samples != nil {
 						pending = frame.Samples
 						pendingIndex = frame.MediaIndex
 						pendingSamples = 0
+						if gap || starved {
+							// Queued audio was discarded or the queue ran dry: the
+							// new frame does not continue the last output sample.
+							declick.start(lastOut)
+						}
+						starved = false
 					}
 				}
 				if len(pending) == 0 {
-					clear(outSamples[filled:])
+					// Underrun: ramp the last sample down instead of stepping to zero.
+					declick.fadeOut(outSamples[filled:], lastOut)
+					lastOut = 0
+					starved = true
 					break
 				}
 				n := copy(outSamples[filled:], pending)
+				declick.apply(outSamples[filled : filled+n])
 				filled += n
+				lastOut = outSamples[filled-1]
 				pending = pending[n:]
 				speakerIn.consumed(n)
 				pendingSamples += n / channels
@@ -165,4 +179,42 @@ func (s *Speaker) Close() {
 			s.ctx.Free()
 		}
 	})
+}
+
+// declickSamples is the length of the ramps that hide PCM discontinuities
+// (5 ms at 8 kHz): long enough to remove the click, short enough to be inaudible.
+const declickSamples = 40
+
+// crossfade blends from a held sample value into a new signal, so a jump in
+// the PCM stream (dropped frames, resuming after an underrun) does not click.
+type crossfade struct {
+	from int16
+	left int
+}
+
+func (c *crossfade) start(from int16) {
+	c.from, c.left = from, declickSamples
+}
+
+func (c *crossfade) apply(samples []int16) {
+	for i := range samples {
+		if c.left <= 0 {
+			return
+		}
+		w := float64(c.left) / float64(declickSamples+1) // weight of the old value
+		samples[i] = int16(float64(c.from)*w + float64(samples[i])*(1-w))
+		c.left--
+	}
+}
+
+// fadeOut ramps from the last output sample to silence across dst.
+func (c *crossfade) fadeOut(dst []int16, from int16) {
+	c.left = 0
+	for i := range dst {
+		if i < declickSamples {
+			dst[i] = int16(float64(from) * float64(declickSamples-i) / float64(declickSamples+1))
+		} else {
+			dst[i] = 0
+		}
+	}
 }

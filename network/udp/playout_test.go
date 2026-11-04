@@ -107,3 +107,68 @@ func TestPlayoutFillsDTXSilenceWithComfortNoise(t *testing.T) {
 		t.Fatalf("played %d of 10 SID frames; SIDs must not be dropped as late: %v", sids, played)
 	}
 }
+
+// playedCounts drains the queue and counts decoded (>= 1000) and concealed (-1) frames.
+func playedCounts(q *device.PlaybackQueue) (decoded, concealed int, order []int16) {
+	for {
+		f, ok := q.TakeFrame()
+		if !ok {
+			return
+		}
+		if f.Samples[0] == -1 {
+			concealed++
+		} else {
+			decoded++
+		}
+		order = append(order, f.Samples[0])
+	}
+}
+
+func TestPlayoutToleratesTimestampJitter(t *testing.T) {
+	const frame = 160
+	q := device.NewPlaybackQueue(64)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	now := time.Now()
+	var decoded, concealed int
+	for i := 0; i < 50; i++ {
+		idx := uint16(i * audioFrameTicks)
+		if i%2 == 1 {
+			idx-- // every second block timestamped one 4 ms tick early
+		}
+		p.onPacket(idx, []byte{byte(i), 0}, now)
+		if i >= audioBufferLeadFrames { // the speaker plays one frame per packet
+			if f, ok := q.TakeFrame(); ok {
+				if f.Samples[0] == -1 {
+					concealed++
+				} else {
+					decoded++
+				}
+			}
+		}
+		now = now.Add(20 * time.Millisecond)
+	}
+	d, c, _ := playedCounts(q)
+	decoded, concealed = decoded+d, concealed+c
+	if decoded != 50 || concealed != 0 {
+		t.Fatalf("decoded %d, concealed %d of 50 jittered packets; want all 50 decoded", decoded, concealed)
+	}
+}
+
+func TestPlayoutReordersPacketsBeforeTheirSlotIsDue(t *testing.T) {
+	const frame = 160
+	q := device.NewPlaybackQueue(64)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	now := time.Now()
+	for _, i := range []int{0, 2, 1, 3, 4, 6, 5, 7, 8, 9} {
+		p.onPacket(uint16(i*audioFrameTicks), []byte{byte(i), 0}, now)
+	}
+	decoded, concealed, order := playedCounts(q)
+	if decoded != 10 || concealed != 0 {
+		t.Fatalf("decoded %d, concealed %d of 10 reordered packets: %v", decoded, concealed, order)
+	}
+	for i, v := range order {
+		if v != int16(1000+i) {
+			t.Fatalf("played out of order: %v", order)
+		}
+	}
+}
