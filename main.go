@@ -113,6 +113,7 @@ func run() (err error) {
 
 	udptransport.Configure(true, true)
 	udptransport.SetMicrophone(!opts.NoMic)
+	udptransport.SetVideoShapeHold(opts.VideoHold)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)

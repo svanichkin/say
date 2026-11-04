@@ -54,6 +54,7 @@ var (
 	glyphOnce       sync.Once
 	glyphIndexTable map[int]byte
 	glyphCodepoints []int
+	glyphPatterns   []uint32 // 4x8 shape of each glyph index
 )
 
 var bitmaps = []bitmapEntry{
@@ -138,6 +139,7 @@ func initGlyphTables() {
 			}
 			glyphIndexTable[bm.codePoint] = byte(len(glyphCodepoints))
 			glyphCodepoints = append(glyphCodepoints, bm.codePoint)
+			glyphPatterns = append(glyphPatterns, bm.pattern)
 			seen[bm.codePoint] = struct{}{}
 			if len(glyphCodepoints) >= 64 {
 				break
@@ -533,6 +535,13 @@ type Encoder struct {
 	reuseFgIdx          []byte
 	reuseBgIdx          []byte
 
+	// Shape hold: a cell keeps its previous glyph when the new glyph's 4x8
+	// shape differs by at most holdBits pixels, so noise does not make a
+	// static picture flip between similar glyphs. Colours always update.
+	holdBits   int
+	prevGlyphs []byte
+	prevCells  int
+
 	framesSinceLastKey int
 	keyframeInterval   int
 	forceBW            bool
@@ -635,6 +644,7 @@ func (e *Encoder) Encode(frame Frame, cols, rows int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.holdShapes(glyphs, fgColors, bgColors)
 
 	if frameW > int(math.MaxUint16) || frameH > int(math.MaxUint16) {
 		return nil, fmt.Errorf("frame dimensions too large: %dx%d (max %dx%d)", frameW, frameH, math.MaxUint16, math.MaxUint16)
@@ -1280,4 +1290,40 @@ func clampByte(v int) int {
 		return 255
 	}
 	return v
+}
+
+// SetShapeHold sets how many of a glyph's 32 pixels may differ before a
+// cell takes the new glyph (0 disables the hold).
+func (e *Encoder) SetShapeHold(bits int) {
+	e.holdBits = max(0, min(bits, 32))
+	e.prevCells = 0
+}
+
+// holdShapes keeps each cell's previous glyph when the new one has nearly
+// the same shape. A glyph close to the inverse of the previous one is the
+// same picture with foreground and background swapped, so the previous
+// glyph is kept and the new colours are swapped.
+func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
+	if e.holdBits <= 0 {
+		return
+	}
+	n := len(glyphs)
+	if e.prevCells == n && len(e.prevGlyphs) >= n {
+		for i, g := range glyphs {
+			p := e.prevGlyphs[i]
+			if g == p || int(g) >= len(glyphPatterns) || int(p) >= len(glyphPatterns) {
+				continue
+			}
+			gn, gp := glyphPatterns[g], glyphPatterns[p]
+			switch {
+			case bits.OnesCount32(gn^gp) <= e.holdBits:
+				glyphs[i] = p
+			case bits.OnesCount32(gn^^gp) <= e.holdBits:
+				glyphs[i] = p
+				fg[i], bg[i] = bg[i], fg[i]
+			}
+		}
+	}
+	e.prevGlyphs = append(e.prevGlyphs[:0], glyphs...)
+	e.prevCells = n
 }
