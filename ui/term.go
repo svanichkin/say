@@ -449,11 +449,14 @@ func enqueueFrame(tf *device.TerminalFrame) {
 	default:
 		select {
 		case <-ch:
+			// The dropped frame's cells never reached the screen.
+			screenDirty.Store(true)
 		default:
 		}
 		select {
 		case ch <- tf:
 		default:
+			screenDirty.Store(true)
 		}
 	}
 }
@@ -989,6 +992,7 @@ func renderConnectionScreen(cols, rows int, status string) string {
 		status = "Waiting for connection…"
 	}
 	beginScreen(screenStatus, cols, rows)
+	paneCache.reset()
 	return buildStatusScreen(cols, rows, status)
 }
 
@@ -1017,7 +1021,12 @@ func renderChatScreen(cols, rows int) string {
 	statusClickClearAreas()
 
 	var out strings.Builder
-	writeFramePrefix(&out, beginScreen(screenChat, cols, rows))
+	fullClear := beginScreen(screenChat, cols, rows)
+	paneCache.prepare(cols, rows, time.Now())
+	if fullClear {
+		paneCache.reset()
+	}
+	writeFramePrefix(&out, fullClear)
 	appendBorderClear(&out, cols, rows)
 
 	// Margins left and right of the centered video group (panes + captions).
@@ -1157,21 +1166,25 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 		updateIdlePatternSlot(frameType, false, now)
 	}
 	if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
-		writeTextFrame(out, frame, top, left)
+		writeTextFrameRegion(out, frame, top, left, 0, 0, frame.Cols, frame.Rows, &paneCache)
 	} else {
+		// The peer may still be encoding for a previous slot size: blank the
+		// pane and centre what fits. Rare, so drawn in full.
+		paneCache.invalidate(top, left, slot.cols, slot.rows)
 		blank := strings.Repeat(" ", slot.cols)
 		for r := 0; r < slot.rows; r++ {
 			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", top+r, left, blank))
 		}
 		if frame != nil {
-			// The peer may still be encoding for a previous slot size.
 			visCols, visRows := min(frame.Cols, slot.cols), min(frame.Rows, slot.rows)
 			offCol, offRow := max(0, (frame.Cols-slot.cols)/2), max(0, (frame.Rows-slot.rows)/2)
-			writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows)
+			writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows, nil)
 		}
 	}
 	if idle {
+		// The label covers pane cells; redraw them under it next time.
 		writeCenterLabel(out, label, top, left, slot.cols, slot.rows)
+		paneCache.invalidate(top, left, slot.cols, slot.rows)
 	}
 	return idle
 }
@@ -1787,12 +1800,13 @@ func writeTextFrame(sb *strings.Builder, frame *codec.TextFrame, startRow, start
 	if frame == nil {
 		return
 	}
-	writeTextFrameRegion(sb, frame, startRow, startCol, 0, 0, frame.Cols, frame.Rows)
+	writeTextFrameRegion(sb, frame, startRow, startCol, 0, 0, frame.Cols, frame.Rows, nil)
 }
 
 // writeTextFrameRegion draws the visCols×visRows sub-rectangle of frame that
 // starts at (offCol, offRow) with its top-left corner at (startRow, startCol).
-func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow, startCol, offCol, offRow, visCols, visRows int) {
+// With a cache, cells the screen already shows are skipped.
+func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow, startCol, offCol, offRow, visCols, visRows int, cache *screenCache) {
 	if frame == nil {
 		return
 	}
@@ -1811,13 +1825,17 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 	visCols = min(visCols, cols-offCol)
 	visRows = min(visRows, rows-offRow)
 
+	// Colours set by this call persist across cursor moves; nothing else
+	// writes in between, so they are tracked for the whole region.
+	var lastFg, lastBg [3]int
+	colored, wrote := false, false
 	for vr := 0; vr < visRows; vr++ {
 		r := offRow + vr
-		sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", startRow+vr, startCol))
-		var lastFg, lastBg [3]int
-		first := true
+		row := startRow + vr
+		move := true // the cursor is not at the next cell to draw
 		for c := offCol; c < offCol+visCols; c++ {
 			idx := r*cols + c
+			col := startCol + c - offCol
 			fg := frame.FgYCbCr[idx*3 : idx*3+3]
 			bg := frame.BgYCbCr[idx*3 : idx*3+3]
 			fr, fgCol, fb := ycbcrToRGB(fg[0], fg[1], fg[2])
@@ -1825,24 +1843,33 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 			br, bgCol, bb := ycbcrToRGB(bg[0], bg[1], bg[2])
 			br, bgCol, bb = applyColorFilter(br, bgCol, bb)
 
-			if first || fr != lastFg[0] || fgCol != lastFg[1] || fb != lastFg[2] {
-				sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm", fr, fgCol, fb))
-				lastFg = [3]int{fr, fgCol, fb}
-			}
-			if first || br != lastBg[0] || bgCol != lastBg[1] || bb != lastBg[2] {
-				sb.WriteString(fmt.Sprintf("\x1b[48;2;%d;%d;%dm", br, bgCol, bb))
-				lastBg = [3]int{br, bgCol, bb}
-			}
-
-			first = false
-
 			glyphIndex := int(frame.Glyphs[idx])
 			rn := ' '
 			if glyphIndex >= 0 && glyphIndex < len(glyphCodepoints) {
 				rn = rune(glyphCodepoints[glyphIndex])
 			}
+			cell := screenCell{r: rn, fg: [3]int{fr, fgCol, fb}, bg: [3]int{br, bgCol, bb}, set: true}
+			if cache != nil && !cache.update(row, col, cell) {
+				move = true
+				continue
+			}
+			if move {
+				sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, col))
+				move = false
+			}
+			if !colored || cell.fg != lastFg {
+				sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm", fr, fgCol, fb))
+				lastFg = cell.fg
+			}
+			if !colored || cell.bg != lastBg {
+				sb.WriteString(fmt.Sprintf("\x1b[48;2;%d;%d;%dm", br, bgCol, bb))
+				lastBg = cell.bg
+			}
+			colored, wrote = true, true
 			sb.WriteRune(rn)
 		}
+	}
+	if wrote {
 		sb.WriteString("\x1b[0m")
 	}
 }
