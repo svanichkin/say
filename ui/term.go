@@ -1037,7 +1037,7 @@ func renderChatScreen(cols, rows int) string {
 	appendHorizontalSeparator(&out, canvasLeft, canvasCols, chatTop-1)
 	now := time.Now()
 	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
-	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel+" PEER", now, canvasTop, peerLeft, vs.peerSlot)
+	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel+" NET", now, canvasTop, peerLeft, vs.peerSlot)
 	// Animate the noise while a pane has no signal.
 	updateNoiseAnimation(localIdle || remoteIdle)
 
@@ -1138,7 +1138,7 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 // writeChatPane fills a video slot: the frame when available (centered and
 // clipped to the slot), otherwise a blank pane with a placeholder label.
 // noSignalLabel marks a pane without live video, as in v0.1.3; the pane name
-// (CAM or PEER) follows it. The caption below keeps showing the link stats.
+// (CAM or NET) follows it. The caption below keeps showing the link stats.
 const noSignalLabel = "NO SIGNAL"
 
 // writeChatPane fills a video slot with the frame (centered and clipped to
