@@ -26,6 +26,10 @@ func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	log.Printf("[net] loading")
 	ygg.SetVerbose(verbose)
 	ygg.SetMaxPeers(100)
+	// LAN discovery: peers in the same local network (or on the same machine)
+	// find each other by multicast and connect directly instead of through
+	// public peers on the internet, which cuts latency and jitter.
+	ygg.SetLAN(true, "")
 	ygg.SetConnectivityHandler(func(connected bool) {
 		if connected {
 			t.readyOnce.Do(func() {
