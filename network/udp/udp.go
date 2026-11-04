@@ -622,6 +622,12 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		defer tick.Stop()
 
 		var fpsLimiter *time.Ticker
+		var (
+			curFPS         = maxVideoFPS // adapted to the peer's video loss
+			cleanReports   int
+			lastLossReport time.Time
+			videoSeq       byte
+		)
 		if maxVideoFPS > 0 {
 			interval := time.Second / time.Duration(maxVideoFPS)
 			if interval <= 0 {
@@ -660,6 +666,16 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				frames = 0
 				tEncodeLocal, tEncodeNet = 0, 0
 				lastRateSample = time.Now()
+
+				// Adapt the frame rate to the peer's latest loss report.
+				if loss, at := ui.PeerVideoLossSnapshot(); fpsLimiter != nil && at.After(lastLossReport) {
+					lastLossReport = at
+					if next := nextVideoFPS(curFPS, maxVideoFPS, loss, &cleanReports); next != curFPS {
+						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, curFPS, next)
+						curFPS = next
+						fpsLimiter.Reset(time.Second / time.Duration(curFPS))
+					}
+				}
 
 			case frame, ok := <-videoCamIn:
 				if !ok {
@@ -731,16 +747,18 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						continue
 					}
 
-					if mediaHeaderBytes+len(dataNet) > maxMediaDatagram {
+					if mediaHeaderBytes+videoSeqBytes+len(dataNet) > maxMediaDatagram {
 						// Cannot happen within codec.MaxFrameCells; never send an
 						// oversized datagram that the network would drop or fragment.
 						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", mediaHeaderBytes+len(dataNet), maxMediaDatagram)
 						continue
 					}
 					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
-					out := make([]byte, mediaHeaderBytes+len(dataNet))
+					out := make([]byte, mediaHeaderBytes+videoSeqBytes+len(dataNet))
 					copy(out[:mediaHeaderBytes], header[:])
-					copy(out[mediaHeaderBytes:], dataNet)
+					out[mediaHeaderBytes] = videoSeq // frame counter for the peer's loss estimate
+					videoSeq++
+					copy(out[mediaHeaderBytes+videoSeqBytes:], dataNet)
 
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
@@ -991,6 +1009,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		}
 		queue := make([]timedFrame, 0, videoMaxQueuedFrames)
 		lastFrameAt := time.Time{}
+		var loss videoLossMeter
 		var (
 			playbackSeen     bool
 			lastPlayback     uint16
@@ -1085,16 +1104,20 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				if !mediactrl.PlaybackEnabled() {
 					continue
 				}
-				if len(pkt) <= mediaIndexBytes {
+				if len(pkt) <= mediaIndexBytes+videoSeqBytes {
 					continue
 				}
 				index := uint16(pkt[0])<<8 | uint16(pkt[1])
 				if !lastFrameAt.IsZero() && time.Since(lastFrameAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
 					queue = queue[:0]
 				}
-				lastFrameAt = time.Now()
-				tv, err := decoder.Decode(pkt[mediaIndexBytes:])
+				now := time.Now()
+				lastFrameAt = now
+				loss.observe(pkt[mediaIndexBytes], now)
+				loss.report(now)
+				tv, err := decoder.Decode(pkt[mediaIndexBytes+videoSeqBytes:])
 				if err != nil {
+					loss.failed()
 					log.Printf("[video/udp] textFrame decode: %v", err)
 					continue
 				}

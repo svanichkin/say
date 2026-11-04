@@ -84,7 +84,7 @@ func TestVideoFollowsAudioClock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		in <- append([]byte{byte(idx >> 8), byte(idx)}, data...)
+		in <- append([]byte{byte(idx >> 8), byte(idx), byte(i)}, data...)
 		clock.Store(int32(idx) - lagTicks)
 		time.Sleep(40 * time.Millisecond)
 		for len(out) > 0 {

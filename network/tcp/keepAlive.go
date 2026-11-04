@@ -15,7 +15,8 @@ import (
 
 const (
 	pingPayloadLen    = 8
-	pongPayloadLen    = 9
+	pongPayloadLen    = 10 // ping id, audio loss %, video loss %
+	pongLegacyLen     = 9  // older peers report audio loss only
 	keepaliveInterval = 2 * time.Second
 	keepaliveTimeout  = 30 * time.Second
 )
@@ -52,23 +53,23 @@ func (ka *tcpKeepalive) pongPayload(ping []byte) []byte {
 	}
 	payload := make([]byte, pongPayloadLen)
 	copy(payload, ping)
-	loss, updatedAt := ui.RxAudioLossSnapshot()
-	if updatedAt.IsZero() || time.Since(updatedAt) > 3*time.Second {
-		loss = 0
-	}
-	pct := math.Round(loss * 100)
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	payload[pingPayloadLen] = byte(pct)
+	payload[pingPayloadLen] = lossPercent(ui.RxAudioLossSnapshot())
+	payload[pingPayloadLen+1] = lossPercent(ui.RxVideoLossSnapshot())
 	return payload
 }
 
+// lossPercent encodes a recent loss estimate as 0..100; stale data reads as 0.
+func lossPercent(loss float64, updatedAt time.Time) byte {
+	if updatedAt.IsZero() || time.Since(updatedAt) > 3*time.Second {
+		return 0
+	}
+	return byte(min(max(math.Round(loss*100), 0), 100))
+}
+
+// acceptPong matches a pong to its ping. It returns the RTT and the peer's
+// loss of our audio; the peer's loss of our video goes to ui.UpdatePeerVideoLoss.
 func (ka *tcpKeepalive) acceptPong(payload []byte) (time.Duration, float64, bool) {
-	if len(payload) != pongPayloadLen {
+	if len(payload) != pongPayloadLen && len(payload) != pongLegacyLen {
 		return 0, 0, false
 	}
 	id := binary.BigEndian.Uint64(payload[:pingPayloadLen])
@@ -84,6 +85,9 @@ func (ka *tcpKeepalive) acceptPong(payload []byte) (time.Duration, float64, bool
 	}
 	rtt := time.Since(sentAt)
 	loss := float64(payload[pingPayloadLen]) / 100
+	if len(payload) == pongPayloadLen {
+		ui.UpdatePeerVideoLoss(float64(payload[pingPayloadLen+1]) / 100)
+	}
 	return rtt, loss, true
 }
 

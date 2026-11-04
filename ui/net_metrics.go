@@ -83,3 +83,49 @@ func RxAudioLossSnapshot() (loss float64, updatedAt time.Time) {
 	defer netRateMu.RUnlock()
 	return rxAudioLoss, rxAudioLossUpdatedAt
 }
+
+var (
+	rxVideoLoss            float64
+	rxVideoLossUpdatedAt   time.Time
+	peerVideoLoss          float64
+	peerVideoLossUpdatedAt time.Time
+)
+
+func clampLoss(loss float64) float64 {
+	if loss < 0 {
+		return 0
+	}
+	if loss > 1 {
+		return 1
+	}
+	return loss
+}
+
+// UpdateRxVideoLoss records the fraction of incoming video frames that were
+// lost or could not be decoded; it is reported to the peer in pongs.
+func UpdateRxVideoLoss(loss float64) {
+	netRateMu.Lock()
+	rxVideoLoss, rxVideoLossUpdatedAt = clampLoss(loss), time.Now()
+	netRateMu.Unlock()
+}
+
+// RxVideoLossSnapshot returns the latest incoming video loss and its sample time.
+func RxVideoLossSnapshot() (loss float64, updatedAt time.Time) {
+	netRateMu.RLock()
+	defer netRateMu.RUnlock()
+	return rxVideoLoss, rxVideoLossUpdatedAt
+}
+
+// UpdatePeerVideoLoss records the loss of our video as reported by the peer.
+func UpdatePeerVideoLoss(loss float64) {
+	netRateMu.Lock()
+	peerVideoLoss, peerVideoLossUpdatedAt = clampLoss(loss), time.Now()
+	netRateMu.Unlock()
+}
+
+// PeerVideoLossSnapshot returns the peer's latest report on our video.
+func PeerVideoLossSnapshot() (loss float64, updatedAt time.Time) {
+	netRateMu.RLock()
+	defer netRateMu.RUnlock()
+	return peerVideoLoss, peerVideoLossUpdatedAt
+}
