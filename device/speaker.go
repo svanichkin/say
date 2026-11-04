@@ -40,7 +40,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	// periodSamples is the device period (40 ms from the caller).
+	// periodSamples is the device period; the caller passes one codec frame.
 	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
 	if deviceConfig.Periods < 2 {
 		deviceConfig.Periods = 2
