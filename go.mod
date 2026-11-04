@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/VoiceBlender/goamr-nb v1.1.0
 	github.com/danieldonoghue/govoip-dsp v0.1.0-rc.2
-	github.com/gen2brain/malgo v0.11.27
+	github.com/gen2brain/malgo v0.11.24
 	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
 	github.com/klauspost/compress v1.20.3
 	github.com/rivo/uniseg v0.4.7
