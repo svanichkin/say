@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"math/bits"
 	"runtime"
@@ -471,6 +472,21 @@ func (p *persistentZstdEncoder) use(fn func(*zstd.Encoder) error) error {
 	return fn(p.enc)
 }
 
+// Resolution limits for one video frame, in terminal cells. They bound the
+// memory a peer can make us allocate and keep every encoded frame within a
+// single UDP datagram (MaxPayloadBytes). 160×80 cells is a 640×640 px source,
+// far above what a pane in a typical terminal needs.
+const (
+	MaxFrameCols  = 160
+	MaxFrameRows  = 80
+	MaxFrameCells = MaxFrameCols * MaxFrameRows
+)
+
+// MaxPayloadBytes is the largest decompressed payload a valid frame can have:
+// header, 6-bit glyph plane, a full palette and two one-byte index planes.
+const MaxPayloadBytes = len(PayloadMagic) + 1 + 2 + 2 + 4*4 +
+	(MaxFrameCells*6+7)/8 + maxPaletteColors*2 + 2*MaxFrameCells
+
 type persistentZstdDecoder struct {
 	once sync.Once
 	mu   sync.Mutex
@@ -480,7 +496,10 @@ type persistentZstdDecoder struct {
 
 func (p *persistentZstdDecoder) use(fn func(*zstd.Decoder) error) error {
 	p.once.Do(func() {
-		p.dec, p.err = zstd.NewReader(nil)
+		p.dec, p.err = zstd.NewReader(nil,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(uint64(MaxPayloadBytes)),
+			zstd.WithDecoderMaxWindow(uint64(MaxPayloadBytes)))
 	})
 	if p.err != nil {
 		return p.err
@@ -608,10 +627,8 @@ func (e *Encoder) Encode(frame Frame, cols, rows int) ([]byte, error) {
 		frame = mirrorFrameHorizontal(frame)
 	}
 
-	maxCols := int(math.MaxUint16) / 4
-	maxRows := int(math.MaxUint16) / 8
-	if cols > maxCols || rows > maxRows {
-		return nil, fmt.Errorf("cols/rows too large: cols=%d (max %d), rows=%d (max %d)", cols, maxCols, rows, maxRows)
+	if cols > MaxFrameCols || rows > MaxFrameRows {
+		return nil, fmt.Errorf("cols/rows too large: cols=%d (max %d), rows=%d (max %d)", cols, MaxFrameCols, rows, MaxFrameRows)
 	}
 
 	glyphs, fgColors, bgColors, frameW, frameH, err := e.buildCellData(frame, cols, rows, e.forceBW)
@@ -763,6 +780,9 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	offset += 2
 	rows := binary.LittleEndian.Uint16(payload[offset : offset+2])
 	offset += 2
+	if cols == 0 || rows == 0 || int(cols) > MaxFrameCols || int(rows) > MaxFrameRows {
+		return nil, fmt.Errorf("frame size %dx%d outside 1..%dx%d", cols, rows, MaxFrameCols, MaxFrameRows)
+	}
 
 	readField := func(label string) ([]byte, error) {
 		if len(payload)-offset < 4 {
@@ -1042,26 +1062,31 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 	return glyphs, fgColors, bgColors, w, h, nil
 }
 
+// maxPaletteColors is the number of entries addressable by a one-byte index.
+const maxPaletteColors = 256
+
 func buildPaletteFromColors(fgColors, bgColors []paletteColor, totalCells int) ([]paletteColor, [][3]int) {
 	paletteMap := make(map[uint16]struct{}, 256)
 	packColor := func(y6, cb5, cr5 byte) uint16 {
 		return (uint16(y6) << 10) | (uint16(cb5) << 5) | uint16(cr5)
 	}
 
+	// Palette indices are a single byte, so the palette may hold at most
+	// maxPaletteColors entries. Check before every insertion: each cell adds
+	// two colors, and checking once per cell could overshoot to 257.
+	add := func(c paletteColor) bool {
+		code := packColor(c[0]>>2, c[1]>>3, c[2]>>3)
+		if _, ok := paletteMap[code]; ok {
+			return true
+		}
+		if len(paletteMap) >= maxPaletteColors {
+			return false
+		}
+		paletteMap[code] = struct{}{}
+		return true
+	}
 	for i := 0; i < totalCells; i++ {
-		fc := fgColors[i]
-		y6 := fc[0] >> 2
-		cb5 := fc[1] >> 3
-		cr5 := fc[2] >> 3
-		paletteMap[packColor(y6, cb5, cr5)] = struct{}{}
-
-		bc := bgColors[i]
-		y6b := bc[0] >> 2
-		cb5b := bc[1] >> 3
-		cr5b := bc[2] >> 3
-		paletteMap[packColor(y6b, cb5b, cr5b)] = struct{}{}
-
-		if len(paletteMap) >= 256 {
+		if !add(fgColors[i]) || !add(bgColors[i]) {
 			break
 		}
 	}
@@ -1188,8 +1213,15 @@ func decompressZstd(data []byte) ([]byte, error) {
 		if err := dec.Reset(bytes.NewReader(data)); err != nil {
 			return err
 		}
-		_, err := out.ReadFrom(dec)
-		return err
+		// Read one byte past the limit to tell "exactly at" from "over".
+		n, err := out.ReadFrom(io.LimitReader(dec, int64(MaxPayloadBytes)+1))
+		if err != nil {
+			return err
+		}
+		if n > int64(MaxPayloadBytes) {
+			return fmt.Errorf("decompressed payload exceeds %d bytes", MaxPayloadBytes)
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
