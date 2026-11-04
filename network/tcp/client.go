@@ -70,7 +70,7 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 	}()
 
 	stop := func() error {
-		return fc.Close()
+		return hangup(fc)
 	}
 	return stop, done, nil
 }

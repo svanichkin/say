@@ -70,3 +70,13 @@ func (o *callOwner) acquire(host string, conn net.Conn) (release func(), ok bool
 		}
 	}
 }
+
+// hangupActive ends the active call, if any, telling the peer.
+func (o *callOwner) hangupActive() {
+	o.mu.Lock()
+	call := o.active
+	o.mu.Unlock()
+	if call != nil {
+		_ = hangup(call.conn)
+	}
+}

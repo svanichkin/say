@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/ui"
@@ -26,6 +27,7 @@ const (
 	frameFileChunk  byte = 0x08
 	frameFileEnd    byte = 0x09
 	frameFileResult byte = 0x0a // receiver → sender: file saved or failed
+	frameBye        byte = 0x0b // the peer is hanging up: end the call now
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -130,6 +132,9 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			return
 		}
 		switch t {
+		case frameBye:
+			log.Printf("[p2p] %s hung up", s.peerLabel)
+			return
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
 			handleChatFrame(s.conn, t, payload, s.incoming)
 		case frameTermSize:
@@ -159,4 +164,23 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			// Audio and video travel over UDP; ignore unknown frame types.
 		}
 	}
+}
+
+// hangupFlush gives the in-process network stack (Yggdrasil) time to deliver
+// the goodbye before the node shuts down with the process.
+const hangupFlush = 300 * time.Millisecond
+
+// hangup tells the peer the call is over and closes the connection, so the
+// peer ends the call at once instead of waiting for the keepalive timeout.
+func hangup(conn net.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(hangupFlush))
+	sent := writeFrameSafe(conn, frameBye, nil) == nil
+	err := conn.Close()
+	if sent {
+		time.Sleep(hangupFlush)
+	}
+	return err
 }

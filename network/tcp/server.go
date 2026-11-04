@@ -49,7 +49,12 @@ func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, 
 		}
 	}()
 
-	return func() error { close(stop); return ln.Close() }, nil
+	return func() error {
+		close(stop)
+		err := ln.Close()
+		owner.hangupActive() // end the current call, telling the peer
+		return err
+	}, nil
 }
 
 // serverHandleIncoming processes a single accepted P2P control connection.
