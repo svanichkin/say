@@ -51,11 +51,23 @@ func isLocalIP(ip net.IP) bool {
 
 // uriHostIP extracts the IP of a peer URI such as tls://[fe80::1%en0]:1234.
 func uriHostIP(uri string) net.IP {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return nil
+	var host string
+	if u, err := url.Parse(uri); err == nil {
+		host = u.Hostname()
+	} else {
+		// An unescaped zone ("%en0" instead of "%25en0") fails url.Parse.
+		rest := uri
+		if i := strings.Index(rest, "://"); i >= 0 {
+			rest = rest[i+3:]
+		}
+		if strings.HasPrefix(rest, "[") {
+			if j := strings.IndexByte(rest, ']'); j > 0 {
+				host = rest[1:j]
+			}
+		} else if h, _, err := net.SplitHostPort(strings.SplitN(rest, "?", 2)[0]); err == nil {
+			host = h
+		}
 	}
-	host := u.Hostname()
 	if i := strings.IndexByte(host, '%'); i >= 0 {
 		host = host[:i] // zone of a link-local address
 	}
