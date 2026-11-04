@@ -331,6 +331,12 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
+		if aec != nil {
+			// Echo of rendered audio reaches the mic about one device buffer later.
+			delay := min(speaker.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
+			aec.setReferenceDelay(delay)
+			log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, speaker.LatencySamples()*1000/audioSampleRate)
+		}
 
 		// Open capture last, immediately before starting its consumer.
 		audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
