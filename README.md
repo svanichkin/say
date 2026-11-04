@@ -49,8 +49,10 @@ external Yggdrasil daemon or web stack.
   hundred bytes per frame instead of several kilobytes. A full frame follows
   about every half second, so a lost packet freezes the picture briefly
   instead of corrupting it. Both peers need this version.
-- **Adaptive jitter buffer.** Packets arriving after an actual concealed slot
-  grow the target delay; duplicates do not. Delay changes adjust decoded PCM
+- **Jitter buffer.** The target delay is fixed per call (the profile or
+  `-audio` value); automatic growth on late packets is turned off for now.
+  When enabled, packets arriving after an actual concealed slot grow the
+  target delay; duplicates do not. Delay changes adjust decoded PCM
   duration, never the codec's loss history. Temporary resampling is bounded to
   5% (it can slightly change pitch while adjusting); steady clock drift uses at
   most one sample per 20 ms frame. Quiet frames can shorten excess delay sooner.
@@ -59,8 +61,7 @@ external Yggdrasil daemon or web stack.
   speech is discarded with its original timestamp preserved.
 - **Local network calls.** Peers in the same LAN (or on the same machine) find
   each other by Yggdrasil multicast and connect directly instead of through
-  internet peers; Say then uses smaller audio buffers for lower latency.
-  `-nolan` turns this off.
+  internet peers. `-nolan` turns this off.
 - **Chat and file transfer** during a call (see below).
 - One call at a time: other callers get a "busy" answer; a peer that
   reconnects after a drop replaces its stale call.
@@ -85,8 +86,9 @@ audio. Compare channels to locate whether distortion starts before or after
 AEC; a real device recording is needed to verify its estimated delay.
 
 The `-audio` target changes gradually; the reported queued PCM excludes the
-sound device's own buffer. Automatic defaults for each new call are 80 ms lead
-and a 20 ms x 2 speaker buffer for LAN, or 120 ms lead and 60 ms x 2 for internet.
+sound device's own buffer. Each new call starts with a 20 ms x 2 speaker buffer
+and the smallest lead above one device period (40 ms), in the LAN and over the
+internet alike.
 
 ## Chat and file transfer
 

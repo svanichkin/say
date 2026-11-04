@@ -88,9 +88,14 @@ func SetSpeakerBuffer(periodMs, periods int) {
 // Audio buffer sets per connection, tuned by listening tests: a peer reached
 // through the internet, and one directly in the local network.
 const (
-	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 60, 2, 120
-	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 80
+	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 20, 2, 20
+	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 20
 )
+
+// audioLeadAdaptive lets late packets grow the jitter buffer lead and quiet
+// periods shrink it. Off for now: the lead stays at the profile (or -audio)
+// value. Clock drift correction of the PCM queue is not affected.
+var audioLeadAdaptive = false
 
 // ApplyNetworkProfile selects the buffer set for the next session.
 func ApplyNetworkProfile(lan bool) {

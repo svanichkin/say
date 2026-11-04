@@ -379,7 +379,7 @@ func (p *audioPlayout) push(pcm []int16) {
 func (p *audioPlayout) growLead(now time.Time) {
 	p.lateEvents++
 	p.lastLateAt = now
-	if !p.ready || p.lead >= audioLeadMaxFrames {
+	if !audioLeadAdaptive || !p.ready || p.lead >= audioLeadMaxFrames {
 		return
 	}
 	grow := min(audioLeadGrowFrames, audioLeadMaxFrames-p.lead)
@@ -418,7 +418,7 @@ func (p *audioPlayout) adaptLead(now time.Time) {
 		p.adjust = 0
 		return
 	}
-	if p.adjust == 0 && p.lead > p.leadMin && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
+	if audioLeadAdaptive && p.adjust == 0 && p.lead > p.leadMin && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
 		p.lead--
 		p.lastAdapt = now
 		p.adjust -= p.frameSamples

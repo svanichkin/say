@@ -25,6 +25,8 @@ func (d toneDecoder) Conceal(dst []int16) (int, error) { clear(dst[:d.frame]); r
 func (toneDecoder) IsDTXFrame([]byte) bool             { return false }
 
 func TestAdaptiveLeadGrowsOnJitterAndShrinksWhenQuiet(t *testing.T) {
+	defer func(v bool) { audioLeadAdaptive = v }(audioLeadAdaptive)
+	audioLeadAdaptive = true
 	const frame = 160
 	q := device.NewPlaybackQueue(audioBufferMaxFrames)
 	p := newAudioPlayout(toneDecoder{frame: frame}, frame, q)

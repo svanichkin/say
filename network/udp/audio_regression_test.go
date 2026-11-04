@@ -65,6 +65,8 @@ func TestDelayAdjustmentDoesNotInventCodecLosses(t *testing.T) {
 }
 
 func TestOneLateSlotGrowsDelayOnlyOnce(t *testing.T) {
+	defer func(v bool) { audioLeadAdaptive = v }(audioLeadAdaptive)
+	audioLeadAdaptive = true
 	q := device.NewPlaybackQueue(128)
 	p := newAudioPlayout(&countedDecoder{}, 160, q)
 	now := time.Now()
