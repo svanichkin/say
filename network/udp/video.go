@@ -10,6 +10,13 @@ import "github.com/svanichkin/say/codec"
 // picture changed enough to trigger one (the palette costs at most 512 bytes).
 const videoKeyframeInterval = 10
 
+// videoKeyframeFrames keeps full frames about every half second at any
+// frame rate: after a lost packet, change-only frames resume from the next
+// full frame, so this bounds how long the peer's picture can freeze.
+func videoKeyframeFrames(fps int) int {
+	return max(2, min(videoKeyframeInterval, fps/2))
+}
+
 // videoShapeHold is the mean per-pixel colour difference (sum of three
 // channels) below which a cell keeps its previous glyph and colours
 // (-video-hold; 0 disables). It stops a still picture from shimmering.

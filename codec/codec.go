@@ -3,6 +3,7 @@ package codec
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -544,6 +545,12 @@ type Encoder struct {
 	prevBg     []paletteColor
 	prevCells  int
 
+	// Last frame sent, as palette indices, for change-only frames.
+	sentGlyphs []byte
+	sentFg     []byte
+	sentBg     []byte
+	sentCells  int
+
 	framesSinceLastKey int
 	keyframeInterval   int
 	forceBW            bool
@@ -574,6 +581,35 @@ func (e *Encoder) updateKeyframeCounter(keyframe byte) {
 type Decoder struct {
 	mu          sync.Mutex
 	lastPalette []paletteColor
+
+	// Last decoded frame as palette indices: the base of change-only frames.
+	baseValid  bool
+	baseCols   int
+	baseRows   int
+	baseGlyphs []byte
+	baseFg     []byte
+	baseBg     []byte
+}
+
+// Frame types (the byte after the magic).
+const (
+	frameTypeFull      byte = 0 // all cells, palette of the last keyframe
+	frameTypeKey       byte = 1 // all cells and a palette
+	frameTypeDelta     byte = 2 // only the cells that changed since the previous frame
+	deltaMaxChangedNum      = 6 // a change frame is sent while at most 6/10…
+	deltaMaxChangedDen      = 10
+)
+
+// ErrNoBase reports a change-only frame whose previous frame is missing
+// (lost or not yet received); frames are shown again from the next keyframe.
+var ErrNoBase = errors.New("change frame without its previous frame")
+
+// ResetBase forgets the previous frame, e.g. after a lost packet, so change
+// frames are refused until the next full frame instead of drawing garbage.
+func (d *Decoder) ResetBase() {
+	d.mu.Lock()
+	d.baseValid = false
+	d.mu.Unlock()
 }
 
 var defaultDecoder Decoder
@@ -702,16 +738,54 @@ func (e *Encoder) Encode(frame Frame, cols, rows int) ([]byte, error) {
 		e.storePalette(palette)
 	}
 
+	// Change-only frame: with the palette unchanged, send just the cells that
+	// differ from the previous frame. Keyframes stay full so a receiver that
+	// lost a frame recovers at the next one.
+	frameType := keyframe
+	var changeMask, changedGlyphs, changedFg, changedBg []byte
+	if keyframe == 0 && e.sentCells == totalCells {
+		changeMask = make([]byte, (totalCells+7)/8)
+		for i := 0; i < totalCells; i++ {
+			if glyphs[i] != e.sentGlyphs[i] || finalFgIdx[i] != e.sentFg[i] || finalBgIdx[i] != e.sentBg[i] {
+				changeMask[i/8] |= 1 << (i % 8)
+				changedGlyphs = append(changedGlyphs, glyphs[i])
+				changedFg = append(changedFg, finalFgIdx[i])
+				changedBg = append(changedBg, finalBgIdx[i])
+			}
+		}
+		if len(changedGlyphs)*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum {
+			frameType = frameTypeDelta
+		}
+	}
+	e.sentGlyphs = append(e.sentGlyphs[:0], glyphs...)
+	e.sentFg = append(e.sentFg[:0], finalFgIdx...)
+	e.sentBg = append(e.sentBg[:0], finalBgIdx...)
+	e.sentCells = totalCells
+
 	e.payloadBuf.Reset()
 	payload := &e.payloadBuf
 
 	payload.WriteString(PayloadMagic)
-	payload.WriteByte(keyframe)
+	payload.WriteByte(frameType)
 	if err := binary.Write(payload, binary.LittleEndian, uint16(cols)); err != nil {
 		return nil, err
 	}
 	if err := binary.Write(payload, binary.LittleEndian, uint16(rows)); err != nil {
 		return nil, err
+	}
+
+	if frameType == frameTypeDelta {
+		for _, field := range [][]byte{changeMask, packGlyphs6(changedGlyphs), changedFg, changedBg} {
+			if err := writeField(payload, field); err != nil {
+				return nil, fmt.Errorf("write change frame: %w", err)
+			}
+		}
+		e.updateKeyframeCounter(keyframe)
+		compressed, err := compressZstd(payload.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("zstd encode: %w", err)
+		}
+		return compressed, nil
 	}
 
 	// write per-cell planes: glyph indices (packed as 6 bits) and palette-based color indices
@@ -813,47 +887,92 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 		return data, nil
 	}
 
-	glyphsEnc, err := readField("glyphs")
-	if err != nil {
-		return nil, err
-	}
-
+	totalCells := int(cols) * int(rows)
+	var glyphs, fgIdx, bgIdx []byte
 	var paletteBytes []byte
-	if keyframe != 0 {
-		paletteBytes, err = readField("palette")
+
+	if keyframe == frameTypeDelta {
+		mask, err := readField("mask")
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	fgIdxEnc, err := readField("fgIdx")
-	if err != nil {
-		return nil, err
-	}
-	bgIdxEnc, err := readField("bgIdx")
-	if err != nil {
-		return nil, err
-	}
-
-	totalCells := int(cols) * int(rows)
-
-	glyphs, err := unpackGlyphs6(glyphsEnc, totalCells)
-	if err != nil {
-		return nil, err
-	}
-
-	// For experiment: RLE disabled, use raw planes for fg/bg indices.
-	fgIdx := fgIdxEnc
-	bgIdx := bgIdxEnc
-
-	if len(fgIdx) != totalCells {
-		return nil, fmt.Errorf("fgIdx length %d does not match total cells %d", len(fgIdx), totalCells)
-	}
-	if len(bgIdx) != totalCells {
-		return nil, fmt.Errorf("bgIdx length %d does not match total cells %d", len(bgIdx), totalCells)
+		changedGlyphsEnc, err := readField("glyphs")
+		if err != nil {
+			return nil, err
+		}
+		changedFg, err := readField("fgIdx")
+		if err != nil {
+			return nil, err
+		}
+		changedBg, err := readField("bgIdx")
+		if err != nil {
+			return nil, err
+		}
+		if len(mask) != (totalCells+7)/8 {
+			return nil, fmt.Errorf("change mask length %d for %d cells", len(mask), totalCells)
+		}
+		changed := 0
+		for _, m := range mask {
+			changed += bits.OnesCount8(m)
+		}
+		changedGlyphs, err := unpackGlyphs6(changedGlyphsEnc, changed)
+		if err != nil {
+			return nil, err
+		}
+		if len(changedFg) != changed || len(changedBg) != changed {
+			return nil, fmt.Errorf("change frame: %d cells but %d/%d colour indices", changed, len(changedFg), len(changedBg))
+		}
+		d.mu.Lock()
+		valid := d.baseValid && d.baseCols == int(cols) && d.baseRows == int(rows)
+		if valid {
+			glyphs = append([]byte(nil), d.baseGlyphs...)
+			fgIdx = append([]byte(nil), d.baseFg...)
+			bgIdx = append([]byte(nil), d.baseBg...)
+		}
+		d.mu.Unlock()
+		if !valid {
+			return nil, ErrNoBase
+		}
+		k := 0
+		for i := 0; i < totalCells; i++ {
+			if mask[i/8]&(1<<(i%8)) != 0 {
+				glyphs[i], fgIdx[i], bgIdx[i] = changedGlyphs[k], changedFg[k], changedBg[k]
+				k++
+			}
+		}
+	} else {
+		glyphsEnc, err := readField("glyphs")
+		if err != nil {
+			return nil, err
+		}
+		if keyframe == frameTypeKey {
+			paletteBytes, err = readField("palette")
+			if err != nil {
+				return nil, err
+			}
+		}
+		fgIdxEnc, err := readField("fgIdx")
+		if err != nil {
+			return nil, err
+		}
+		bgIdxEnc, err := readField("bgIdx")
+		if err != nil {
+			return nil, err
+		}
+		glyphs, err = unpackGlyphs6(glyphsEnc, totalCells)
+		if err != nil {
+			return nil, err
+		}
+		fgIdx, bgIdx = fgIdxEnc, bgIdxEnc
+		if len(fgIdx) != totalCells {
+			return nil, fmt.Errorf("fgIdx length %d does not match total cells %d", len(fgIdx), totalCells)
+		}
+		if len(bgIdx) != totalCells {
+			return nil, fmt.Errorf("bgIdx length %d does not match total cells %d", len(bgIdx), totalCells)
+		}
 	}
 	var palette []paletteColor
-	if keyframe != 0 {
+	if keyframe == frameTypeKey {
 		parsedPalette, err := decodePalettePayload(paletteBytes)
 		if err != nil {
 			return nil, err
@@ -865,6 +984,7 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	} else {
 		d.mu.Lock()
 		if len(d.lastPalette) == 0 {
+			d.baseValid = false
 			d.mu.Unlock()
 			return nil, fmt.Errorf("delta frame received before any keyframe palette")
 		}
@@ -879,16 +999,26 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	for i := 0; i < totalCells; i++ {
 		idx := int(fgIdx[i])
 		if idx < 0 || idx >= palCount {
+			d.ResetBase()
 			return nil, fmt.Errorf("fgIdx[%d]=%d out of range (palette size %d)", i, idx, palCount)
 		}
 		copy(fgYCbCr[i*3:], palette[idx][:])
 
 		idx2 := int(bgIdx[i])
 		if idx2 < 0 || idx2 >= palCount {
+			d.ResetBase()
 			return nil, fmt.Errorf("bgIdx[%d]=%d out of range (palette size %d)", i, idx2, palCount)
 		}
 		copy(bgYCbCr[i*3:], palette[idx2][:])
 	}
+
+	// This frame is the base for the next change-only frame.
+	d.mu.Lock()
+	d.baseGlyphs = append(d.baseGlyphs[:0], glyphs...)
+	d.baseFg = append(d.baseFg[:0], fgIdx...)
+	d.baseBg = append(d.baseBg[:0], bgIdx...)
+	d.baseCols, d.baseRows, d.baseValid = int(cols), int(rows), true
+	d.mu.Unlock()
 
 	return &TextFrame{
 		Cols:    int(cols),
@@ -1381,4 +1511,9 @@ func cellColorDistance(a, b paletteColor) int {
 		d += v
 	}
 	return d
+}
+
+// SetKeyframeInterval sets how many frames may pass between full keyframes.
+func (e *Encoder) SetKeyframeInterval(frames int) {
+	e.keyframeInterval = max(0, frames)
 }

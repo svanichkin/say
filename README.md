@@ -39,6 +39,11 @@ external Yggdrasil daemon or web stack.
 - **Adaptive video frame rate.** The receiver reports lost and undecodable
   frames; the sender lowers its frame rate on loss and raises it again when the
   path is clean (5 fps floor, optional `-fps` cap).
+- **Change-only video frames.** After a full frame, only the cells that
+  changed are sent; together with `-video-hold` a still picture costs a few
+  hundred bytes per frame instead of several kilobytes. A full frame follows
+  about every half second, so a lost packet freezes the picture briefly
+  instead of corrupting it. Both peers need this version.
 - **Adaptive jitter buffer.** Audio waits only as long as the network needs:
   late packets grow the buffer, a steady network shrinks it.
 - **Local network calls.** Peers in the same LAN (or on the same machine) find

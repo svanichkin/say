@@ -57,3 +57,11 @@ func TestNextVideoFPS(t *testing.T) {
 		t.Fatalf("persistent loss: %d fps, want the %d fps floor", fps, minVideoFPS)
 	}
 }
+
+func TestKeyframeIntervalStaysAboutHalfASecond(t *testing.T) {
+	for fps, want := range map[int]int{60: 10, 25: 10, 10: 5, 5: 2, 2: 2} {
+		if got := videoKeyframeFrames(fps); got != want {
+			t.Errorf("%d fps: keyframe every %d frames, want %d", fps, got, want)
+		}
+	}
+}

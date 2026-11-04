@@ -730,6 +730,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, curFPS, next)
 						curFPS = next
 						fpsLimiter.Reset(time.Second / time.Duration(curFPS))
+						netEncoder.SetKeyframeInterval(videoKeyframeFrames(curFPS))
 					}
 				}
 
@@ -807,6 +808,10 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						// Cannot happen within codec.MaxFrameCells; never send an
 						// oversized datagram that the network would drop or fragment.
 						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", mediaHeaderBytes+len(dataNet), maxMediaDatagram)
+						// The encoder counts this frame as sent; skipping its
+						// number shows the receiver the gap, so it waits for a
+						// full frame instead of applying changes to a stale one.
+						videoSeq++
 						continue
 					}
 					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
@@ -1067,6 +1072,10 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		lastFrameAt := time.Time{}
 		var loss videoLossMeter
 		var (
+			haveSeq bool
+			lastSeq byte
+		)
+		var (
 			playbackSeen     bool
 			lastPlayback     uint16
 			lastPlaybackMove time.Time
@@ -1169,12 +1178,26 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				}
 				now := time.Now()
 				lastFrameAt = now
-				loss.observe(pkt[mediaIndexBytes], now)
+				seq := pkt[mediaIndexBytes]
+				loss.observe(seq, now)
 				loss.report(now)
+				if haveSeq {
+					switch gap := seq - lastSeq; {
+					case gap == 0 || gap > 128:
+						continue // duplicate or stale: its turn has passed
+					case gap != 1:
+						// A frame is missing: change-only frames have no base
+						// until the next full frame.
+						decoder.ResetBase()
+					}
+				}
+				haveSeq, lastSeq = true, seq
 				tv, err := decoder.Decode(pkt[mediaIndexBytes+videoSeqBytes:])
 				if err != nil {
-					loss.failed()
-					log.Printf("[video/udp] textFrame decode: %v", err)
+					if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
+						loss.failed()
+						log.Printf("[video/udp] textFrame decode: %v", err)
+					}
 					continue
 				}
 
