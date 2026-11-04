@@ -1854,15 +1854,15 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 				continue
 			}
 			if move {
-				sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, col))
+				writeCursorTo(sb, row, col)
 				move = false
 			}
 			if !colored || cell.fg != lastFg {
-				sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm", fr, fgCol, fb))
+				writeRGB(sb, "\x1b[38;2;", cell.fg)
 				lastFg = cell.fg
 			}
 			if !colored || cell.bg != lastBg {
-				sb.WriteString(fmt.Sprintf("\x1b[48;2;%d;%d;%dm", br, bgCol, bb))
+				writeRGB(sb, "\x1b[48;2;", cell.bg)
 				lastBg = cell.bg
 			}
 			colored, wrote = true, true
@@ -1872,6 +1872,32 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 	if wrote {
 		sb.WriteString("\x1b[0m")
 	}
+}
+
+// writeCursorTo moves the cursor to (row, col) without fmt: the escape codes
+// of every changed video cell are built here, many thousands per second.
+func writeCursorTo(sb *strings.Builder, row, col int) {
+	var buf [24]byte
+	b := append(buf[:0], "\x1b["...)
+	b = strconv.AppendInt(b, int64(row), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(col), 10)
+	b = append(b, 'H')
+	sb.Write(b)
+}
+
+// writeRGB writes a 24-bit colour code: prefix ("\x1b[38;2;" or
+// "\x1b[48;2;") followed by "r;g;bm".
+func writeRGB(sb *strings.Builder, prefix string, c [3]int) {
+	var buf [32]byte
+	b := append(buf[:0], prefix...)
+	b = strconv.AppendInt(b, int64(c[0]), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(c[1]), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(c[2]), 10)
+	b = append(b, 'm')
+	sb.Write(b)
 }
 
 func ycbcrToRGB(y, cb, cr byte) (int, int, int) {
