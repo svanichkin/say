@@ -25,7 +25,14 @@ var (
 	frameLimitMu    sync.Mutex
 	frameInterval   = time.Second / defaultViewportFPS
 	frameLastUpdate = make(map[string]time.Time)
+	frameTokens     = make(map[string]float64)
 )
+
+// frameBurstTokens is how many frames may arrive back to back after a gap.
+// Frames come at the target rate with a few milliseconds of jitter; a strict
+// "at least one interval since the last frame" rule rejected every frame that
+// arrived slightly early and held the panes at ~18 fps instead of 25.
+const frameBurstTokens = 2
 
 // SetLocalFrame updates the cached local preview frame if the viewport is ready.
 // It returns true when the frame was accepted.
@@ -94,30 +101,39 @@ func remoteFrameSnapshot() (*codec.TextFrame, uint64, time.Time) {
 func SetVideoFPSLimit(fps int) {
 	frameLimitMu.Lock()
 	defer frameLimitMu.Unlock()
+	frameLastUpdate = make(map[string]time.Time)
+	frameTokens = make(map[string]float64)
 	if fps <= 0 {
 		frameInterval = 0
-		frameLastUpdate = make(map[string]time.Time)
 		return
 	}
 	if fps > maxViewportFPS {
 		fps = maxViewportFPS
 	}
 	frameInterval = time.Second / time.Duration(fps)
-	frameLastUpdate = make(map[string]time.Time)
 }
 
 func allowFrame(frameType string) bool {
+	return allowFrameAt(frameType, time.Now())
+}
+
+// allowFrameAt is a token bucket: on average one frame per frameInterval,
+// tolerating jitter and short bursts of up to frameBurstTokens frames.
+func allowFrameAt(frameType string, now time.Time) bool {
 	frameLimitMu.Lock()
 	defer frameLimitMu.Unlock()
 	if frameInterval <= 0 {
 		return true
 	}
-	now := time.Now()
+	tokens := float64(frameBurstTokens)
 	if last, ok := frameLastUpdate[frameType]; ok {
-		if now.Sub(last) < frameInterval {
-			return false
-		}
+		tokens = min(frameTokens[frameType]+float64(now.Sub(last))/float64(frameInterval), frameBurstTokens)
 	}
 	frameLastUpdate[frameType] = now
+	if tokens < 1 {
+		frameTokens[frameType] = tokens
+		return false
+	}
+	frameTokens[frameType] = tokens - 1
 	return true
 }
