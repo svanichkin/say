@@ -24,7 +24,6 @@ func (vio *VoiceIO) Close() {}
 // VoiceLatency is one direction's latency of the system voice unit.
 type VoiceLatency struct {
 	FromUnit      bool
-	Default       bool
 	Rate          float64
 	BufferFrames  int
 	DeviceLatency int
@@ -40,6 +39,3 @@ func (l VoiceLatency) String() string { return "n/a" }
 
 // Latency is not available on this platform.
 func (vio *VoiceIO) Latency(input bool) VoiceLatency { return VoiceLatency{} }
-
-// DefaultDeviceLatency is not available on this platform.
-func DefaultDeviceLatency(input bool) (VoiceLatency, bool) { return VoiceLatency{}, false }

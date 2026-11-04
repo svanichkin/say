@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/svanichkin/say/device"
 )
 
 // Live audio settings: the chat command "-audio" shows and changes the
@@ -81,16 +79,6 @@ func AudioSettings() string {
 	if system != "" {
 		// The system sets the speaker buffer: only the lead can change.
 		return text + "; " + system + ". Change: -audio LEAD PERIOD PERIODS (only LEAD applies with -sysaudio)"
-	}
-	// What the system reports for the devices Say's own audio uses, next
-	// to the speaker buffer assumed above (period x periods).
-	if out, ok := device.DefaultDeviceLatency(false); ok {
-		text += fmt.Sprintf("; system reports output %v", out)
-		if micEnabled {
-			if in, ok := device.DefaultDeviceLatency(true); ok {
-				text += fmt.Sprintf("; input %v", in)
-			}
-		}
 	}
 	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 40 20 2"
 }
