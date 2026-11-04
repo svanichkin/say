@@ -112,6 +112,7 @@ func run() (err error) {
 	}
 
 	udptransport.Configure(true, true)
+	udptransport.SetMicrophone(!opts.NoMic)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)

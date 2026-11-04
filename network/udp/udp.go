@@ -124,6 +124,14 @@ func Configure(enableVoice, enableVideo bool) {
 	useVideo = enableVideo
 }
 
+// micEnabled is false with -nomic: the session only plays the peer's audio.
+var micEnabled = true
+
+// SetMicrophone enables or disables microphone capture for future sessions.
+func SetMicrophone(enabled bool) {
+	micEnabled = enabled
+}
+
 // SetAudioCodec selects the codec used by future voice sessions.
 func SetAudioCodec(name string) error {
 	switch name {
@@ -385,9 +393,14 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		}
 
 		// Open capture last, immediately before starting its consumer.
-		audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
-		if err != nil {
-			return nil, fmt.Errorf("mic stream: %w", err)
+		if micEnabled {
+			audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
+			if err != nil {
+				return nil, fmt.Errorf("mic stream: %w", err)
+			}
+		} else {
+			// Listen only: no capture, so no audio is sent (the sender exits).
+			log.Printf("[audio] microphone disabled (-nomic)")
 		}
 	}
 	if err := sessionCtx.Err(); err != nil {
