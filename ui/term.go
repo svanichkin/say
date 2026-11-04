@@ -18,7 +18,9 @@ import (
 
 // Terminal cell aspect: one character cell is ~0.38 width of its height.
 // We use it to compare "visual" width vs height.
-const termCellWidthToHeight = 0.38
+// termCellWidthToHeight is the assumed width/height ratio of a terminal cell.
+// It must match the codec, which maps every cell to a 4×8 pixel block.
+const termCellWidthToHeight = 0.5
 const termBorder = 1
 const termSeparator = 1
 const frameFreezeThreshold = 1200 * time.Millisecond
@@ -946,78 +948,90 @@ func renderTermFrames() {
 	if havePeerViewport {
 		broadcastViewportSize(peerCols, peerRows)
 	}
-	local, _, _ := localFrameSnapshot()
-	remote, _, _ := remoteFrameSnapshot()
-	var chatData string
+	var data string
 	if ChatConnected() {
-		chatData = renderChatScreen(cols, rows, local, remote, true)
+		local, _, _ := localFrameSnapshot()
+		remote, _, _ := remoteFrameSnapshot()
+		data = renderChatScreen(cols, rows, local, remote)
 	} else {
-		chatData = renderConnectionScreen(cols, rows, currentStatusMessage())
+		data = renderConnectionScreen(cols, rows, currentStatusMessage())
 	}
-	if chatData != "" {
-		enqueueFrame(&device.TerminalFrame{Data: chatData})
+	if data != "" {
+		enqueueFrame(&device.TerminalFrame{Data: data})
 	}
+}
+
+const (
+	screenStatus byte = 'S'
+	screenChat   byte = 'C'
+)
+
+// beginScreen reports whether the terminal must be fully cleared before
+// drawing the given screen kind at the given size. A full clear is only
+// needed when the layout changes; regular frames overwrite cells in place,
+// which avoids the whole screen flashing on every video frame.
+func beginScreen(kind byte, cols, rows int) bool {
+	lastDrawMu.Lock()
+	defer lastDrawMu.Unlock()
+	changed := lastDraw.w != cols || lastDraw.h != rows || lastDraw.orient != kind
+	lastDraw.w, lastDraw.h, lastDraw.orient = cols, rows, kind
+	return changed
 }
 
 // renderConnectionScreen keeps the pre-call UI focused on connection progress.
 // The video and chat layout is shown only after the TCP session handshake.
 func renderConnectionScreen(cols, rows int, status string) string {
-	if cols <= 0 || rows <= 0 {
-		return ""
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
+	if strings.TrimSpace(status) == "" {
 		status = "Waiting for connection…"
 	}
-	status = strings.ReplaceAll(status, "\n", " · ")
-	status = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, status)
-	status = truncateRunes(status, cols)
-	row := max(1, rows/2)
-	col := max(1, (cols-runeCount(status))/2+1)
-	var out strings.Builder
-	out.WriteString("\x1b[2J\x1b[H")
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;190;210;245m%s\x1b[0m", row, col, status))
-	return out.String()
+	beginScreen(screenStatus, cols, rows)
+	return buildStatusScreen(cols, rows, status)
 }
 
 // renderChatScreen draws the call's video panes, conversation, and input line.
-func renderChatScreen(cols, rows int, local, remote *codec.TextFrame, connected bool) string {
+// Every visible cell is rewritten on each call, so the screen is cleared only
+// when the layout changes.
+func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 	vs, ok := calcViewportSlots(cols, rows)
 	if !ok {
 		return ""
 	}
 	canvasLeft, canvasTop := termBorder+1, termBorder+1
+	canvasCols := cols - 2*termBorder
 	videoGroupCols := vs.selfSlot.cols + termSeparator + vs.peerSlot.cols
-	videoLeft := canvasLeft + max(0, (cols-2*termBorder-videoGroupCols)/2)
+	videoLeft := canvasLeft + max(0, (canvasCols-videoGroupCols)/2)
 	videoCaptionRow := canvasTop + vs.selfSlot.rows
-	chatTop := canvasTop + vs.selfSlot.rows + 2*termSeparator
+	chatTop := videoCaptionRow + 1 + termSeparator
 	inputRow := rows - termBorder
-	chatBottom := inputRow - 2
+	chatBottom := inputRow - 1 - termSeparator
 	chatRows := chatBottom - chatTop + 1
 	if chatRows < 1 {
 		return ""
 	}
+	statusClickClearAreas()
+
 	var out strings.Builder
-	out.WriteString("\x1b[2J\x1b[H")
+	writeFramePrefix(&out, beginScreen(screenChat, cols, rows))
 	appendBorderClear(&out, cols, rows)
+
+	// Margins left and right of the centered video group (panes + captions).
+	videoRight := videoLeft + videoGroupCols
+	for r := canvasTop; r <= videoCaptionRow; r++ {
+		if videoLeft > canvasLeft {
+			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", r, canvasLeft, strings.Repeat(" ", videoLeft-canvasLeft)))
+		}
+		if end := canvasLeft + canvasCols; videoRight < end {
+			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", r, videoRight, strings.Repeat(" ", end-videoRight)))
+		}
+	}
+
 	sepCol := videoLeft + vs.selfSlot.cols
+	peerLeft := sepCol + termSeparator
 	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows+1, sepCol)
-	appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, chatTop-1)
-	if local != nil {
-		writeTextFrame(&out, local, canvasTop, videoLeft)
-	} else {
-		writeChatPanePlaceholder(&out, canvasTop, videoLeft, vs.selfSlot, "Your video")
-	}
-	if remote != nil {
-		writeTextFrame(&out, remote, canvasTop, sepCol+termSeparator)
-	} else {
-		writeChatPanePlaceholder(&out, canvasTop, sepCol+termSeparator, vs.peerSlot, "Peer video")
-	}
+	appendHorizontalSeparator(&out, canvasLeft, canvasCols, chatTop-1)
+	writeChatPane(&out, local, canvasTop, videoLeft, vs.selfSlot, "Your video")
+	writeChatPane(&out, remote, canvasTop, peerLeft, vs.peerSlot, "Peer video")
+
 	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
 	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
 	localCaption := currentFPSLabel(localFrameType) + " │ " + buildRateLabel("TX", '↑', txAudio, txVideo)
@@ -1032,102 +1046,99 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame, connected 
 		remoteCaption = "PAUSED"
 	}
 	writeVideoCaption(&out, videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
-	writeVideoCaption(&out, videoCaptionRow, sepCol+termSeparator, vs.peerSlot.cols, remoteCaption)
+	writeVideoCaption(&out, videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption)
 
-	if connected {
-		chatState.RLock()
-		messages := append([]ChatMessage(nil), chatState.messages...)
-		input, transfer := chatState.input, chatState.transfer
-		chatState.RUnlock()
-		start := len(messages) - chatRows
-		if start < 0 {
-			start = 0
+	chatState.RLock()
+	messages := append([]ChatMessage(nil), chatState.messages...)
+	input, transfer := chatState.input, chatState.transfer
+	chatState.RUnlock()
+	start := max(0, len(messages)-chatRows)
+	messages = messages[start:]
+	for i := 0; i < chatRows; i++ {
+		row := chatTop + i
+		out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K", row))
+		if i >= len(messages) {
+			continue
 		}
-		for i, msg := range messages[start:] {
-			row := chatTop + i
-			text := strings.Map(func(r rune) rune {
-				if r < 0x20 || r == 0x7f {
-					return ' '
-				}
-				return r
-			}, msg.Text)
-			limit := cols - 2*termBorder
-			if len([]rune(text)) > limit {
-				text = string([]rune(text)[:limit])
-			}
-			width := len([]rune(text))
-			col := canvasLeft
-			color := "\x1b[38;2;160;220;255m"
-			if msg.Local {
-				col += max(0, limit-width)
-				color = "\x1b[38;2;190;255;190m"
-			}
-			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s\x1b[2K%s\x1b[0m", row, col, color, text))
+		msg := messages[i]
+		text := truncateRunes(sanitizeLine(msg.Text), canvasCols)
+		col := canvasLeft
+		color := "\x1b[38;2;160;220;255m"
+		if msg.Local {
+			col += max(0, canvasCols-runeCount(text))
+			color = "\x1b[38;2;190;255;190m"
 		}
-		sepInput := inputRow - 1
-		if sepInput > chatTop {
-			appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, sepInput)
-			out.WriteString(fmt.Sprintf("\x1b[%d;1H", inputRow))
-		}
-		line := input
-		if transfer != "" {
-			line = transfer
-		} else if line == "" {
-			line = "> Введите сообщение"
-		} else {
-			line = "> " + line + "▏"
-		}
-		line = strings.Map(func(r rune) rune {
-			if r < 0x20 || r == 0x7f {
-				return ' '
-			}
-			return r
-		}, line)
-		if len([]rune(line)) > cols-2*termBorder {
-			line = string([]rune(line)[len([]rune(line))-(cols-2*termBorder):])
-		}
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[2K\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, canvasLeft, line))
-	} else {
-		status := currentStatusMessage()
-		if status == "" {
-			status = "Waiting for connection…"
-		}
-		status = strings.ReplaceAll(strings.TrimSpace(status), "\n", " · ")
-		status = truncateRunes(status, cols-2*termBorder)
-		col := canvasLeft + max(0, (cols-2*termBorder-runeCount(status))/2)
-		row := chatTop + chatRows/2
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, status))
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s%s\x1b[0m", row, col, color, text))
 	}
+	appendHorizontalSeparator(&out, canvasLeft, canvasCols, inputRow-1)
+
+	line := input
+	if transfer != "" {
+		line = transfer
+	} else if line == "" {
+		line = "> Введите сообщение"
+	} else {
+		line = "> " + line + "▏"
+	}
+	line = sanitizeLine(line)
+	if n := runeCount(line); n > canvasCols {
+		line = string([]rune(line)[n-canvasCols:])
+	}
+	out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K\x1b[%d;%dH\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, inputRow, canvasLeft, line))
 	return out.String()
 }
 
-func writeVideoCaption(out *strings.Builder, row, left, width int, caption string) {
-	if out == nil || row <= 0 || left <= 0 || width <= 0 {
-		return
-	}
-	caption = truncateRunes(caption, width)
-	col := left + max(0, (width-runeCount(caption))/2)
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m%s\x1b[0m", row, col, caption))
-}
-
-func writeChatPanePlaceholder(out *strings.Builder, top, left int, slot slotSize, fallback string) {
-	label := currentStatusMessage()
-	if label == "" || strings.EqualFold(label, "Client starting…") || strings.EqualFold(label, "Server starting…") {
-		label = fallback
-	}
-	label = strings.Map(func(r rune) rune {
+// sanitizeLine replaces control characters so a line cannot move the cursor.
+func sanitizeLine(s string) string {
+	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return ' '
 		}
 		return r
-	}, label)
-	runes := []rune(label)
-	if len(runes) > slot.cols {
-		runes = runes[:slot.cols]
+	}, s)
+}
+
+// writeVideoCaption draws the info bar under a video pane across its full width.
+func writeVideoCaption(out *strings.Builder, row, left, width int, caption string) {
+	if out == nil || row <= 0 || left <= 0 || width <= 0 {
+		return
 	}
+	caption = truncateRunes(sanitizeLine(caption), width)
+	pad := width - runeCount(caption)
+	leftPad := pad / 2
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m", row, left))
+	out.WriteString(strings.Repeat(" ", leftPad))
+	out.WriteString(caption)
+	out.WriteString(strings.Repeat(" ", pad-leftPad))
+	out.WriteString("\x1b[0m")
+}
+
+// writeChatPane fills a video slot: the frame when available (centered and
+// clipped to the slot), otherwise a blank pane with a placeholder label.
+func writeChatPane(out *strings.Builder, frame *codec.TextFrame, top, left int, slot slotSize, fallback string) {
+	if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
+		writeTextFrame(out, frame, top, left)
+		return
+	}
+	blank := strings.Repeat(" ", slot.cols)
+	for r := 0; r < slot.rows; r++ {
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", top+r, left, blank))
+	}
+	if frame != nil {
+		// The peer may still be encoding for a previous slot size.
+		visCols, visRows := min(frame.Cols, slot.cols), min(frame.Rows, slot.rows)
+		offCol, offRow := max(0, (frame.Cols-slot.cols)/2), max(0, (frame.Rows-slot.rows)/2)
+		writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows)
+		return
+	}
+	label := currentStatusMessage()
+	if label == "" || strings.EqualFold(label, "Client starting…") || strings.EqualFold(label, "Server starting…") {
+		label = fallback
+	}
+	label = truncateRunes(sanitizeLine(label), slot.cols)
 	row := top + slot.rows/2
-	col := left + max(0, (slot.cols-len(runes))/2)
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, string(runes)))
+	col := left + max(0, (slot.cols-runeCount(label))/2)
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, label))
 }
 
 var noisePaletteYCbCr = [2][3]byte{
@@ -1741,6 +1752,15 @@ func writeTextFrame(sb *strings.Builder, frame *codec.TextFrame, startRow, start
 	if frame == nil {
 		return
 	}
+	writeTextFrameRegion(sb, frame, startRow, startCol, 0, 0, frame.Cols, frame.Rows)
+}
+
+// writeTextFrameRegion draws the visCols×visRows sub-rectangle of frame that
+// starts at (offCol, offRow) with its top-left corner at (startRow, startCol).
+func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow, startCol, offCol, offRow, visCols, visRows int) {
+	if frame == nil {
+		return
+	}
 	cols := frame.Cols
 	rows := frame.Rows
 	total := cols * rows
@@ -1750,12 +1770,18 @@ func writeTextFrame(sb *strings.Builder, frame *codec.TextFrame, startRow, start
 	if len(frame.Glyphs) < total || len(frame.FgYCbCr) < total*3 || len(frame.BgYCbCr) < total*3 {
 		return
 	}
+	if offCol < 0 || offRow < 0 || visCols <= 0 || visRows <= 0 {
+		return
+	}
+	visCols = min(visCols, cols-offCol)
+	visRows = min(visRows, rows-offRow)
 
-	for r := 0; r < rows; r++ {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", startRow+r, startCol))
+	for vr := 0; vr < visRows; vr++ {
+		r := offRow + vr
+		sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", startRow+vr, startCol))
 		var lastFg, lastBg [3]int
 		first := true
-		for c := 0; c < cols; c++ {
+		for c := offCol; c < offCol+visCols; c++ {
 			idx := r*cols + c
 			fg := frame.FgYCbCr[idx*3 : idx*3+3]
 			bg := frame.BgYCbCr[idx*3 : idx*3+3]

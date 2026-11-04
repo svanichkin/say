@@ -43,6 +43,9 @@ const (
 	audioMaxConsecutivePLCs        = 32 // tolerate up to 640 ms of missing media before resync
 	videoBaseStaleThreshold        = 250 * time.Millisecond
 	videoMaxStaleThreshold         = 3 * time.Second
+	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
+	videoAudioClockStall           = 200 * time.Millisecond // audio clock considered stopped
+	videoMaxLeadTicks              = int32(videoMaxStaleThreshold / mediaTickDuration)
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -1105,7 +1108,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			index uint16
 			frame *codec.TextFrame
 		}
-		queue := make([]timedFrame, 0, 2)
+		queue := make([]timedFrame, 0, videoMaxQueuedFrames)
 		lastFrameAt := time.Time{}
 		ticker := time.NewTicker(4 * time.Millisecond)
 		defer ticker.Stop()
@@ -1129,6 +1132,11 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		}
 
 		presentDue := func() {
+		var (
+			playbackSeen     bool
+			lastPlayback     uint16
+			lastPlaybackMove time.Time
+		)
 			if !mediactrl.PlaybackEnabled() {
 				queue = queue[:0]
 				return
@@ -1142,7 +1150,19 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				return
 			}
 			current, ok := playbackIndex()
-			if !ok {
+			now := time.Now()
+			if ok && (!playbackSeen || current != lastPlayback) {
+				playbackSeen = true
+				lastPlayback = current
+				lastPlaybackMove = now
+			}
+			// Without a running audio clock (peer mic muted, DTX silence,
+			// speaker underrun) there is nothing to sync to: show the newest
+			// frame instead of holding video until audio resumes.
+			if !ok || now.Sub(lastPlaybackMove) > videoAudioClockStall ||
+				mediaIndexDelta(queue[0].index, current) > videoMaxLeadTicks {
+				display(queue[len(queue)-1].frame)
+				queue = queue[:0]
 				return
 			}
 			selected := -1
@@ -1202,8 +1222,11 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				sort.Slice(queue, func(i, j int) bool {
 					return mediaIndexDelta(queue[i].index, queue[j].index) < 0
 				})
-				if len(queue) > 2 {
-					queue = queue[len(queue)-2:]
+				// Frames wait here for the audio playback clock, which runs behind
+				// arrival by the jitter buffer plus device latency, so the queue
+				// must hold more than that span of frames.
+				if len(queue) > videoMaxQueuedFrames {
+					queue = queue[len(queue)-videoMaxQueuedFrames:]
 					logs.LogV("[video/udp] drop stale queued frame")
 				}
 			}
