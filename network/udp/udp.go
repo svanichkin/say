@@ -33,24 +33,27 @@ const (
 	mediaKindVideo   byte = 1
 
 	// Datagram header is [kind:1 | timestamp high:7][timestamp low:8].
-	mediaHeaderBytes               = 2 // packed kind and 15-bit timestamp
-	mediaIndexBytes                = 2 // timestamp bytes in internal audio/video queues
-	mediaIndexMask          uint16 = 0x7fff
-	mediaIndexHalf          uint16 = 0x4000
-	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32 // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5  // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames          = 4  // 80 ms startup jitter buffer
-	audioBufferMaxFrames           = 32 // 640 ms cap, allowing high-jitter bursts to drain
-	audioMaxConsecutivePLCs        = 32 // tolerate up to 640 ms of missing media before resync
-	audioDTXUpdateFrames           = 8  // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames            = 15 // 300 ms of queued playback triggers a trim…
-	audioQueueTargetFrames         = 6  // …down to 120 ms (jitter buffer lead plus headroom)
-	videoBaseStaleThreshold        = 250 * time.Millisecond
-	videoMaxStaleThreshold         = 3 * time.Second
-	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
-	videoAudioClockStall           = 200 * time.Millisecond // audio clock considered stopped
-	videoMaxLeadTicks              = int32(videoMaxStaleThreshold / mediaTickDuration)
+	mediaHeaderBytes                = 2 // packed kind and 15-bit timestamp
+	mediaIndexBytes                 = 2 // timestamp bytes in internal audio/video queues
+	mediaIndexMask           uint16 = 0x7fff
+	mediaIndexHalf           uint16 = 0x4000
+	mediaTickDuration               = 4 * time.Millisecond
+	mediaTickSamples                = 32                       // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                 = 5                        // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames           = 6                        // 120 ms jitter buffer: 80 ms of jitter above the device period
+	audioBufferMaxFrames            = 32                       // 640 ms cap, allowing high-jitter bursts to drain
+	audioMaxConsecutivePLCs         = 32                       // tolerate up to 640 ms of missing media before resync
+	audioSpeakerPeriodFrames        = 2                        // speaker device period: 40 ms, as in the G.722 version
+	audioPlayoutLowFrames           = audioSpeakerPeriodFrames // conceal once less than one device period is queued
+	audioCaptureResync              = 60 * time.Millisecond    // capture timeline gap that means lost samples
+	audioDTXUpdateFrames            = 8                        // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames             = 15                       // 300 ms of queued playback triggers a trim…
+	audioQueueTargetFrames          = audioBufferLeadFrames    // …down to the jitter buffer lead
+	videoBaseStaleThreshold         = 250 * time.Millisecond
+	videoMaxStaleThreshold          = 3 * time.Second
+	videoMaxQueuedFrames            = 96                     // ~3 s at 30 fps
+	videoAudioClockStall            = 200 * time.Millisecond // audio clock considered stopped
+	videoMaxLeadTicks               = int32(videoMaxStaleThreshold / mediaTickDuration)
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -266,7 +269,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if aec != nil {
 			onRender = aec.playback
 		}
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
+		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*audioSpeakerPeriodFrames, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
@@ -420,8 +423,9 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		var (
 			sentPkts, sentBytes uint64
 		)
-		var pcmBuf []int16 // post-processed PCM ready for encoding
-		var pcmStartAt time.Time
+		var pcmBuf []int16       // post-processed PCM ready for encoding
+		var pcmStartAt time.Time // capture time of pcmBuf[0], or of the next sample when empty
+		var timelineValid bool
 
 		tick := time.NewTicker(time.Second)
 		lastRateSample := time.Now()
@@ -533,22 +537,24 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						aec.setCaptureEnabled(false)
 					}
 					pcmBuf = pcmBuf[:0]
+					timelineValid = false
 					continue
 				}
 				if aec != nil {
 					aec.setCaptureEnabled(true)
 				}
 
-				if len(pcmBuf) == 0 {
+				// The timeline follows the sample count, also across frames that
+				// drained pcmBuf completely (drainAvailable advances pcmStartAt).
+				// Callback times jitter by several milliseconds, which is not a
+				// gap; re-reading the clock for every block made packet timestamps
+				// jump by a tick or two. Resynchronize only when samples were
+				// really lost, e.g. capture blocks dropped while we were late.
+				expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
+				if delta := capture.CapturedAt.Sub(expected); !timelineValid || delta > audioCaptureResync || delta < -audioCaptureResync {
+					pcmBuf = pcmBuf[:0]
 					pcmStartAt = capture.CapturedAt
-				} else {
-					expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
-					if delta := capture.CapturedAt.Sub(expected); delta > 4*time.Millisecond || delta < -4*time.Millisecond {
-						// Do not concatenate samples across a capture gap. The next packet's
-						// media index carries the discontinuity to the receiver.
-						pcmBuf = pcmBuf[:0]
-						pcmStartAt = capture.CapturedAt
-					}
+					timelineValid = true
 				}
 				pcmBuf = append(pcmBuf, capture.Samples...)
 
@@ -903,271 +909,42 @@ func audioPacketsExpected(delta int32, afterSID bool) int32 {
 	return frames
 }
 
-// startAudioReceiver launches a goroutine that decodes speech payloads from netAudioIn into PCM frames
-// and feeds them into speakerOut.
+// startAudioReceiver launches a goroutine that decodes speech payloads from
+// netAudioIn and keeps speakerOut continuously fed (see audioPlayout).
 func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ui.UpdateRxAudioLoss(0)
-
-		buffer := make([]device.PlaybackFrame, 0, audioBufferMaxFrames)
-		bufferReady := false
-		bufferedSamples := 0
-
-		var (
-			pendingIndex    uint16
-			pendingData     []byte
-			havePending     bool
-			plcStreak       int
-			lastGoodFrame   []int16
-			pcmScratch      = make([]int16, frameSamples)
-			lastPacketAt    time.Time
-			lossWindowStart = time.Now()
-			lossExpected    uint64
-			lossMissing     uint64
-		)
-
-		recordAudioLoss := func(delta int32, afterSID bool) {
-			expected := audioPacketsExpected(delta, afterSID)
-			lossExpected += uint64(expected)
-			lossMissing += uint64(expected - 1)
-			now := time.Now()
-			if now.Sub(lossWindowStart) >= time.Second {
-				loss := 0.0
-				if lossExpected > 0 {
-					loss = float64(lossMissing) / float64(lossExpected)
-				}
-				ui.UpdateRxAudioLoss(loss)
-				lossExpected, lossMissing = 0, 0
-				lossWindowStart = now
-			}
-		}
-
-		clearSpeakerQueue := speakerOut.Clear
-		maxQueuedSamples := frameSamples * audioQueueMaxFrames
-		targetQueuedSamples := frameSamples * audioQueueTargetFrames
-
-		resetState := func() {
-			buffer = buffer[:0]
-			bufferReady = false
-			bufferedSamples = 0
-			clearSpeakerQueue()
-			pendingData = nil
-			havePending = false
-			plcStreak = 0
-			lastGoodFrame = nil
-		}
-
-		enqueueFrame := func(pcm []int16, index uint16) {
-			if len(buffer) >= audioBufferMaxFrames {
-				bufferedSamples -= len(buffer[0].Samples)
-				buffer = buffer[1:]
-				logs.LogV("[voice/udp] drop rx audio frame (buffer overflow)")
-			}
-			buffer = append(buffer, device.PlaybackFrame{Samples: pcm, MediaIndex: index})
-			bufferedSamples += len(pcm)
-			if !bufferReady && bufferedSamples >= frameSamples*audioBufferLeadFrames {
-				bufferReady = true
-			}
-		}
-
-		popFrame := func() (device.PlaybackFrame, bool) {
-			if len(buffer) == 0 {
-				return device.PlaybackFrame{}, false
-			}
-			frame := buffer[0]
-			buffer = buffer[1:]
-			bufferedSamples -= len(frame.Samples)
-			return frame, true
-		}
-
-		generatePLC := func(sampleCount int) []int16 {
-			if sampleCount <= 0 || sampleCount%frameSamples != 0 || plcStreak >= audioMaxConsecutivePLCs {
-				return nil
-			}
-			frames := sampleCount / frameSamples
-			if frames > audioMaxConsecutivePLCs-plcStreak {
-				frames = audioMaxConsecutivePLCs - plcStreak
-			}
-			frame := make([]int16, frames*frameSamples)
-			for i := 0; i < frames; i++ {
-				out := pcmScratch[:frameSamples]
-				written, err := dec.Conceal(out)
-				if err == nil && written > 0 {
-					if written > frameSamples {
-						written = frameSamples
-					}
-					copy(frame[i*frameSamples:i*frameSamples+written], out[:written])
-				} else if lastGoodFrame != nil {
-					copy(frame[i*frameSamples:(i+1)*frameSamples], lastGoodFrame)
-				}
-			}
-			plcStreak += frames
-			return frame
-		}
-
-		decodeAndEnqueue := func(data []byte, index uint16) bool {
-			if len(data) == 0 {
-				return false
-			}
-			if len(pcmScratch) < frameSamples {
-				pcmScratch = make([]int16, frameSamples)
-			}
-			written, err := dec.DecodeFrame(data, pcmScratch[:frameSamples])
-			if err != nil || written <= 0 {
-				logs.LogV("[voice/udp] %s decode error: produced %d samples (len=%d): %v", audioCodec, written, len(data), err)
-				return false
-			}
-			plcStreak = 0
-			frame := make([]int16, frameSamples)
-			toCopy := written
-			if toCopy > frameSamples {
-				toCopy = frameSamples
-			}
-			copy(frame, pcmScratch[:toCopy])
-			if toCopy < frameSamples {
-				for i := toCopy; i < frameSamples; i++ {
-					frame[i] = 0
-				}
-			}
-			if lastGoodFrame == nil {
-				lastGoodFrame = make([]int16, frameSamples)
-			}
-			copy(lastGoodFrame, frame)
-			enqueueFrame(frame, index)
-			return true
-		}
-
-		flushPending := func() {
-			if !havePending {
-				return
-			}
-			if !decodeAndEnqueue(pendingData, pendingIndex) {
-				if frame := generatePLC(frameSamples); frame != nil {
-					enqueueFrame(frame, pendingIndex)
-				}
-			}
-			havePending = false
-			pendingData = nil
-		}
-
-		feedSpeaker := func(frame device.PlaybackFrame) {
-			if frame.Samples == nil {
-				return
-			}
-			speakerOut.Push(frame)
-			// Bound latency by queued audio time, not frame count: after a
-			// network stall the delayed burst would otherwise stay queued and
-			// delay all further speech by the stall length.
-			if dropped := speakerOut.TrimLatency(maxQueuedSamples, targetQueuedSamples); dropped > 0 {
-				logs.LogV("[voice/udp] drop %d stale audio frames (playback latency over %d ms)",
-					dropped, audioQueueMaxFrames*audioFrameMillis)
-			}
-		}
-		feedBuffered := func() {
-			if !bufferReady {
-				return
-			}
-			for len(buffer) > 0 {
-				frame, ok := popFrame()
-				if !ok {
-					return
-				}
-				feedSpeaker(frame)
-			}
-		}
+		playout := newAudioPlayout(dec, frameSamples, speakerOut)
+		// Well below one 20 ms frame, so a slot is concealed before the
+		// speaker's queue empties.
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
 
 		for {
 			select {
 			case <-stopCh:
-				flushPending()
 				return
+			case <-tick.C:
+				if mediactrl.PlaybackEnabled() {
+					playout.onTick()
+				}
 			case pkt, ok := <-netAudioIn:
 				if !ok {
-					flushPending()
 					return
 				}
-				if pkt == nil {
-					continue
-				}
 				if !mediactrl.PlaybackEnabled() {
-					resetState()
+					playout.reset()
 					ui.UpdateRxAudioLoss(0)
 					continue
 				}
 				if len(pkt) <= mediaIndexBytes {
 					continue
 				}
-
 				index := uint16(pkt[0])<<8 | uint16(pkt[1])
-				payload := pkt[mediaIndexBytes:]
-				if len(payload) == 0 {
-					continue
-				}
-
-				if !havePending {
-					pendingIndex = index
-					pendingData = payload
-					havePending = true
-					lastPacketAt = time.Now()
-					continue
-				}
-				if time.Since(lastPacketAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
-					// The 15-bit index is ambiguous after half a cycle without media.
-					resetState()
-					pendingIndex = index
-					pendingData = payload
-					havePending = true
-					lastPacketAt = time.Now()
-					continue
-				}
-
-				delta := mediaIndexDelta(index, pendingIndex)
-				if delta == 0 {
-					// Duplicate or reordered packet. Keep waiting for a frame after
-					// the current one before advancing the decoder.
-					continue
-				}
-				if delta < 0 {
-					continue
-				}
-				// AMR DTX omits NO_DATA frames after a SID, so a gap that follows
-				// a SID is silence suppression; whether speech or another SID ends
-				// it does not matter. Gaps after speech are real packet loss.
-				recordAudioLoss(delta, dec.IsDTXFrame(pendingData))
-
-				if !decodeAndEnqueue(pendingData, pendingIndex) {
-					if frame := generatePLC(frameSamples); frame != nil {
-						enqueueFrame(frame, pendingIndex)
-					}
-				}
-
-				missingTicks := delta - audioFrameTicks
-				if missingTicks > audioMaxConsecutivePLCs*audioFrameTicks {
-					// A long loss burst is better handled by jumping to the live edge
-					// than by playing stale audio after a long PLC run.
-					buffer = buffer[:0]
-					bufferReady = false
-					bufferedSamples = 0
-					clearSpeakerQueue()
-					pendingIndex = index
-					pendingData = payload
-					lastPacketAt = time.Now()
-					continue
-				}
-				if missingTicks > 0 {
-					if frame := generatePLC(int(missingTicks) * mediaTickSamples); frame != nil {
-						enqueueFrame(frame, advanceMediaIndex(pendingIndex, audioFrameTicks))
-					}
-				}
-
-				pendingIndex = index
-				pendingData = payload
-				havePending = true
-				lastPacketAt = time.Now()
-				feedBuffered()
+				playout.onPacket(index, pkt[mediaIndexBytes:], time.Now())
 			}
 		}
 	}()
