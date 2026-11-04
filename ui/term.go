@@ -1082,13 +1082,13 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 			continue
 		}
 		l := lines[i]
+		// Default terminal colours: fixed light colours were unreadable on a
+		// light terminal background. Sides tell the speakers apart.
 		col := canvasLeft
-		color := "\x1b[38;2;190;255;190m"
 		if !l.local {
 			col += max(0, canvasCols-displayWidth(l.text))
-			color = "\x1b[38;2;160;220;255m"
 		}
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s%s\x1b[0m", row, col, color, l.text))
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[0m%s", row, col, l.text))
 	}
 	appendHorizontalSeparator(&out, canvasLeft, canvasCols, inputRow-1)
 
@@ -1103,7 +1103,7 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 		// Keep the end of a long input visible, with room for the cursor.
 		line = tailWidth(sanitizeLine(input), canvasCols-1) + cursor
 	}
-	out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K\x1b[%d;%dH\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, inputRow, canvasLeft, line))
+	out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[0m\x1b[2K\x1b[%d;%dH%s", inputRow, inputRow, canvasLeft, line))
 	return out.String()
 }
 
@@ -1155,7 +1155,8 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, top, left int, 
 	label := truncateWidth(fallback, slot.cols)
 	row := top + slot.rows/2
 	col := left + max(0, (slot.cols-displayWidth(label))/2)
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, label))
+	// Faint default colour: readable on light and dark terminals alike.
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[0m\x1b[2m%s\x1b[0m", row, col, label))
 }
 
 var noisePaletteYCbCr = [2][3]byte{
