@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
@@ -64,7 +65,17 @@ func mouseEventLoop() {
 			return
 		}
 		if b != 0x1b { // ESC
-			chatKey(b)
+			if b < utf8.RuneSelf {
+				chatKey(rune(b))
+			} else {
+				if err := reader.UnreadByte(); err != nil {
+					continue
+				}
+				r, _, err := reader.ReadRune()
+				if err == nil {
+					chatKey(r)
+				}
+			}
 			continue
 		}
 		a, err := reader.ReadByte()
@@ -220,24 +231,14 @@ func viewportForPoint(col, row int) viewportID {
 	if canvasCols <= 0 || canvasRows <= 0 {
 		return viewportNone
 	}
-	canvasLeft := termBorder + 1
 	canvasTop := termBorder + 1
 
-	if col < canvasLeft || col >= canvasLeft+canvasCols || row < canvasTop || row >= canvasTop+canvasRows {
+	if col < termBorder+1 || col >= termBorder+1+canvasCols || row < canvasTop || row >= canvasTop+canvasRows {
 		return viewportNone
 	}
 
 	local, _, _ := localFrameSnapshot()
 	remote, _, _ := remoteFrameSnapshot()
-
-	switch {
-	case local == nil && remote == nil:
-		return viewportNone
-	case remote == nil:
-		return viewportSelf
-	case local == nil:
-		return viewportPeer
-	}
 
 	slots, ok := calcViewportSlots(ts.Cols, ts.Rows)
 	if !ok {
@@ -257,13 +258,22 @@ func viewportForPoint(col, row int) viewportID {
 	if row >= canvasTop+slots.selfSlot.rows {
 		return viewportNone
 	}
-
-	slotWidth := slots.selfSlot.cols
-	if slotWidth <= 0 {
+	groupCols := slots.selfSlot.cols + termSeparator + slots.peerSlot.cols
+	videoLeft := termBorder + 1 + max(0, (ts.Cols-2*termBorder-groupCols)/2)
+	if slots.selfSlot.cols <= 0 || slots.peerSlot.cols <= 0 {
 		return viewportNone
 	}
-	if col < canvasLeft+slotWidth {
-		return viewportSelf
+	if col >= videoLeft && col < videoLeft+slots.selfSlot.cols {
+		if local != nil {
+			return viewportSelf
+		}
+		return viewportNone
 	}
-	return viewportPeer
+	peerLeft := videoLeft + slots.selfSlot.cols + termSeparator
+	if col >= peerLeft && col < peerLeft+slots.peerSlot.cols {
+		if remote != nil {
+			return viewportPeer
+		}
+	}
+	return viewportNone
 }

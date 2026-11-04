@@ -39,8 +39,10 @@ const (
 	mediaTickSamples               = 32 // 4 ms at the 8 kHz audio clock
 	audioFrameTicks                = 5  // 20 ms audio frame on a 4 ms common media timeline
 	audioBufferLeadFrames          = 4  // 80 ms startup jitter buffer
-	audioBufferMaxFrames           = 8  // 160 ms cap
-	audioMaxConsecutivePLCs        = 8  // safety cap to avoid infinite PLC loops
+	audioBufferMaxFrames           = 32 // 640 ms cap, allowing high-jitter bursts to drain
+	audioMaxConsecutivePLCs        = 32 // tolerate up to 640 ms of missing media before resync
+	videoBaseStaleThreshold        = 250 * time.Millisecond
+	videoMaxStaleThreshold         = 3 * time.Second
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -194,8 +196,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			return nil, fmt.Errorf("mic stream: %w", err)
 		}
 
-		audioSpeakerOut = make(chan device.PlaybackFrame, 4)
-		audioNetIn = make(chan []byte, 4)
+		audioSpeakerOut = make(chan device.PlaybackFrame, audioBufferMaxFrames)
+		audioNetIn = make(chan []byte, audioBufferMaxFrames)
 
 		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, aec.playback, stop)
 		if err != nil {
@@ -1154,8 +1156,14 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 			candidate := queue[selected]
 			queue = append(queue[:0], queue[selected+1:]...)
-			// A frame that missed the audio playhead by more than 250 ms is stale.
-			if mediaIndexDelta(current, candidate.index) <= 62 {
+			// Allow for network transit delay reported by the TCP ping, while
+			// still dropping frames that are too old to be useful for sync.
+			staleLimit := videoBaseStaleThreshold + ui.PeerLatencySnapshot()
+			if staleLimit > videoMaxStaleThreshold {
+				staleLimit = videoMaxStaleThreshold
+			}
+			staleTicks := int32((staleLimit + mediaTickDuration - 1) / mediaTickDuration)
+			if mediaIndexDelta(current, candidate.index) <= staleTicks {
 				display(candidate.frame)
 			}
 		}

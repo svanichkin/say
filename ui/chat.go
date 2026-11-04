@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -28,7 +29,19 @@ var chatState struct {
 func SetChatActions(onText, onFile func(string)) {
 	chatState.Lock()
 	chatState.onText, chatState.onFile = onText, onFile
+	if onText == nil {
+		chatState.input = ""
+		chatState.transfer = ""
+	}
 	chatState.Unlock()
+	RequestRedraw()
+}
+
+// ChatConnected reports whether an active peer can receive chat messages.
+func ChatConnected() bool {
+	chatState.RLock()
+	defer chatState.RUnlock()
+	return chatState.onText != nil
 }
 
 // AddChatMessage appends a message to the visible conversation.
@@ -46,13 +59,17 @@ func AddChatMessage(text string, local bool) {
 	RequestRedraw()
 }
 
-func chatKey(b byte) {
+func chatKey(r rune) {
 	chatState.Lock()
+	if chatState.onText == nil {
+		chatState.Unlock()
+		return
+	}
 	if chatState.transfer != "" {
 		chatState.Unlock()
 		return
 	}
-	switch b {
+	switch r {
 	case '\r', '\n':
 		line := strings.TrimSpace(chatState.input)
 		chatState.input = ""
@@ -87,8 +104,8 @@ func chatKey(b byte) {
 			chatState.input = chatState.input[:len(chatState.input)-n]
 		}
 	default:
-		if b >= 0x20 {
-			chatState.input += string(b)
+		if r >= 0x20 && !unicode.IsControl(r) {
+			chatState.input += string(r)
 		}
 	}
 	chatState.Unlock()
@@ -101,7 +118,7 @@ func chatPaste(s string) {
 		return
 	}
 	chatState.RLock()
-	busy := chatState.transfer != ""
+	busy := chatState.transfer != "" || chatState.onText == nil
 	chatState.RUnlock()
 	if busy {
 		return

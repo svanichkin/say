@@ -39,7 +39,10 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	deviceConfig.PeriodSizeInFrames = uint32(frameSamples * 2)
+	// Keep the device callback cadence equal to the AEC processing frame.
+	// Feeding two 20 ms render frames at a time while capture is processed
+	// every 20 ms can leave SpeexDSP's small playback queue out of step.
+	deviceConfig.PeriodSizeInFrames = uint32(frameSamples)
 	if deviceConfig.Periods < 2 {
 		deviceConfig.Periods = 2
 	}

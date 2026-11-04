@@ -6,6 +6,7 @@ import (
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/mediactrl"
 	"math"
 	"math/rand"
 	"strconv"
@@ -947,20 +948,54 @@ func renderTermFrames() {
 	}
 	local, _, _ := localFrameSnapshot()
 	remote, _, _ := remoteFrameSnapshot()
-	chatData := renderChatScreen(cols, rows, local, remote)
+	var chatData string
+	if ChatConnected() {
+		chatData = renderChatScreen(cols, rows, local, remote, true)
+	} else {
+		chatData = renderConnectionScreen(cols, rows, currentStatusMessage())
+	}
 	if chatData != "" {
 		enqueueFrame(&device.TerminalFrame{Data: chatData})
 	}
 }
 
+// renderConnectionScreen keeps the pre-call UI focused on connection progress.
+// The video and chat layout is shown only after the TCP session handshake.
+func renderConnectionScreen(cols, rows int, status string) string {
+	if cols <= 0 || rows <= 0 {
+		return ""
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "Waiting for connection…"
+	}
+	status = strings.ReplaceAll(status, "\n", " · ")
+	status = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, status)
+	status = truncateRunes(status, cols)
+	row := max(1, rows/2)
+	col := max(1, (cols-runeCount(status))/2+1)
+	var out strings.Builder
+	out.WriteString("\x1b[2J\x1b[H")
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;190;210;245m%s\x1b[0m", row, col, status))
+	return out.String()
+}
+
 // renderChatScreen draws the call's video panes, conversation, and input line.
-func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
+func renderChatScreen(cols, rows int, local, remote *codec.TextFrame, connected bool) string {
 	vs, ok := calcViewportSlots(cols, rows)
 	if !ok {
 		return ""
 	}
 	canvasLeft, canvasTop := termBorder+1, termBorder+1
-	chatTop := canvasTop + vs.selfSlot.rows + termSeparator
+	videoGroupCols := vs.selfSlot.cols + termSeparator + vs.peerSlot.cols
+	videoLeft := canvasLeft + max(0, (cols-2*termBorder-videoGroupCols)/2)
+	videoCaptionRow := canvasTop + vs.selfSlot.rows
+	chatTop := canvasTop + vs.selfSlot.rows + 2*termSeparator
 	inputRow := rows - termBorder
 	chatBottom := inputRow - 2
 	chatRows := chatBottom - chatTop + 1
@@ -970,71 +1005,109 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 	var out strings.Builder
 	out.WriteString("\x1b[2J\x1b[H")
 	appendBorderClear(&out, cols, rows)
-	sepCol := canvasLeft + vs.selfSlot.cols
-	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows, sepCol)
+	sepCol := videoLeft + vs.selfSlot.cols
+	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows+1, sepCol)
 	appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, chatTop-1)
 	if local != nil {
-		writeTextFrame(&out, local, canvasTop, canvasLeft)
+		writeTextFrame(&out, local, canvasTop, videoLeft)
 	} else {
-		writeChatPanePlaceholder(&out, canvasTop, canvasLeft, vs.selfSlot, "Your video")
+		writeChatPanePlaceholder(&out, canvasTop, videoLeft, vs.selfSlot, "Your video")
 	}
 	if remote != nil {
 		writeTextFrame(&out, remote, canvasTop, sepCol+termSeparator)
 	} else {
 		writeChatPanePlaceholder(&out, canvasTop, sepCol+termSeparator, vs.peerSlot, "Peer video")
 	}
-
-	chatState.RLock()
-	messages := append([]ChatMessage(nil), chatState.messages...)
-	input, transfer := chatState.input, chatState.transfer
-	chatState.RUnlock()
-	start := len(messages) - chatRows
-	if start < 0 {
-		start = 0
+	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
+	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
+	localCaption := currentFPSLabel(localFrameType) + " │ " + buildRateLabel("TX", '↑', txAudio, txVideo)
+	remoteCaption := currentFPSLabel(remoteFrameType) + " │ " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
+	if latencyLabel != "" {
+		remoteCaption += " │ " + latencyLabel
 	}
-	for i, msg := range messages[start:] {
-		row := chatTop + i
-		text := strings.Map(func(r rune) rune {
+	if !mediactrl.CaptureEnabled() {
+		localCaption = "MUTED"
+	}
+	if !mediactrl.PlaybackEnabled() {
+		remoteCaption = "PAUSED"
+	}
+	writeVideoCaption(&out, videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
+	writeVideoCaption(&out, videoCaptionRow, sepCol+termSeparator, vs.peerSlot.cols, remoteCaption)
+
+	if connected {
+		chatState.RLock()
+		messages := append([]ChatMessage(nil), chatState.messages...)
+		input, transfer := chatState.input, chatState.transfer
+		chatState.RUnlock()
+		start := len(messages) - chatRows
+		if start < 0 {
+			start = 0
+		}
+		for i, msg := range messages[start:] {
+			row := chatTop + i
+			text := strings.Map(func(r rune) rune {
+				if r < 0x20 || r == 0x7f {
+					return ' '
+				}
+				return r
+			}, msg.Text)
+			limit := cols - 2*termBorder
+			if len([]rune(text)) > limit {
+				text = string([]rune(text)[:limit])
+			}
+			width := len([]rune(text))
+			col := canvasLeft
+			color := "\x1b[38;2;160;220;255m"
+			if msg.Local {
+				col += max(0, limit-width)
+				color = "\x1b[38;2;190;255;190m"
+			}
+			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s\x1b[2K%s\x1b[0m", row, col, color, text))
+		}
+		sepInput := inputRow - 1
+		if sepInput > chatTop {
+			appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, sepInput)
+			out.WriteString(fmt.Sprintf("\x1b[%d;1H", inputRow))
+		}
+		line := input
+		if transfer != "" {
+			line = transfer
+		} else if line == "" {
+			line = "> Введите сообщение"
+		} else {
+			line = "> " + line + "▏"
+		}
+		line = strings.Map(func(r rune) rune {
 			if r < 0x20 || r == 0x7f {
 				return ' '
 			}
 			return r
-		}, msg.Text)
-		limit := cols - 2*termBorder
-		if len([]rune(text)) > limit {
-			text = string([]rune(text)[:limit])
+		}, line)
+		if len([]rune(line)) > cols-2*termBorder {
+			line = string([]rune(line)[len([]rune(line))-(cols-2*termBorder):])
 		}
-		width := len([]rune(text))
-		col := canvasLeft
-		color := "\x1b[38;2;160;220;255m"
-		if msg.Local {
-			col += max(0, limit-width)
-			color = "\x1b[38;2;190;255;190m"
-		}
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s\x1b[2K%s%s\x1b[0m", row, col, color, text, ""))
-	}
-	sepInput := inputRow - 1
-	if sepInput > chatTop {
-		appendHorizontalSeparator(&out, canvasLeft, cols-2*termBorder, sepInput)
-		out.WriteString(fmt.Sprintf("\x1b[%d;1H", inputRow))
-	}
-	line := input
-	if transfer != "" {
-		line = transfer
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[2K\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, canvasLeft, line))
 	} else {
-		line = "> " + line
-	}
-	line = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
+		status := currentStatusMessage()
+		if status == "" {
+			status = "Waiting for connection…"
 		}
-		return r
-	}, line)
-	if len([]rune(line)) > cols-2*termBorder {
-		line = string([]rune(line)[len([]rune(line))-(cols-2*termBorder):])
+		status = strings.ReplaceAll(strings.TrimSpace(status), "\n", " · ")
+		status = truncateRunes(status, cols-2*termBorder)
+		col := canvasLeft + max(0, (cols-2*termBorder-runeCount(status))/2)
+		row := chatTop + chatRows/2
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, status))
 	}
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[2K\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, canvasLeft, line))
 	return out.String()
+}
+
+func writeVideoCaption(out *strings.Builder, row, left, width int, caption string) {
+	if out == nil || row <= 0 || left <= 0 || width <= 0 {
+		return
+	}
+	caption = truncateRunes(caption, width)
+	col := left + max(0, (width-runeCount(caption))/2)
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m%s\x1b[0m", row, col, caption))
 }
 
 func writeChatPanePlaceholder(out *strings.Builder, top, left int, slot slotSize, fallback string) {
@@ -1813,9 +1886,9 @@ func formatFancyNumber(n int) string {
 
 func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64) string {
 	arrow := string(direction)
-	aVal := formatRateValue(audioKBps)
-	vVal := formatRateValue(videoKBps)
-	label := fmt.Sprintf("A%s%skB/s V%s%skB/s", arrow, aVal, arrow, vVal)
+	aVal := formatRate(audioKBps)
+	vVal := formatRate(videoKBps)
+	label := fmt.Sprintf("A%s%s V%s%s", arrow, aVal, arrow, vVal)
 	if prefix != "" {
 		return fmt.Sprintf("%s %s", prefix, label)
 	}
@@ -1833,11 +1906,16 @@ func buildLatencyLabel(latency time.Duration) string {
 	return fmt.Sprintf("PING %sms", formatFancyNumber(ms))
 }
 
-func formatRateValue(v float64) string {
-	if v <= 0 {
-		return "0"
+func formatRate(kBps float64) string {
+	if kBps <= 0 {
+		return "0B/s"
 	}
-	return formatFancyNumber(int(math.Round(v)))
+	roundedKBps := int(math.Round(kBps))
+	if roundedKBps > 0 {
+		return formatFancyNumber(roundedKBps) + "kB/s"
+	}
+	bytesPerSecond := int(math.Round(kBps * 1024))
+	return formatFancyNumber(bytesPerSecond) + "B/s"
 }
 
 func composeStatusLabel(frameCols, frameRows int, overlay frameOverlay) string {
@@ -1947,16 +2025,25 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	}
 	leftCols := availableCols / 2
 	rightCols := availableCols - leftCols
-	paneRows := int(math.Round(float64(leftCols) * termCellWidthToHeight * 3 / 4))
-	maxPaneRows := height - 4
+	paneCols := min(leftCols, rightCols)
+	paneRows := int(math.Round(float64(paneCols) * termCellWidthToHeight * 4 / 3))
+	// Keep at least three rows for chat history, plus its separator and the
+	// dedicated input row at the bottom of the terminal.
+	maxPaneRows := height - 7
 	if paneRows > maxPaneRows {
 		paneRows = maxPaneRows
+		// Preserve the portrait 3:4 physical aspect ratio when the terminal is
+		// too short by narrowing both video panes and centering them.
+		paneCols = int(math.Round(float64(paneRows) * 3 / (4 * termCellWidthToHeight)))
+		if paneCols > min(leftCols, rightCols) {
+			paneCols = min(leftCols, rightCols)
+		}
 	}
 	if paneRows < 1 {
 		return
 	}
-	vs.selfSlot = slotSize{cols: leftCols, rows: paneRows, orient: vs.orient}
-	vs.peerSlot = slotSize{cols: rightCols, rows: paneRows, orient: vs.orient}
+	vs.selfSlot = slotSize{cols: paneCols, rows: paneRows, orient: vs.orient}
+	vs.peerSlot = slotSize{cols: paneCols, rows: paneRows, orient: vs.orient}
 
 	if vs.selfSlot.cols <= 0 || vs.selfSlot.rows <= 0 ||
 		vs.peerSlot.cols <= 0 || vs.peerSlot.rows <= 0 {

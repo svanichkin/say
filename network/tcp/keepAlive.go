@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	pingPayloadLen = 8
-	pongPayloadLen = 9
+	pingPayloadLen    = 8
+	pongPayloadLen    = 9
+	keepaliveInterval = 2 * time.Second
+	keepaliveTimeout  = 30 * time.Second
 )
 
 // tcpKeepalive tracks outstanding ping timestamps using the local monotonic clock.
