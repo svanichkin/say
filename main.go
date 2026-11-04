@@ -62,7 +62,11 @@ func run() (err error) {
 	}
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
 
-	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath, opts.LogEnabled)
+	role := "server"
+	if opts.Mode == conf.ModeClient {
+		role = "client"
+	}
+	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath, role, opts.LogEnabled)
 	if closeLog != nil {
 		defer closeLog()
 	}
@@ -287,11 +291,14 @@ func mergeFriendLists(base, extra []conf.Friend) []conf.Friend {
 	return merged
 }
 
-func initLogSink(configPath string, logEnabled bool) (io.Writer, func() error, string, error) {
+// initLogSink opens the log file. role ("client" or "server") is part of the
+// file name, so a client and a server started from the same binary and
+// config do not write into one file.
+func initLogSink(configPath, role string, logEnabled bool) (io.Writer, func() error, string, error) {
 	if !logEnabled {
 		return nil, nil, "", nil
 	}
-	logPath, err := resolveLogPath(configPath, logEnabled)
+	logPath, err := resolveLogPath(configPath, role, logEnabled)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -312,7 +319,7 @@ func initLogSink(configPath string, logEnabled bool) (io.Writer, func() error, s
 	return f, closeFn, logPath, nil
 }
 
-func resolveLogPath(configPath string, logEnabled bool) (string, error) {
+func resolveLogPath(configPath, role string, logEnabled bool) (string, error) {
 	if logEnabled {
 		exePath, err := os.Executable()
 		if err != nil {
@@ -332,14 +339,14 @@ func resolveLogPath(configPath string, logEnabled bool) (string, error) {
 		if name == "" {
 			name = "say"
 		}
-		return filepath.Join(filepath.Dir(exePath), name+".log"), nil
+		return filepath.Join(filepath.Dir(exePath), name+"-"+role+".log"), nil
 	}
 
 	dir := filepath.Dir(configPath)
 	if dir == "" {
 		dir = "."
 	}
-	return filepath.Join(dir, "say.log"), nil
+	return filepath.Join(dir, "say-"+role+".log"), nil
 }
 
 func formatSayHint(transport network.TransportKind, addr string, port int) string {
