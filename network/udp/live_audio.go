@@ -9,7 +9,7 @@ import (
 // Live audio settings: the chat command "-audio" shows and changes the
 // jitter buffer lead and the speaker buffer of the call in progress. They
 // apply to this side's playback only, and the next call starts from the
-// per-connection defaults again (see ApplyNetworkProfile).
+// defaults again (see ResetAudioSettings).
 
 // liveAudio is the running session's hook for live changes.
 type liveAudio struct {

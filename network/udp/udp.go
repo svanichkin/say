@@ -88,13 +88,13 @@ func SetSpeakerBuffer(periodMs, periods int) {
 	SetJitterLead(audioBufferLeadFrames * audioFrameMillis)
 }
 
-// Audio buffer sets per connection: a peer reached through the internet,
-// and one directly in the local network. The speaker runs like the system
-// voice unit on macOS (an IO buffer of 512 frames at 48 kHz, ~10.7 ms): two
-// 10 ms periods.
+// The audio buffers every call starts with, in the LAN and over the
+// internet alike. The speaker runs like the system voice unit on macOS (an
+// IO buffer of 512 frames at 48 kHz, ~10.7 ms): two 10 ms periods.
 const (
-	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 10, 2, 40
-	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 10, 2, 40
+	defaultSpeakerPeriodMs = 10
+	defaultSpeakerPeriods  = 2
+	defaultLeadMs          = 40
 )
 
 // audioLeadAdaptive lets late packets grow the jitter buffer lead and quiet
@@ -102,17 +102,11 @@ const (
 // value. Clock drift correction of the PCM queue is not affected.
 var audioLeadAdaptive = false
 
-// ApplyNetworkProfile selects the buffer set for the next session.
-func ApplyNetworkProfile(lan bool) {
-	if lan {
-		SetSpeakerBuffer(lanSpeakerPeriodMs, lanSpeakerPeriods)
-		SetJitterLead(lanLeadMs)
-		log.Printf("[audio] peer in the local network: %d ms x %d speaker buffer, %d ms lead", lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs)
-		return
-	}
-	SetSpeakerBuffer(netSpeakerPeriodMs, netSpeakerPeriods)
-	SetJitterLead(netLeadMs)
-	log.Printf("[audio] peer over the internet: %d ms x %d speaker buffer, %d ms lead", netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs)
+// ResetAudioSettings restores the default buffers for the next session,
+// undoing -audio changes made during the previous call.
+func ResetAudioSettings() {
+	SetSpeakerBuffer(defaultSpeakerPeriodMs, defaultSpeakerPeriods)
+	SetJitterLead(defaultLeadMs)
 }
 
 // SetJitterLead sets the initial jitter buffer lead (ms) for future sessions.

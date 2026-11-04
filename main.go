@@ -180,9 +180,15 @@ func run() (err error) {
 	var mediaFactory tcpsignal.MediaSessionFactory
 	if udpConn != nil {
 		mediaFactory = func(peerHost string, remote *net.UDPAddr) (tcpsignal.MediaSession, error) {
-			// Pick the audio buffers for this call: a peer in the local
-			// network gets the low-latency set.
-			udptransport.ApplyNetworkProfile(transport.IsLocalPeer(peerHost))
+			// Every call starts with the default audio buffers (-audio
+			// changes last one call). Where the peer is only matters for
+			// the log: a LAN peer means multicast found a direct link.
+			udptransport.ResetAudioSettings()
+			if transport.IsLocalPeer(peerHost) {
+				log.Printf("[p2p] peer %s is in the local network (direct link)", peerHost)
+			} else {
+				log.Printf("[p2p] peer %s is reached over the internet", peerHost)
+			}
 			return udptransport.StartSession(udpConn, remote)
 		}
 	}
