@@ -153,17 +153,26 @@ func chatPaste(s string) {
 	RequestRedraw()
 }
 
-// SetTransferProgress replaces the input line while a file is being sent.
+// sendRate measures the speed of the file being sent.
+var sendRate transferRate
+
+// SetTransferProgress replaces the input line while a file is being sent:
+// how much of how much, the percentage and the current speed.
 func SetTransferProgress(name string, sent, total int64, done bool) {
 	chatState.Lock()
 	if done {
 		chatState.transfer = ""
+		sendRate.reset()
 	} else {
 		pct := int64(0)
 		if total > 0 {
 			pct = sent * 100 / total
 		}
-		chatState.transfer = fmt.Sprintf("Sending %s  %d%%", filepath.Base(name), pct)
+		text := fmt.Sprintf("Sending %s  %s / %s  %d%%", filepath.Base(name), FormatBytes(sent), FormatBytes(total), pct)
+		if speed := sendRate.observe(sent, time.Now()); speed > 0 {
+			text += "  " + FormatByteRate(speed)
+		}
+		chatState.transfer = text
 	}
 	chatState.Unlock()
 	RequestRedraw()

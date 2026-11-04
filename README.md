@@ -91,7 +91,9 @@ and wide characters (CJK, emoji) are measured correctly.
 
 To send a file, type, paste or drag its path (or drop the file into the terminal,
 which pastes a `file://` URI) and press Enter. Transfer progress replaces the
-input line. The receiver saves the file to `~/Downloads` and confirms it; the
+input line: how much of how much is sent (B, kB, MB or GB), the percentage
+and the current speed (Bps, kBps, MBps); the final **Sent** entry shows the
+size, the average speed and the time. The receiver saves the file to `~/Downloads` and confirms it; the
 sender's chat shows **Sent** only after that confirmation, or the receiver's
 error (for example, a full disk). File transfer adapts its rate to the call so
 that voice and video stay smooth.

@@ -327,6 +327,16 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 		return
 	}
 	ui.SetTransferProgress(name, 0, size, false)
+	began := time.Now()
+	// sentSummary is the final chat entry: size, average speed and time.
+	sentSummary := func() string {
+		elapsed := time.Since(began)
+		text := "Sent " + name + " (" + ui.FormatBytes(size)
+		if elapsed > 0 && size > 0 {
+			text += ", " + ui.FormatByteRate(float64(size)/elapsed.Seconds()) + ", " + elapsed.Round(100*time.Millisecond).String()
+		}
+		return text + ")"
+	}
 
 	buf := make([]byte, fileChunkBytes)
 	var sent int64
@@ -373,12 +383,12 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 	select {
 	case res := <-results:
 		if res.saved {
-			finish(sent, "Sent "+name)
+			finish(sent, sentSummary())
 		} else {
 			finish(sent, "File send failed: "+name+": peer: "+res.msg)
 		}
 	case <-time.After(fileResultTimeout):
-		finish(sent, "Sent "+name+", but the peer did not confirm saving it")
+		finish(sent, sentSummary()+", but the peer did not confirm saving it")
 	}
 }
 
