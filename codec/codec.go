@@ -163,140 +163,131 @@ func FindCharData(getPixel func(int, int) uint32, x0, y0, flags int) CharData {
 }
 
 func createCharData(getPixel func(int, int) uint32, x0, y0, codePoint int, pattern uint32) CharData {
-	var res CharData
-	res.CodePoint = codePoint
-
-	fgCount, bgCount := 0, 0
-	mask := uint32(0x80000000)
-
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 4; x++ {
-			var avg *[3]int
-			if pattern&mask != 0 {
-				avg = &res.FgColor
-				fgCount++
-			} else {
-				avg = &res.BgColor
-				bgCount++
-			}
-
-			rgb := getPixel(x0+x, y0+y)
-			for i := 0; i < 3; i++ {
-				(*avg)[i] += getChannel(rgb, i)
-			}
-			mask >>= 1
-		}
-	}
-
-	if bgCount > 0 {
-		for i := range res.BgColor {
-			res.BgColor[i] /= bgCount
-		}
-	}
-	if fgCount > 0 {
-		for i := range res.FgColor {
-			res.FgColor[i] /= fgCount
-		}
-	}
-	return res
+	block := readCellBlock(getPixel, x0, y0)
+	return createCharDataBlock(&block, codePoint, pattern)
 }
 
 func findCharData(getPixel func(int, int) uint32, x0, y0, flags int) CharData {
+	block := readCellBlock(getPixel, x0, y0)
+	return findCharDataBlock(&block, flags)
+}
+
+// cellBlock holds the 4x8 pixels of one cell, row by row, each packed as
+// Y<<16 | Cb<<8 | Cr.
+type cellBlock [32]uint32
+
+func readCellBlock(getPixel func(int, int) uint32, x0, y0 int) cellBlock {
+	var block cellBlock
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 4; x++ {
+			block[y*4+x] = getPixel(x0+x, y0+y)
+		}
+	}
+	return block
+}
+
+// createCharDataBlock averages the pixels under the set and the clear bits
+// of pattern into the foreground and background colours.
+func createCharDataBlock(block *cellBlock, codePoint int, pattern uint32) CharData {
+	var fg, bg [3]int
+	fgCount := bits.OnesCount32(pattern)
+	mask := uint32(0x80000000)
+	for _, px := range block {
+		y, cb, cr := int(px>>16&0xff), int(px>>8&0xff), int(px&0xff)
+		if pattern&mask != 0 {
+			fg[0] += y
+			fg[1] += cb
+			fg[2] += cr
+		} else {
+			bg[0] += y
+			bg[1] += cb
+			bg[2] += cr
+		}
+		mask >>= 1
+	}
+	if bgCount := 32 - fgCount; bgCount > 0 {
+		bg[0], bg[1], bg[2] = bg[0]/bgCount, bg[1]/bgCount, bg[2]/bgCount
+	}
+	if fgCount > 0 {
+		fg[0], fg[1], fg[2] = fg[0]/fgCount, fg[1]/fgCount, fg[2]/fgCount
+	}
+	return CharData{CodePoint: codePoint, FgColor: fg, BgColor: bg}
+}
+
+// findCharDataBlock picks the glyph and colours that best represent a cell.
+// When two colours cover most of the cell they are used directly; otherwise
+// the cell is split along its widest channel and the halves are averaged.
+func findCharDataBlock(block *cellBlock, flags int) CharData {
 	minC := [3]int{255, 255, 255}
 	maxC := [3]int{0, 0, 0}
 
-	type colorCount struct {
-		color uint32
-		count int
-	}
-
-	var colors [32]colorCount
+	// Distinct colours in order of first appearance, found through a small
+	// open-addressing table (a camera picture has nearly 32 per cell; a
+	// linear search over them cost ~500 comparisons per cell).
+	var colors [32]uint32
+	var counts [32]int
+	var slots [64]int8 // index+1 into colors; 0 is empty
 	nColors := 0
+	for _, px := range block {
+		color := px & 0xffffff
+		y, cb, cr := int(color>>16), int(color>>8&0xff), int(color&0xff)
+		minC[0], maxC[0] = min(minC[0], y), max(maxC[0], y)
+		minC[1], maxC[1] = min(minC[1], cb), max(maxC[1], cb)
+		minC[2], maxC[2] = min(minC[2], cr), max(maxC[2], cr)
 
-	// Cache the 4x8 block to avoid calling getPixel twice for each cell.
-	var block [32]uint32
-	idx := 0
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 4; x++ {
-			rgb := getPixel(x0+x, y0+y)
-			block[idx] = rgb
-			idx++
-
-			var color uint32
-			for i := 0; i < 3; i++ {
-				d := getChannel(rgb, i)
-				if d < minC[i] {
-					minC[i] = d
-				}
-				if d > maxC[i] {
-					maxC[i] = d
-				}
-				color = (color << 8) | uint32(d)
-			}
-
-			found := false
-			for i := 0; i < nColors; i++ {
-				if colors[i].color == color {
-					colors[i].count++
-					found = true
-					break
-				}
-			}
-			if !found && nColors < len(colors) {
-				colors[nColors] = colorCount{color: color, count: 1}
+		h := (color * 2654435761) >> 26 // 6 bits
+		for {
+			slot := slots[h]
+			if slot == 0 {
+				colors[nColors], counts[nColors] = color, 1
 				nColors++
+				slots[h] = int8(nColors)
+				break
 			}
+			if colors[slot-1] == color {
+				counts[slot-1]++
+				break
+			}
+			h = (h + 1) & 63
 		}
 	}
 
 	var maxColor1, maxColor2 uint32
 	count2 := 0
-
-	if nColors > 0 {
-		best1, best2 := -1, -1
-		idx1, idx2 := -1, -1
-		for i := 0; i < nColors; i++ {
-			c := colors[i].count
-			if c > best1 {
-				best2, idx2 = best1, idx1
-				best1, idx1 = c, i
-			} else if c > best2 {
-				best2, idx2 = c, i
-			}
+	best1, best2 := -1, -1
+	idx1, idx2 := -1, -1
+	for i := 0; i < nColors; i++ {
+		c := counts[i]
+		if c > best1 {
+			best2, idx2 = best1, idx1
+			best1, idx1 = c, i
+		} else if c > best2 {
+			best2, idx2 = c, i
 		}
-		if idx1 >= 0 {
-			maxColor1 = colors[idx1].color
-			maxColor2 = maxColor1
-			count2 = colors[idx1].count
-		}
-		if idx2 >= 0 {
-			maxColor2 = colors[idx2].color
-			count2 += colors[idx2].count
-		}
+	}
+	if idx1 >= 0 {
+		maxColor1 = colors[idx1]
+		maxColor2 = maxColor1
+		count2 = counts[idx1]
+	}
+	if idx2 >= 0 {
+		maxColor2 = colors[idx2]
+		count2 += counts[idx2]
 	}
 
 	var bitsVal uint32
 	direct := count2 > (8*4)/2
 
 	if direct {
-		idx = 0
-		for y := 0; y < 8; y++ {
-			for x := 0; x < 4; x++ {
-				bitsVal <<= 1
-				rgb := block[idx]
-				idx++
-				d1, d2 := 0, 0
-				for i := 0; i < 3; i++ {
-					shift := uint(16 - 8*i)
-					c1 := int((maxColor1 >> shift) & 0xff)
-					c2 := int((maxColor2 >> shift) & 0xff)
-					c := getChannel(rgb, i)
-					d1 += (c1 - c) * (c1 - c)
-					d2 += (c2 - c) * (c2 - c)
-				}
-				if d1 > d2 {
-					bitsVal |= 1
-				}
+		y1, cb1, cr1 := int(maxColor1>>16&0xff), int(maxColor1>>8&0xff), int(maxColor1&0xff)
+		y2, cb2, cr2 := int(maxColor2>>16&0xff), int(maxColor2>>8&0xff), int(maxColor2&0xff)
+		for _, px := range block {
+			bitsVal <<= 1
+			y, cb, cr := int(px>>16&0xff), int(px>>8&0xff), int(px&0xff)
+			d1 := (y1-y)*(y1-y) + (cb1-cb)*(cb1-cb) + (cr1-cr)*(cr1-cr)
+			d2 := (y2-y)*(y2-y) + (cb2-cb)*(cb2-cb) + (cr2-cr)*(cr2-cr)
+			if d1 > d2 {
+				bitsVal |= 1
 			}
 		}
 	} else {
@@ -309,15 +300,11 @@ func findCharData(getPixel func(int, int) uint32, x0, y0, flags int) CharData {
 			}
 		}
 		splitValue := minC[splitIndex] + bestSplit/2
-
-		idx = 0
-		for y := 0; y < 8; y++ {
-			for x := 0; x < 4; x++ {
-				bitsVal <<= 1
-				if getChannel(block[idx], splitIndex) > splitValue {
-					bitsVal |= 1
-				}
-				idx++
+		shift := uint(16 - 8*splitIndex)
+		for _, px := range block {
+			bitsVal <<= 1
+			if int(px>>shift&0xff) > splitValue {
+				bitsVal |= 1
 			}
 		}
 	}
@@ -358,7 +345,37 @@ func findCharData(getPixel func(int, int) uint32, x0, y0, flags int) CharData {
 		return res
 	}
 
-	return createCharData(getPixel, x0, y0, codePoint, bestPattern)
+	return createCharDataBlock(block, codePoint, bestPattern)
+}
+
+var (
+	glyphLookupOnce  sync.Once
+	glyphLookupTable []byte // codepoint -> glyph index + 1 (0: not a glyph)
+)
+
+// glyphIndexLookup is glyphIndexMap as a table indexed by codepoint: a map
+// lookup per cell showed up in encoder profiles.
+func glyphIndexLookup() []byte {
+	glyphLookupOnce.Do(func() {
+		m := glyphIndexMap()
+		maxCP := 0
+		for cp := range m {
+			maxCP = max(maxCP, cp)
+		}
+		glyphLookupTable = make([]byte, maxCP+1)
+		for cp, idx := range m {
+			glyphLookupTable[cp] = idx + 1
+		}
+	})
+	return glyphLookupTable
+}
+
+// glyphIndexOf returns the glyph index of a codepoint, or 0 if unknown.
+func glyphIndexOf(table []byte, cp int) byte {
+	if cp < 0 || cp >= len(table) || table[cp] == 0 {
+		return 0
+	}
+	return table[cp] - 1
 }
 
 func glyphIndexMap() map[int]byte {
@@ -1117,7 +1134,7 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 	}
 
 	totalCells := cols * rows
-	glyphMap := glyphIndexMap()
+	glyphLookup := glyphIndexLookup()
 
 	if cap(e.glyphs) < totalCells {
 		e.glyphs = make([]byte, totalCells)
@@ -1139,26 +1156,6 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 	fgColors := e.fgColors[:totalCells]
 	bgColors := e.bgColors[:totalCells]
 
-	getPixel := func(x, y int) uint32 {
-		if x < 0 || y < 0 || x >= w || y >= h {
-			return 0
-		}
-		sx := xMap[x]
-		sy := yMap[y]
-		off := (sy*srcW + sx) * 3
-		if off < 0 || off+2 >= len(frame.Data) {
-			return 0
-		}
-		yVal := frame.Data[off]
-		cb := frame.Data[off+1]
-		cr := frame.Data[off+2]
-		if bw {
-			cb = 128
-			cr = 128
-		}
-		return (uint32(yVal) << 16) | (uint32(cb) << 8) | uint32(cr)
-	}
-
 	// Parallel pass: compute glyphs and per-cell fg/bg colors.
 	workers := runtime.GOMAXPROCS(0)
 	if workers > rows {
@@ -1174,15 +1171,29 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 		startRow := wIdx
 		go func(start int) {
 			defer wg.Done()
+			var block cellBlock
 			for by := start; by < rows; by += workers {
 				for bx := 0; bx < cols; bx++ {
 					cell := by*cols + bx
-					cd := findCharData(getPixel, bx*4, by*8, 0)
-					idx, ok := glyphMap[cd.CodePoint]
-					if !ok {
-						idx = 0
+					// Read the cell's pixels straight from the frame (what
+					// getPixel does, without a call per pixel).
+					for y := 0; y < 8; y++ {
+						rowOff := yMap[by*8+y] * srcW
+						for x := 0; x < 4; x++ {
+							off := (rowOff + xMap[bx*4+x]) * 3
+							var px uint32
+							if off >= 0 && off+2 < len(frame.Data) {
+								cb, cr := frame.Data[off+1], frame.Data[off+2]
+								if bw {
+									cb, cr = 128, 128
+								}
+								px = uint32(frame.Data[off])<<16 | uint32(cb)<<8 | uint32(cr)
+							}
+							block[y*4+x] = px
+						}
 					}
-					glyphs[cell] = idx
+					cd := findCharDataBlock(&block, 0)
+					glyphs[cell] = glyphIndexOf(glyphLookup, cd.CodePoint)
 
 					fgColor := paletteColor{
 						byte(clampByte(cd.FgColor[0])),
