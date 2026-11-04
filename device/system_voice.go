@@ -1,7 +1,6 @@
 package device
 
 import (
-	"fmt"
 	"log"
 	"time"
 )
@@ -87,8 +86,7 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick int, speakerIn *PlaybackQu
 		speaker.playbackLatencyTicks = uint32(total * time.Duration(sampleRate) / time.Second / time.Duration(samplesPerMediaTick))
 	}
 	speaker.latencySamples = int(out.Total() * time.Duration(sampleRate) / time.Second)
-	speaker.info = fmt.Sprintf("system voice: output %v; input %v", out, in)
-	log.Printf("[audio] %s", speaker.info)
+	log.Printf("[audio] system voice: output %v; input %v", out, in)
 
 	speaker.closeDevice = func() {
 		vio.Close()

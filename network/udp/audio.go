@@ -161,7 +161,6 @@ type audioEcho struct {
 	mu             sync.Mutex // canceller state, used by the sender goroutine
 	canceller      *echo.Canceller
 	trace          *audioTrace
-	bypass         bool // "-aec off": the microphone passes unprocessed
 	frameSamples   int
 	ref            []int16
 	captureKnown   bool
@@ -252,29 +251,6 @@ func (a *audioEcho) setReferenceDelay(samples int) {
 	a.refMu.Unlock()
 }
 
-// setBypass turns echo cancellation off (the microphone passes through) or
-// back on; turning it on starts the filter from scratch.
-func (a *audioEcho) setBypass(off bool) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.bypass && !off {
-		a.canceller.Reset()
-	}
-	a.bypass = off
-}
-
-func (a *audioEcho) enabled() bool {
-	if a == nil {
-		return false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return !a.bypass
-}
-
 func (a *audioEcho) setCaptureEnabled(enabled bool) {
 	if a == nil {
 		return
@@ -299,18 +275,12 @@ func (a *audioEcho) capture(mic, out []int16) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	// Keep the reference flowing even while cancellation is bypassed.
 	if a.nextReference() {
 		a.canceller.Reset()
 	}
-	var err error
-	if a.bypass {
-		copy(out, mic)
-	} else {
-		// Pair explicitly: our reference queue already aligns whole frames.
-		// Playback/Capture would add a second, hidden two-frame queue.
-		err = a.canceller.Cancel(mic, a.ref, out)
-	}
+	// Pair explicitly: our reference queue already aligns whole frames.
+	// Playback/Capture would add a second, hidden two-frame queue.
+	err := a.canceller.Cancel(mic, a.ref, out)
 	if err == nil && a.trace != nil {
 		a.trace.record(mic, a.ref, out)
 	}

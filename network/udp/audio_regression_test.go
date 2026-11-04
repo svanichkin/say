@@ -45,28 +45,7 @@ func TestDecodedDuplicatesDoNotChangeDelayOrDecoder(t *testing.T) {
 	}
 }
 
-func TestDelayAdjustmentDoesNotInventCodecLosses(t *testing.T) {
-	dec := &countedDecoder{}
-	q := device.NewPlaybackQueue(128)
-	p := newAudioPlayout(dec, 160, q)
-	now := time.Now()
-	for i := 0; i < 8; i++ {
-		p.onPacket(uint16(i*5), []byte{1}, now)
-	}
-	p.configure(10, 6, 4)
-	for i := 8; i < 110; i++ {
-		q.TakeFrame()
-		p.onPacket(uint16(i*5), []byte{1}, now)
-		p.adaptLead(now)
-	}
-	if dec.concealed != 0 || dec.decoded != 110 || p.nextIndex != 550 || p.adjust != 0 {
-		t.Fatalf("adjustment changed codec timeline: decoded=%d PLC=%d next=%d adjustment=%d", dec.decoded, dec.concealed, p.nextIndex, p.adjust)
-	}
-}
-
-func TestOneLateSlotGrowsDelayOnlyOnce(t *testing.T) {
-	defer func(v bool) { audioLeadAdaptive = v }(audioLeadAdaptive)
-	audioLeadAdaptive = true
+func TestOneLateSlotCountsOnceAndKeepsTheLead(t *testing.T) {
 	q := device.NewPlaybackQueue(128)
 	p := newAudioPlayout(&countedDecoder{}, 160, q)
 	now := time.Now()
@@ -79,28 +58,8 @@ func TestOneLateSlotGrowsDelayOnlyOnce(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		p.onPacket(index, []byte{1}, now)
 	}
-	if p.lead != before+audioLeadGrowFrames || p.lateEvents != 1 {
+	if p.lead != before || p.lateEvents != 1 {
 		t.Fatalf("lead=%d late=%d", p.lead, p.lateEvents)
-	}
-}
-
-func TestLowerLeadReachesRequestedQueueDepth(t *testing.T) {
-	q := device.NewPlaybackQueue(128)
-	p := newAudioPlayout(&countedDecoder{}, 160, q)
-	p.lead = 20
-	for i := 0; i < 20; i++ {
-		p.push(make([]int16, 160))
-	}
-	p.configure(6, 6, 4)
-	for i := 0; i < 50; i++ {
-		q.TakeFrame()
-		p.push(make([]int16, 160))
-	}
-	if got := q.QueuedSamples(); got > 7*160 || got < 5*160 {
-		t.Fatalf("requested 120 ms, still queued %d ms", got/8)
-	}
-	if p.adjust != 0 {
-		t.Fatalf("unfinished reduction: %d samples", p.adjust)
 	}
 }
 
@@ -286,52 +245,6 @@ func TestPlayoutCompensatesIndependentAudioClocks(t *testing.T) {
 			t.Logf("clock drift %d ppm: PLC=%d underruns=%d max queue=%d ms final=%d ms", ppm, dec.concealed, underruns, maxQueue/8, q.QueuedSamples()/8)
 			if underruns != 0 || dec.concealed != 0 || maxQueue > 12*160 {
 				t.Fatal("unbounded clock drift or lost speech")
-			}
-		})
-	}
-}
-
-func TestRealDecoderStateSurvivesDelayChanges(t *testing.T) {
-	for _, codec := range []string{"amrnb", "opus"} {
-		t.Run(codec, func(t *testing.T) {
-			enc, dec, frame, err := initAudioCodec(codec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, baseline, _, err := initAudioCodec(codec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			q := device.NewPlaybackQueue(128)
-			p := newAudioPlayout(dec, frame, q)
-			now := time.Now()
-			pcm, reference := make([]int16, frame), make([]int16, frame)
-			packet := make([]byte, maxAudioPacket)
-			for k := 0; k < 150; k++ {
-				for i := range pcm {
-					pcm[i] = int16(8000 * math.Sin(2*math.Pi*337*float64(k*frame+i)/audioSampleRate))
-				}
-				n, err := enc.EncodeFrame(pcm, packet)
-				if err != nil || n == 0 {
-					t.Fatalf("speech encode: n=%d err=%v", n, err)
-				}
-				if _, err := baseline.DecodeFrame(packet[:n], reference); err != nil {
-					t.Fatal(err)
-				}
-				if k == 20 {
-					p.configure(10, 6, 4)
-				}
-				if k == 100 {
-					p.configure(6, 6, 4)
-				}
-				p.onPacket(uint16(k*5), packet[:n], now)
-				for i := range reference {
-					if p.scratch[i] != reference[i] {
-						t.Fatalf("codec history changed at frame %d sample %d", k, i)
-					}
-				}
-				p.adaptLead(now)
-				q.TakeFrame()
 			}
 		})
 	}

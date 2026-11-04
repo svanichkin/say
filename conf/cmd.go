@@ -270,7 +270,7 @@ type AppOptions struct {
 	NoLAN       bool
 	NoMic       bool
 	SysAudio    bool // -sysaudio: the system voice unit for microphone and speaker
-	VideoHold   int // cell hold threshold (mean colour difference per pixel); -video-hold
+	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
 	HoldDebug   bool
 	ShowVersion bool
 	ShowDonate  bool

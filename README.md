@@ -49,13 +49,11 @@ external Yggdrasil daemon or web stack.
   hundred bytes per frame instead of several kilobytes. A full frame follows
   about every half second, so a lost packet freezes the picture briefly
   instead of corrupting it. Both peers need this version.
-- **Jitter buffer.** The target delay is fixed per call (the profile or
-  `-audio` value); automatic growth on late packets is turned off for now.
-  When enabled, packets arriving after an actual concealed slot grow the
-  target delay; duplicates do not. Delay changes adjust decoded PCM
-  duration, never the codec's loss history. Temporary resampling is bounded to
-  5% (it can slightly change pitch while adjusting); steady clock drift uses at
-  most one sample per 20 ms frame. Quiet frames can shorten excess delay sooner.
+- **Small fixed buffers.** Every call plays with a 10 ms x 2 speaker buffer
+  (like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms jitter
+  buffer, in the LAN and over the internet alike. Steady clock drift between
+  the two peers' sound cards is corrected by at most one sample per 20 ms
+  frame.
 - Capture sample indices survive dropped microphone blocks. A separate bounded
   send queue prevents a stalled transport from blocking capture/AEC; old encoded
   speech is discarded with its original timestamp preserved.
@@ -85,25 +83,11 @@ is off unless this environment variable is set. These files contain the call's
 audio. Compare channels to locate whether distortion starts before or after
 AEC; a real device recording is needed to verify its estimated delay.
 
-The `-audio` target changes gradually; the reported queued PCM excludes the
-sound device's own buffer. Each new call starts with a 10 ms x 2 speaker buffer
-(like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms lead, in the
-LAN and over the internet alike. The speaker period is real time on any device
-sample rate.
-
 ## Chat and file transfer
 
 The lower part of the call screen is a chat. Type a message and press Enter;
 your messages appear on the left, the peer's on the right. Long messages wrap,
 and wide characters (CJK, emoji) are measured correctly.
-
-Lines starting with `-` are local commands and are not sent. `-audio` shows
-the audio buffers of the call (target lead, actual queued PCM, speaker period
-and number of periods); `-audio 40 10 2` sets them live for your own playback (the
-speaker restarts briefly if its buffer changes). The next call starts from the
-automatic per-connection values again. `-aec` shows the echo canceller and
-`-aec off` / `-aec on` switches it for the call in progress (to hear whether it
-damages your voice); the next call has it on again.
 
 To send a file, type, paste or drag its path (or drop the file into the terminal,
 which pastes a `file://` URI) and press Enter. Transfer progress replaces the
@@ -316,7 +300,7 @@ of the current media protocol. Relevant CLI switches:
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
-- `-sysaudio` – run microphone and speaker through the system's voice processing (macOS VoiceProcessingIO, as used by FaceTime): the system cancels echo, suppresses noise and controls gain instead of Say's own echo canceller. The speaker buffer is then chosen by the system: `-audio` shows the output and input latency the system reports (also used to sync video) and changes only the jitter buffer. Falls back to Say's own audio where unavailable (other platforms for now).
+- `-sysaudio` – run microphone and speaker through the system's voice processing (macOS VoiceProcessingIO, as used by FaceTime): the system cancels echo, suppresses noise and controls gain instead of Say's own echo canceller. The speaker buffer is then chosen by the system; the output latency it reports is used to sync video (and logged). Falls back to Say's own audio where unavailable (other platforms for now).
 - `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.

@@ -137,34 +137,6 @@ func TestEchoReferenceDelayCoversDeviceLatency(t *testing.T) {
 	}
 }
 
-func TestAudioEchoBypassPassesMicrophone(t *testing.T) {
-	a, err := newAudioEcho(160)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mic, out := make([]int16, 160), make([]int16, 160)
-	for i := range mic {
-		mic[i] = int16(i * 100)
-	}
-	a.playback(mic) // an echo reference that would otherwise be cancelled
-	a.setBypass(true)
-	if a.enabled() {
-		t.Fatal("enabled after -aec off")
-	}
-	if err := a.capture(mic, out); err != nil {
-		t.Fatal(err)
-	}
-	for i := range mic {
-		if out[i] != mic[i] {
-			t.Fatalf("bypassed sample %d = %d, want the microphone's %d", i, out[i], mic[i])
-		}
-	}
-	a.setBypass(false)
-	if !a.enabled() {
-		t.Fatal("disabled after -aec on")
-	}
-}
-
 func TestCaptureDropAdvancesEchoReference(t *testing.T) {
 	a, err := newAudioEcho(160)
 	if err != nil {

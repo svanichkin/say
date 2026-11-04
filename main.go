@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -117,7 +116,6 @@ func run() (err error) {
 	udptransport.SetSystemVoice(opts.SysAudio)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
-	ui.SetChatCommandHandler(chatCommand)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
@@ -521,47 +519,4 @@ func printDonateInfo() {
 
 func printSupportInfo() {
 	fmt.Println(support)
-}
-
-// chatCommand handles local chat commands. "-audio" shows the audio buffers
-// of the call; "-audio LEAD PERIOD PERIODS" (milliseconds, count) changes them.
-// "-aec" shows the echo canceller, "-aec on|off" switches it for this call.
-func chatCommand(line string) (string, bool) {
-	fields := strings.Fields(line)
-	if len(fields) > 0 && fields[0] == "-aec" {
-		switch {
-		case len(fields) == 1:
-			return udptransport.EchoCancellationState(), true
-		case len(fields) == 2 && (fields[1] == "on" || fields[1] == "off"):
-			reply, err := udptransport.SetEchoCancellation(fields[1] == "on")
-			if err != nil {
-				return "aec: " + err.Error(), true
-			}
-			return reply, true
-		}
-		return "usage: -aec  or  -aec on|off", true
-	}
-	if len(fields) == 0 || fields[0] != "-audio" {
-		return "", false
-	}
-	switch len(fields) {
-	case 1:
-		return udptransport.AudioSettings(), true
-	case 4:
-		var v [3]int
-		for i, f := range fields[1:] {
-			n, err := strconv.Atoi(f)
-			if err != nil {
-				return fmt.Sprintf("audio: %q is not a number", f), true
-			}
-			v[i] = n
-		}
-		reply, err := udptransport.ApplyAudioSettings(v[0], v[1], v[2])
-		if err != nil {
-			return "audio: " + err.Error(), true
-		}
-		return reply, true
-	default:
-		return "usage: -audio  or  -audio LEAD PERIOD PERIODS (e.g. -audio 40 10 2)", true
-	}
 }

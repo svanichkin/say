@@ -37,17 +37,14 @@ const (
 	mediaIndexMask          uint16 = 0x7fff
 	mediaIndexHalf          uint16 = 0x4000
 	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32               // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5                // 20 ms audio frame on a 4 ms common media timeline
-	audioLeadMaxFrames             = 32               // 640 ms, the fixed lead of v0.1.3
-	audioLeadGrowFrames            = 2                // per packet that arrived after its slot
-	audioLeadShrinkQuiet           = 10 * time.Second // no late packets for this long…
-	audioLeadShrinkEvery           = 5 * time.Second  // …shrinks the lead by one frame this often
-	audioQuietRMS                  = 300              // frames below this RMS count as silence when shrinking the lead
-	audioBufferMaxFrames           = 128              // queue capacity: 2.56 s
-	audioMaxConsecutivePLCs        = 32               // tolerate up to 640 ms of missing media before resync
-	audioDTXUpdateFrames           = 8                // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames            = 64               // 1.28 s of queued playback triggers a trim…
+	mediaTickSamples               = 32  // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5   // 20 ms audio frame on a 4 ms common media timeline
+	audioLeadMaxFrames             = 32  // 640 ms, the largest lead (the fixed lead of v0.1.3)
+	audioQuietRMS                  = 300 // frames below this RMS count as silence when shrinking the lead
+	audioBufferMaxFrames           = 128 // queue capacity: 2.56 s
+	audioMaxConsecutivePLCs        = 32  // tolerate up to 640 ms of missing media before resync
+	audioDTXUpdateFrames           = 8   // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames            = 64  // 1.28 s of queued playback triggers a trim…
 	videoBaseStaleThreshold        = 250 * time.Millisecond
 	videoMaxStaleThreshold         = 3 * time.Second
 	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
@@ -63,8 +60,7 @@ var (
 	audioSpeakerPeriodFrames = 4                            // the device period in whole 20 ms frames, rounded up
 	audioSpeakerPeriods      = 4                            // device buffer: 4 periods = 320 ms
 	audioPlayoutLowFrames    = audioSpeakerPeriodFrames     // conceal once less than one device period is queued
-	audioLeadMinFrames       = audioPlayoutLowFrames + 2    // one device period plus 40 ms
-	audioBufferLeadFrames    = 6                            // initial jitter buffer lead: 120 ms; adapts up to audioLeadMaxFrames
+	audioBufferLeadFrames    = 6                            // jitter buffer lead: 120 ms (see SetJitterLead)
 	audioQueueTargetFrames   = audioBufferLeadFrames        // queue trim target
 	audioEchoRefMaxFrames    = 3 * audioSpeakerPeriodFrames // echo reference queue limit…
 	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames // …and its trim depth
@@ -82,7 +78,6 @@ func SetSpeakerBuffer(periodMs, periods int) {
 		audioSpeakerPeriods = max(2, periods)
 	}
 	audioPlayoutLowFrames = audioSpeakerPeriodFrames
-	audioLeadMinFrames = audioPlayoutLowFrames + 2
 	audioEchoRefMaxFrames = 3 * audioSpeakerPeriodFrames
 	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames
 	SetJitterLead(audioBufferLeadFrames * audioFrameMillis)
@@ -97,11 +92,6 @@ const (
 	defaultLeadMs          = 40
 )
 
-// audioLeadAdaptive lets late packets grow the jitter buffer lead and quiet
-// periods shrink it. Off for now: the lead stays at the profile (or -audio)
-// value. Clock drift correction of the PCM queue is not affected.
-var audioLeadAdaptive = false
-
 // ResetAudioSettings restores the default buffers for the next session,
 // undoing -audio changes made during the previous call.
 func ResetAudioSettings() {
@@ -109,16 +99,14 @@ func ResetAudioSettings() {
 	SetJitterLead(defaultLeadMs)
 }
 
-// SetJitterLead sets the initial jitter buffer lead (ms) for future sessions.
-// It must exceed one device period; a lower value also lowers the adaptive
-// minimum.
+// SetJitterLead sets the jitter buffer lead (ms) for future sessions. It
+// must exceed one device period and is at most audioLeadMaxFrames.
 func SetJitterLead(ms int) {
 	if ms <= 0 {
 		return
 	}
 	frames := max(audioPlayoutLowFrames+1, (ms+audioFrameMillis/2)/audioFrameMillis)
 	audioBufferLeadFrames = min(frames, audioLeadMaxFrames)
-	audioLeadMinFrames = min(audioPlayoutLowFrames+2, audioBufferLeadFrames)
 	audioQueueTargetFrames = audioBufferLeadFrames
 }
 
@@ -315,13 +303,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioNetIn      chan []byte
 		audioSpeakerOut *device.PlaybackQueue
 
-		speakerMu        sync.Mutex                     // serialize device replacement with session cleanup
-		curSpeaker       atomic.Pointer[device.Speaker] // replaced by -audio during the call
-		usingSystemVoice bool                           // -sysaudio: one system unit plays and records
-		speakerGen       atomic.Int64
-		startSpeak       func(periodFrames, periods int) (*device.Speaker, error)
-		playoutCmds      = make(chan func(*audioPlayout), 4)
-		thisLive         *liveAudio
+		curSpeaker       atomic.Pointer[device.Speaker]
+		usingSystemVoice bool // -sysaudio: one system unit plays and records
 
 		videoCamIn         <-chan device.CameraFrame
 		videoNetIn         chan []byte
@@ -339,12 +322,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stop()
-			speakerMu.Lock()
 			if sp := curSpeaker.Swap(nil); sp != nil {
 				sp.Close()
 			}
-			speakerMu.Unlock()
-			unregisterLiveAudio(thisLive)
 			// Cancellation is asynchronous. Do not let the next call open devices
 			// while the previous capture goroutines are still closing them.
 			if audioMicIn != nil {
@@ -421,34 +401,19 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if aec != nil {
 			onRender = aec.playback
 		}
-		log.Printf("[audio] speaker buffer %d ms (%d x %d ms), jitter buffer lead from %d ms (min %d, max %d)",
-			audioSpeakerPeriodMs*audioSpeakerPeriods, audioSpeakerPeriods, audioSpeakerPeriodMs,
-			audioBufferLeadFrames*audioFrameMillis, audioLeadMinFrames*audioFrameMillis, audioLeadMaxFrames*audioFrameMillis)
-		startSpeak = func(periodMs, periods int) (*device.Speaker, error) {
-			// Only the current speaker may stop the session when its device
-			// stops; closing a replaced one (-audio) must not end the call.
-			gen := speakerGen.Add(1)
-			onStop := func() {
-				if speakerGen.Load() == gen {
-					stop()
-				}
-			}
-			sp, err := device.StartSpeaker(audioSampleRate, audioChannels, audioSampleRate*periodMs/1000, periods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, onStop)
-			if err != nil {
-				return nil, err
-			}
-			if aec != nil {
-				// Echo of rendered audio reaches the mic about one device buffer later.
-				delay := min(sp.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
-				aec.setSpeakerPeriod(max(1, (periodMs+audioFrameMillis-1)/audioFrameMillis))
-				aec.setReferenceDelay(delay)
-				log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, sp.LatencySamples()*1000/audioSampleRate)
-			}
-			return sp, nil
-		}
-		sp, err := startSpeak(audioSpeakerPeriodMs, audioSpeakerPeriods)
+		log.Printf("[audio] speaker buffer %d ms (%d x %d ms), jitter buffer lead %d ms",
+			audioSpeakerPeriodMs*audioSpeakerPeriods, audioSpeakerPeriods, audioSpeakerPeriodMs, audioBufferLeadFrames*audioFrameMillis)
+		sp, err := device.StartSpeaker(audioSampleRate, audioChannels, audioSampleRate*audioSpeakerPeriodMs/1000, audioSpeakerPeriods,
+			mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
+		}
+		if aec != nil {
+			// Echo of rendered audio reaches the mic about one device buffer later.
+			delay := min(sp.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
+			aec.setSpeakerPeriod(audioSpeakerPeriodFrames)
+			aec.setReferenceDelay(delay)
+			log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, sp.LatencySamples()*1000/audioSampleRate)
 		}
 		curSpeaker.Store(sp)
 
@@ -503,34 +468,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	startReceiver(&wg, pc, stopCh, audioNetIn, videoNetIn, getPeer, setPeer)
 
 	if useVoice && audioNetIn != nil && audioSpeakerOut != nil {
-		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
-		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh, aec: aec,
-			speakerInfo: func() string { return curSpeaker.Load().Info() }}
-		thisLive.restartSpeaker = func(periodMs, periods int) error {
-			if usingSystemVoice {
-				return errors.New("the speaker buffer is set by the system with -sysaudio")
-			}
-			speakerMu.Lock()
-			defer speakerMu.Unlock()
-			select {
-			case <-stopCh:
-				return net.ErrClosed
-			default:
-			}
-			// Never run two device callbacks against the same PCM/reference queue.
-			speakerGen.Add(1) // retiring this device must not stop the call
-			if old := curSpeaker.Swap(nil); old != nil {
-				old.Close()
-			}
-			sp, err := startSpeak(periodMs, periods)
-			if err != nil {
-				stop()
-				return err
-			}
-			curSpeaker.Store(sp)
-			return nil
-		}
-		registerLiveAudio(thisLive)
+		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut)
 	}
 	if useVideo && videoNetIn != nil {
 		var playbackIndex func() (uint16, bool)
@@ -952,7 +890,7 @@ func audioPacketsExpected(delta int32, afterSID bool) int32 {
 // startAudioReceiver launches a goroutine that decodes speech payloads from
 // netAudioIn and keeps speakerOut continuously fed (see audioPlayout).
 func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
-	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue, cmds <-chan func(*audioPlayout)) {
+	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -971,8 +909,6 @@ func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 				if mediactrl.PlaybackEnabled() {
 					playout.onTick()
 				}
-			case cmd := <-cmds:
-				cmd(playout)
 			case pkt, ok := <-netAudioIn:
 				if !ok {
 					return
