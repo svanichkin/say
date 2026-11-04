@@ -18,6 +18,16 @@ type Speaker struct {
 	playbackTick         atomic.Uint32
 	playbackSet          atomic.Bool
 	playbackLatencyTicks uint32
+	latencySamples       int
+}
+
+// LatencySamples is the configured device buffer (period × periods) in
+// frames: roughly how long rendered audio takes to become audible.
+func (s *Speaker) LatencySamples() int {
+	if s == nil {
+		return 0
+	}
+	return s.latencySamples
 }
 
 // PlaybackFrame is decoded PCM aligned to the sender's media timeline.
@@ -60,7 +70,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 	var lastOut int16 // last sample written to the device
 	var starved bool  // the previous callback ran out of audio
 	var lastCallbackAt time.Time
-	speaker := &Speaker{ctx: ctx}
+	speaker := &Speaker{ctx: ctx, latencySamples: int(deviceConfig.PeriodSizeInFrames * deviceConfig.Periods)}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
 		// configured device buffer. Account for that when scheduling video.
