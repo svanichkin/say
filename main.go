@@ -518,8 +518,22 @@ func printSupportInfo() {
 
 // chatCommand handles local chat commands. "-audio" shows the audio buffers
 // of the call; "-audio LEAD PERIOD PERIODS" (milliseconds, count) changes them.
+// "-aec" shows the echo canceller, "-aec on|off" switches it for this call.
 func chatCommand(line string) (string, bool) {
 	fields := strings.Fields(line)
+	if len(fields) > 0 && fields[0] == "-aec" {
+		switch {
+		case len(fields) == 1:
+			return udptransport.EchoCancellationState(), true
+		case len(fields) == 2 && (fields[1] == "on" || fields[1] == "off"):
+			reply, err := udptransport.SetEchoCancellation(fields[1] == "on")
+			if err != nil {
+				return "aec: " + err.Error(), true
+			}
+			return reply, true
+		}
+		return "usage: -aec  or  -aec on|off", true
+	}
 	if len(fields) == 0 || fields[0] != "-audio" {
 		return "", false
 	}

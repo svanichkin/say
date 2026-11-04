@@ -69,7 +69,9 @@ Lines starting with `-` are local commands and are not sent. `-audio` shows
 the audio buffers of the call (jitter buffer lead, speaker period and number
 of periods); `-audio 120 60 2` sets them live for your own playback (the
 speaker restarts briefly if its buffer changes). The next call starts from the
-automatic per-connection values again.
+automatic per-connection values again. `-aec` shows the echo canceller and
+`-aec off` / `-aec on` switches it for the call in progress (to hear whether it
+damages your voice); the next call has it on again.
 
 To send a file, type, paste or drag its path (or drop the file into the terminal,
 which pastes a `file://` URI) and press Enter. Transfer progress replaces the

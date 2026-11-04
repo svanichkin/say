@@ -16,6 +16,7 @@ type liveAudio struct {
 	playoutCmds    chan<- func(*audioPlayout)
 	stopCh         <-chan struct{}
 	restartSpeaker func(periodFrames, periods int) error
+	aec            *audioEcho
 }
 
 var (
@@ -95,4 +96,36 @@ func ApplyAudioSettings(leadMs, periodMs, periods int) (string, error) {
 		l.run(func(p *audioPlayout) { p.configure(lead, leadMin, low) })
 	}
 	return AudioSettings(), nil
+}
+
+// SetEchoCancellation turns echo cancellation of the call in progress off or
+// on (chat command "-aec off|on"), to tell whether it damages the microphone
+// signal. The next call has it on again.
+func SetEchoCancellation(on bool) (string, error) {
+	liveMu.Lock()
+	l := live
+	liveMu.Unlock()
+	if l == nil || l.aec == nil {
+		return "", fmt.Errorf("no call with echo cancellation in progress")
+	}
+	l.aec.setBypass(!on)
+	return EchoCancellationState(), nil
+}
+
+// EchoCancellationState describes the echo canceller of the call in progress.
+func EchoCancellationState() string {
+	liveMu.Lock()
+	l := live
+	liveMu.Unlock()
+	if l == nil || l.aec == nil {
+		return "aec: no call in progress"
+	}
+	state := "off"
+	if l.aec.enabled() {
+		state = "on"
+	}
+	l.aec.refMu.Lock()
+	delay := l.aec.delaySamples * 1000 / audioSampleRate
+	l.aec.refMu.Unlock()
+	return fmt.Sprintf("aec: %s, reference delay %d ms. Change: -aec on|off", state, delay)
 }

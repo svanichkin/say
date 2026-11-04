@@ -467,7 +467,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 
 	if useVoice && audioNetIn != nil && audioSpeakerOut != nil {
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
-		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh}
+		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh, aec: aec}
 		thisLive.restartSpeaker = func(periodFrames, periods int) error {
 			sp, err := startSpeak(periodFrames, periods)
 			if err != nil {
