@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	malgo "github.com/gen2brain/malgo"
 )
@@ -17,6 +18,16 @@ type Speaker struct {
 	playbackSet          atomic.Bool
 	playbackLatencyTicks uint32
 	latencySamples       int
+
+	// The callback hands a whole device period at once, so playbackTick
+	// advances in period-sized steps (80 ms). baseTick/baseAt record the
+	// position and time at the start of the latest callback; PlaybackIndex
+	// advances smoothly from there in real time, by at most one period.
+	baseTick    atomic.Uint32
+	baseAt      atomic.Int64 // UnixNano
+	periodTicks uint32
+	tickDur     time.Duration
+	lastPos     atomic.Uint32 // last returned position + 1 (0: none yet)
 }
 
 // LatencySamples is the configured device buffer (period × periods) in
@@ -72,6 +83,8 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 		// The callback cursor is ahead of audible playback by approximately the
 		// configured device buffer. Account for that when scheduling video.
 		speaker.playbackLatencyTicks = uint32(deviceConfig.PeriodSizeInFrames * deviceConfig.Periods / uint32(samplesPerMediaTick))
+		speaker.periodTicks = deviceConfig.PeriodSizeInFrames / uint32(samplesPerMediaTick)
+		speaker.tickDur = time.Duration(samplesPerMediaTick) * time.Second / time.Duration(sampleRate)
 	}
 
 	callbacks := malgo.DeviceCallbacks{
@@ -87,6 +100,10 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 
 			if len(pOutput) == 0 || speakerIn == nil {
 				return
+			}
+			if speaker.playbackSet.Load() {
+				speaker.baseTick.Store(speaker.playbackTick.Load())
+				speaker.baseAt.Store(time.Now().UnixNano())
 			}
 			samplesNeeded := int(frameCount) * channels
 			if cap(outSamples) < samplesNeeded {
@@ -170,7 +187,42 @@ func (s *Speaker) PlaybackIndex() (uint16, bool) {
 	if s == nil || !s.playbackSet.Load() {
 		return 0, false
 	}
-	return uint16(s.playbackTick.Load()-s.playbackLatencyTicks) & 0x7fff, true
+	at := s.baseAt.Load()
+	if at == 0 {
+		return uint16(s.playbackTick.Load()-s.playbackLatencyTicks) & 0x7fff, true
+	}
+	elapsed := time.Since(time.Unix(0, at))
+	pos := playbackPosition(s.baseTick.Load(), elapsed, s.tickDur, s.periodTicks, s.playbackLatencyTicks)
+	if last := s.lastPos.Load(); last != 0 {
+		pos = monotonicPosition(uint16(last-1), pos, s.periodTicks)
+	}
+	s.lastPos.Store(uint32(pos) + 1)
+	return pos, true
+}
+
+// monotonicPosition keeps the clock from stepping back by less than two
+// periods (a callback that handed less than a period after an underrun);
+// larger jumps back are real resynchronisations and pass through.
+func monotonicPosition(prev, pos uint16, periodTicks uint32) uint16 {
+	d := int32((pos - prev) & 0x7fff)
+	if d >= 0x4000 {
+		d -= 0x8000
+	}
+	if d < 0 && d > -2*int32(periodTicks) {
+		return prev
+	}
+	return pos
+}
+
+// playbackPosition is the audible media index: the position at the start of
+// the latest callback, advanced by the real time since then (capped at one
+// device period, so a stalled device does not run ahead), minus the latency.
+func playbackPosition(base uint32, elapsed, tick time.Duration, periodTicks, latencyTicks uint32) uint16 {
+	var advance uint32
+	if tick > 0 && elapsed > 0 {
+		advance = min(uint32(elapsed/tick), periodTicks)
+	}
+	return uint16(base+advance-latencyTicks) & 0x7fff
 }
 
 // Close stops playback and releases device resources.
