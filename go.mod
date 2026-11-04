@@ -7,6 +7,7 @@ require (
 	github.com/danieldonoghue/govoip-dsp v0.1.0-rc.2
 	github.com/gen2brain/malgo v0.11.27
 	github.com/klauspost/compress v1.20.3
+	github.com/rivo/uniseg v0.4.7
 	github.com/svanichkin/gocam v0.1.0
 	github.com/svanichkin/ygg v0.5.6
 	github.com/thesyncim/gopus v0.2.2

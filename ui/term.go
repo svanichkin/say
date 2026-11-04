@@ -252,7 +252,7 @@ func currentFPSLabel(frameType string) string {
 	if counter.display == "" {
 		counter.display = formatFancyNumber(0)
 	}
-	return fmt.Sprintf("%s FPS", counter.display)
+	return fmt.Sprintf("%sfps", counter.display)
 }
 
 func ensureFpsCounter(frameType string) *fpsCounter {
@@ -689,6 +689,9 @@ func SetPeerTermSize(cols, rows int) {
 	if cols <= 0 || rows <= 0 {
 		return
 	}
+	// The peer chooses the size we encode for; never exceed the codec limits.
+	cols = min(cols, codec.MaxFrameCols)
+	rows = min(rows, codec.MaxFrameRows)
 
 	peerSlotMu.Lock()
 	peerSlot.cols = cols
@@ -898,6 +901,7 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 		}()
 
 		var lastCols, lastRows int
+		var lastBlink bool
 		tick := time.NewTicker(50 * time.Millisecond) // periodic poll to react quickly to terminal resizes
 		defer tick.Stop()
 
@@ -927,8 +931,10 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 				if err != nil {
 					continue
 				}
-				if cols != lastCols || rows != lastRows {
-					lastCols, lastRows = cols, rows
+				// Redraw when the cursor blinks, even if no video frame arrives.
+				blink := ChatConnected() && inputCursorVisible(time.Now())
+				if cols != lastCols || rows != lastRows || blink != lastBlink {
+					lastCols, lastRows, lastBlink = cols, rows, blink
 					renderTermFrames()
 				}
 			}
@@ -1034,10 +1040,10 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 
 	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
 	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
-	localCaption := currentFPSLabel(localFrameType) + " │ " + buildRateLabel("TX", '↑', txAudio, txVideo)
-	remoteCaption := currentFPSLabel(remoteFrameType) + " │ " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
+	localCaption := currentFPSLabel(localFrameType) + " " + buildRateLabel("TX", '↑', txAudio, txVideo)
+	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
 	if latencyLabel != "" {
-		remoteCaption += " │ " + latencyLabel
+		remoteCaption += " " + latencyLabel
 	}
 	if !mediactrl.CaptureEnabled() {
 		localCaption = "MUTED"
@@ -1052,37 +1058,50 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 	messages := append([]ChatMessage(nil), chatState.messages...)
 	input, transfer := chatState.input, chatState.transfer
 	chatState.RUnlock()
-	start := max(0, len(messages)-chatRows)
-	messages = messages[start:]
+	// Our messages sit on the left, the peer's on the right; long messages wrap.
+	type chatLine struct {
+		text  string
+		local bool
+	}
+	var lines []chatLine
+	for i := len(messages) - 1; i >= 0 && len(lines) < chatRows; i-- {
+		wrapped := wrapWidth(sanitizeLine(messages[i].Text), canvasCols)
+		block := make([]chatLine, 0, len(wrapped))
+		for _, l := range wrapped {
+			block = append(block, chatLine{text: l, local: messages[i].Local})
+		}
+		lines = append(block, lines...)
+	}
+	if len(lines) > chatRows {
+		lines = lines[len(lines)-chatRows:]
+	}
 	for i := 0; i < chatRows; i++ {
 		row := chatTop + i
 		out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K", row))
-		if i >= len(messages) {
+		if i >= len(lines) {
 			continue
 		}
-		msg := messages[i]
-		text := truncateRunes(sanitizeLine(msg.Text), canvasCols)
+		l := lines[i]
 		col := canvasLeft
-		color := "\x1b[38;2;160;220;255m"
-		if msg.Local {
-			col += max(0, canvasCols-runeCount(text))
-			color = "\x1b[38;2;190;255;190m"
+		color := "\x1b[38;2;190;255;190m"
+		if !l.local {
+			col += max(0, canvasCols-displayWidth(l.text))
+			color = "\x1b[38;2;160;220;255m"
 		}
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s%s\x1b[0m", row, col, color, text))
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s%s\x1b[0m", row, col, color, l.text))
 	}
 	appendHorizontalSeparator(&out, canvasLeft, canvasCols, inputRow-1)
 
-	line := input
+	var line string
 	if transfer != "" {
-		line = transfer
-	} else if line == "" {
-		line = "> Введите сообщение"
+		line = truncateWidth(sanitizeLine(transfer), canvasCols)
 	} else {
-		line = "> " + line + "▏"
-	}
-	line = sanitizeLine(line)
-	if n := runeCount(line); n > canvasCols {
-		line = string([]rune(line)[n-canvasCols:])
+		cursor := " "
+		if inputCursorVisible(time.Now()) {
+			cursor = "▏"
+		}
+		// Keep the end of a long input visible, with room for the cursor.
+		line = tailWidth(sanitizeLine(input), canvasCols-1) + cursor
 	}
 	out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K\x1b[%d;%dH\x1b[38;2;245;245;245m%s\x1b[0m", inputRow, inputRow, canvasLeft, line))
 	return out.String()
@@ -1103,8 +1122,8 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 	if out == nil || row <= 0 || left <= 0 || width <= 0 {
 		return
 	}
-	caption = truncateRunes(sanitizeLine(caption), width)
-	pad := width - runeCount(caption)
+	caption = truncateWidth(sanitizeLine(caption), width)
+	pad := width - displayWidth(caption)
 	leftPad := pad / 2
 	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m", row, left))
 	out.WriteString(strings.Repeat(" ", leftPad))
@@ -1135,9 +1154,9 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, top, left int, 
 	if label == "" || strings.EqualFold(label, "Client starting…") || strings.EqualFold(label, "Server starting…") {
 		label = fallback
 	}
-	label = truncateRunes(sanitizeLine(label), slot.cols)
+	label = truncateWidth(sanitizeLine(label), slot.cols)
 	row := top + slot.rows/2
-	col := left + max(0, (slot.cols-runeCount(label))/2)
+	col := left + max(0, (slot.cols-displayWidth(label))/2)
 	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, label))
 }
 
@@ -1647,7 +1666,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 
 	lines := strings.Split(msg, "\n")
 	for i := range lines {
-		lines[i] = truncateRunes(strings.TrimSpace(lines[i]), canvasCols)
+		lines[i] = truncateWidth(strings.TrimSpace(lines[i]), canvasCols)
 	}
 
 	startRow := termBorder + 1 + max(0, (canvasRows-len(lines))/2)
@@ -1670,10 +1689,10 @@ func buildStatusScreen(cols, rows int, message string) string {
 		if row > rows-termBorder {
 			break
 		}
-		width := runeCount(line)
+		width := displayWidth(line)
 		if width > canvasCols {
-			line = truncateRunes(line, canvasCols)
-			width = runeCount(line)
+			line = truncateWidth(line, canvasCols)
+			width = displayWidth(line)
 		}
 		startCol := termBorder + 1 + max(0, (canvasCols-width)/2)
 		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", row, startCol, line))
@@ -1888,37 +1907,16 @@ func max(a, b int) int {
 	return b
 }
 
-func truncateRunes(s string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= limit {
-		return s
-	}
-	if limit == 1 {
-		return string(runes[:1])
-	}
-	return string(runes[:limit-1]) + "…"
-}
-
-func runeCount(s string) int {
-	return len([]rune(s))
-}
-
 func formatFancyNumber(n int) string {
 	return strconv.Itoa(n)
 }
 
 func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64) string {
-	arrow := string(direction)
-	aVal := formatRate(audioKBps)
-	vVal := formatRate(videoKBps)
-	label := fmt.Sprintf("A%s%s V%s%s", arrow, aVal, arrow, vVal)
+	label := fmt.Sprintf("A%s V%s", formatRate(audioKBps), formatRate(videoKBps))
 	if prefix != "" {
-		return fmt.Sprintf("%s %s", prefix, label)
+		return fmt.Sprintf("%s%c %s", prefix, direction, label)
 	}
-	return label
+	return fmt.Sprintf("%c %s", direction, label)
 }
 
 func buildLatencyLabel(latency time.Duration) string {
@@ -1929,19 +1927,19 @@ func buildLatencyLabel(latency time.Duration) string {
 	if ms <= 0 {
 		ms = 1
 	}
-	return fmt.Sprintf("PING %sms", formatFancyNumber(ms))
+	return fmt.Sprintf("%sms", formatFancyNumber(ms))
 }
 
 func formatRate(kBps float64) string {
 	if kBps <= 0 {
-		return "0B/s"
+		return "0Bps"
 	}
 	roundedKBps := int(math.Round(kBps))
 	if roundedKBps > 0 {
-		return formatFancyNumber(roundedKBps) + "kB/s"
+		return formatFancyNumber(roundedKBps) + "kBps"
 	}
 	bytesPerSecond := int(math.Round(kBps * 1024))
-	return formatFancyNumber(bytesPerSecond) + "B/s"
+	return formatFancyNumber(bytesPerSecond) + "Bps"
 }
 
 func composeStatusLabel(frameCols, frameRows int, overlay frameOverlay) string {
@@ -2051,21 +2049,18 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	}
 	leftCols := availableCols / 2
 	rightCols := availableCols - leftCols
-	paneCols := min(leftCols, rightCols)
-	paneRows := int(math.Round(float64(paneCols) * termCellWidthToHeight * 4 / 3))
-	// Keep at least three rows for chat history, plus its separator and the
-	// dedicated input row at the bottom of the terminal.
-	maxPaneRows := height - 7
-	if paneRows > maxPaneRows {
-		paneRows = maxPaneRows
-		// Preserve the portrait 3:4 physical aspect ratio when the terminal is
-		// too short by narrowing both video panes and centering them.
-		paneCols = int(math.Round(float64(paneRows) * 3 / (4 * termCellWidthToHeight)))
-		if paneCols > min(leftCols, rightCols) {
-			paneCols = min(leftCols, rightCols)
-		}
+	// Panes are physically square (1:1): with cells twice as tall as wide,
+	// a pane has twice as many columns as rows. Keep at least three rows for
+	// chat history, plus the caption, separators and the input row.
+	paneCols := min(min(leftCols, rightCols), codec.MaxFrameCols)
+	paneRows := min(height-7, codec.MaxFrameRows)
+	if fromCols := int(math.Round(float64(paneCols) * termCellWidthToHeight)); fromCols < paneRows {
+		paneRows = fromCols
+	} else {
+		// The terminal is too short: narrow the panes and center them.
+		paneCols = min(paneCols, int(math.Round(float64(paneRows)/termCellWidthToHeight)))
 	}
-	if paneRows < 1 {
+	if paneRows < 1 || paneCols < 1 {
 		return
 	}
 	vs.selfSlot = slotSize{cols: paneCols, rows: paneRows, orient: vs.orient}

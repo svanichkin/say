@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -20,6 +21,7 @@ var chatState struct {
 	sync.RWMutex
 	messages []ChatMessage
 	input    string
+	typedAt  time.Time // last edit; the cursor stays solid right after typing
 	transfer string
 	onText   func(string)
 	onFile   func(string)
@@ -59,8 +61,20 @@ func AddChatMessage(text string, local bool) {
 	RequestRedraw()
 }
 
+// cursorBlinkPeriod is one on or off phase of the input cursor.
+const cursorBlinkPeriod = 530 * time.Millisecond
+
+// inputCursorVisible reports the blink phase of the input cursor at now.
+func inputCursorVisible(now time.Time) bool {
+	chatState.RLock()
+	since := now.Sub(chatState.typedAt)
+	chatState.RUnlock()
+	return (since/cursorBlinkPeriod)%2 == 0
+}
+
 func chatKey(r rune) {
 	chatState.Lock()
+	chatState.typedAt = time.Now()
 	if chatState.onText == nil {
 		chatState.Unlock()
 		return
@@ -150,6 +164,7 @@ func chatPaste(s string) {
 		}
 	}
 	chatState.Lock()
+	chatState.typedAt = time.Now()
 	chatState.input += strings.ReplaceAll(s, "\n", " ")
 	chatState.Unlock()
 	RequestRedraw()
@@ -167,6 +182,14 @@ func SetTransferProgress(name string, sent, total int64, done bool) {
 		}
 		chatState.transfer = fmt.Sprintf("Sending %s  %d%%", filepath.Base(name), pct)
 	}
+	chatState.Unlock()
+	RequestRedraw()
+}
+
+// SetTransferStatus shows a status text in the input line while a transfer is active.
+func SetTransferStatus(text string) {
+	chatState.Lock()
+	chatState.transfer = text
 	chatState.Unlock()
 	RequestRedraw()
 }
