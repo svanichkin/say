@@ -88,8 +88,8 @@ func SetSpeakerBuffer(periodMs, periods int) {
 // Audio buffer sets per connection, tuned by listening tests: a peer reached
 // through the internet, and one directly in the local network.
 const (
-	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 20, 2, 20
-	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 20
+	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 20, 2, 40
+	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 40
 )
 
 // audioLeadAdaptive lets late packets grow the jitter buffer lead and quiet

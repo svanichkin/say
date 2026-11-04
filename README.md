@@ -98,7 +98,7 @@ and wide characters (CJK, emoji) are measured correctly.
 
 Lines starting with `-` are local commands and are not sent. `-audio` shows
 the audio buffers of the call (target lead, actual queued PCM, speaker period
-and number of periods); `-audio 120 60 2` sets them live for your own playback (the
+and number of periods); `-audio 40 20 2` sets them live for your own playback (the
 speaker restarts briefly if its buffer changes). The next call starts from the
 automatic per-connection values again. `-aec` shows the echo canceller and
 `-aec off` / `-aec on` switches it for the call in progress (to hear whether it

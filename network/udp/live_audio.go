@@ -69,7 +69,7 @@ func AudioSettings() string {
 			text += fmt.Sprintf(" (lead now %d ms, queued %d ms)", cur*audioFrameMillis, queued)
 		}
 	}
-	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 120 60 2"
+	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 40 20 2"
 }
 
 // ApplyAudioSettings sets the lead (ms), speaker period (ms) and number of
