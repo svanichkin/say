@@ -2,14 +2,20 @@ package device
 
 import (
 	"math"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // TestVoiceIOProbe opens the system voice unit at 8 kHz on a real device
-// and checks that both directions run. Skipped where unsupported.
+// and checks that both directions run. It opens the microphone and plays a
+// tone, so it runs only with SAY_DEVICE_TESTS=1 (not in CI, whose machines
+// have no sound hardware).
 func TestVoiceIOProbe(t *testing.T) {
+	if os.Getenv("SAY_DEVICE_TESTS") == "" {
+		t.Skip("set SAY_DEVICE_TESTS=1 to test the system voice unit on this machine's devices")
+	}
 	if !VoiceIOSupported {
 		t.Skip("no system voice unit on this platform")
 	}
