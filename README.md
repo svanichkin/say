@@ -300,7 +300,7 @@ of the current media protocol. Relevant CLI switches:
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
-- `-sysaudio` – run microphone and speaker through the system's voice processing (macOS VoiceProcessingIO, as used by FaceTime): the system cancels echo, suppresses noise and controls gain instead of Say's own echo canceller. The speaker buffer is then chosen by the system; the output latency it reports is used to sync video (and logged). Falls back to Say's own audio where unavailable (other platforms for now).
+- `-sysaudio` – run microphone and speaker through the system's voice processing (macOS VoiceProcessingIO, as used by FaceTime): the system cancels echo, suppresses noise and controls gain instead of Say's own echo canceller. On by default on macOS; `-sysaudio=false` uses Say's own audio (miniaudio and its echo canceller) instead. The speaker buffer is then chosen by the system; the output latency it reports is used to sync video (and logged). Falls back to Say's own audio where unavailable (other platforms for now).
 - `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
