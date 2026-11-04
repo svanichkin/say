@@ -124,9 +124,10 @@ func SetMicrophone(enabled bool) {
 	micEnabled = enabled
 }
 
-// systemVoice (-sysaudio) runs microphone and speaker through the system's
-// voice processing unit (macOS VoiceProcessingIO) instead of Say's own
-// devices and echo canceller. Falls back to them where unavailable.
+// systemVoice (-sysaudio) runs the call's audio through the system's voice
+// processing (macOS VoiceProcessingIO; the Windows Voice Capture DSP for
+// the microphone) instead of Say's own echo canceller. Falls back to Say's
+// own audio where unavailable.
 var systemVoice bool
 
 // SetSystemVoice selects the system voice unit for future sessions.
@@ -376,11 +377,12 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if systemVoice {
 			// The system unit cancels echo itself: no AEC of ours, and the
 			// microphone comes from the same unit as the speaker.
-			sp, micIn, err := device.StartSystemVoice(audioSampleRate, mediaTickSamples, audioSpeakerOut, stopCh, micEnabled)
+			sp, micIn, err := device.StartSystemVoice(audioSampleRate, mediaTickSamples, audioSampleRate*audioSpeakerPeriodMs/1000, audioSpeakerPeriods,
+				audioSpeakerOut, stopCh, micEnabled, stop)
 			if err != nil {
 				log.Printf("[audio] system voice unavailable, using Say's own audio: %v", err)
 			} else {
-				log.Printf("[audio] system voice processing (-sysaudio): microphone and speaker through the system unit")
+				log.Printf("[audio] system voice processing (-sysaudio): the system cancels echo")
 				usingSystemVoice = true
 				curSpeaker.Store(sp)
 				audioMicIn = micIn

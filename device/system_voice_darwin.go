@@ -14,7 +14,10 @@ const systemVoiceLatencyBlocks = 2
 // delivers the system-processed microphone (echo cancelled, noise
 // suppressed) like StartMicrophoneStream. Closing the returned Speaker
 // stops both and closes the microphone channel.
-func StartSystemVoice(sampleRate, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, mic bool) (*Speaker, <-chan AudioCaptureFrame, error) {
+//
+// periodSamples, periods and onStop are for platforms that keep Say's own
+// speaker; the macOS unit plays itself.
+func StartSystemVoice(sampleRate, samplesPerMediaTick, periodSamples, periods int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, mic bool, onStop func()) (*Speaker, <-chan AudioCaptureFrame, error) {
 	speaker := &Speaker{}
 	r := &queueRenderer{speaker: speaker, in: speakerIn, channels: 1, samplesPerMediaTick: samplesPerMediaTick}
 

@@ -270,7 +270,7 @@ type AppOptions struct {
 	AudioCodec  string
 	NoLAN       bool
 	NoMic       bool
-	SysAudio    bool // the system voice unit for microphone and speaker (default on macOS)
+	SysAudio    bool // the system voice processing (default on macOS and Windows)
 	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
 	HoldDebug   bool
 	ShowVersion bool
@@ -303,9 +303,10 @@ func ParseCLI() (*AppOptions, error) {
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
 		VideoHold:   10,
-		// The system voice unit (echo cancellation, noise suppression) is
-		// the default where Say has one: macOS. -sysaudio=false opts out.
-		SysAudio: runtime.GOOS == "darwin",
+		// The system voice processing (echo cancellation, noise suppression)
+		// is the default where Say has it: macOS and Windows.
+		// -sysaudio=false opts out.
+		SysAudio: runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
