@@ -1150,11 +1150,9 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, top, left int, 
 		writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows)
 		return
 	}
-	label := currentStatusMessage()
-	if label == "" || strings.EqualFold(label, "Client starting…") || strings.EqualFold(label, "Server starting…") {
-		label = fallback
-	}
-	label = truncateWidth(sanitizeLine(label), slot.cols)
+	// The call is connected here; the connection status belongs to the
+	// status screen, not to an empty video pane.
+	label := truncateWidth(fallback, slot.cols)
 	row := top + slot.rows/2
 	col := left + max(0, (slot.cols-displayWidth(label))/2)
 	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[38;2;150;150;160m%s\x1b[0m", row, col, label))
