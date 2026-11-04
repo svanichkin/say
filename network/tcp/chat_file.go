@@ -129,6 +129,7 @@ type incomingFile struct {
 	received int64
 	tmp      string
 	file     *os.File
+	began    time.Time
 }
 
 // File transfer outcome reported by the receiver in a frameFileResult:
@@ -182,7 +183,7 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 		}
 	}
 	fail := func(id uint32, name, msg string) {
-		ui.AddChatMessage("File receive failed: "+name+": "+msg, false)
+		ui.FinishReceive("File receive failed: " + name + ": " + msg)
 		reply(id, fileResultFailed, msg)
 	}
 	switch t {
@@ -227,7 +228,8 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 			return
 		}
 		abortIncoming(incoming)
-		*incoming = &incomingFile{id: id, name: name, total: total, tmp: tmp, file: f}
+		*incoming = &incomingFile{id: id, name: name, total: total, tmp: tmp, file: f, began: time.Now()}
+		ui.SetReceiveProgress(name, 0, total)
 	case frameFileChunk:
 		f := *incoming
 		if f == nil || f.file == nil || len(payload) < 12 || binary.BigEndian.Uint32(payload[:4]) != f.id {
@@ -240,11 +242,12 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 		}
 		n, err := f.file.Write(chunk)
 		f.received += int64(n)
+		ui.SetReceiveProgress(f.name, f.received, f.total)
 		if err == nil && n != len(chunk) {
 			err = io.ErrShortWrite
 		}
 		if err != nil {
-			abortIncoming(incoming)
+			closeIncoming(incoming)
 			fail(f.id, f.name, err.Error())
 		}
 	case frameFileEnd:
@@ -269,12 +272,23 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 			fail(f.id, f.name, err.Error())
 			return
 		}
-		ui.AddChatMessage("Received "+filepath.Base(dest)+" (saved to Downloads)", false)
+		ui.FinishReceive("Received " + filepath.Base(dest) + " (" + ui.TransferSummary(f.received, time.Since(f.began)) + "), saved to Downloads")
 		reply(f.id, fileResultSaved, "")
 	}
 }
 
+// abortIncoming drops a file still being received (a new file replaced it,
+// or the call ended) and says so in its chat entry.
 func abortIncoming(incoming **incomingFile) {
+	if *incoming == nil {
+		return
+	}
+	ui.FinishReceive("File receive interrupted: " + (*incoming).name)
+	closeIncoming(incoming)
+}
+
+// closeIncoming deletes the partial file of an incoming transfer.
+func closeIncoming(incoming **incomingFile) {
 	if *incoming == nil {
 		return
 	}
@@ -292,8 +306,7 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 	name := filepath.Base(path)
 	var size int64
 	finish := func(sent int64, msg string) {
-		ui.SetTransferProgress(name, sent, size, true)
-		ui.AddChatMessage(msg, true)
+		ui.FinishTransfer(msg)
 	}
 
 	f, err := os.Open(path)
@@ -326,16 +339,11 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 		finish(0, "File send failed: "+name+": "+err.Error())
 		return
 	}
-	ui.SetTransferProgress(name, 0, size, false)
+	ui.SetTransferProgress(name, 0, size)
 	began := time.Now()
 	// sentSummary is the final chat entry: size, average speed and time.
 	sentSummary := func() string {
-		elapsed := time.Since(began)
-		text := "Sent " + name + " (" + ui.FormatBytes(size)
-		if elapsed > 0 && size > 0 {
-			text += ", " + ui.FormatByteRate(float64(size)/elapsed.Seconds()) + ", " + elapsed.Round(100*time.Millisecond).String()
-		}
-		return text + ")"
+		return "Sent " + name + " (" + ui.TransferSummary(size, time.Since(began)) + ")"
 	}
 
 	buf := make([]byte, fileChunkBytes)
@@ -361,7 +369,7 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 				return
 			}
 			sent += int64(n)
-			ui.SetTransferProgress(name, sent, size, false)
+			ui.SetTransferProgress(name, sent, size)
 			pacer.waitAfterChunk(n)
 		}
 		if readErr == io.EOF {

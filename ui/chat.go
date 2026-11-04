@@ -22,9 +22,20 @@ var chatState struct {
 	messages []ChatMessage
 	input    string
 	typedAt  time.Time // last edit; the cursor stays solid right after typing
-	transfer string
-	onText   func(string)
-	onFile   func(string)
+	// A file being sent and one being received each show their progress
+	// in a chat entry that is updated in place (see liveEntry).
+	sending   liveEntry
+	receiving liveEntry
+	onText    func(string)
+	onFile    func(string)
+}
+
+// liveEntry is a chat entry updated in place: a file transfer's progress,
+// replaced by its result when it ends.
+type liveEntry struct {
+	active bool
+	idx    int // 1-based index into chatState.messages; 0: not shown yet
+	rate   transferRate
 }
 
 // SetChatActions installs the active call's message and file send handlers.
@@ -33,7 +44,8 @@ func SetChatActions(onText, onFile func(string)) {
 	chatState.onText, chatState.onFile = onText, onFile
 	if onText == nil {
 		chatState.input = ""
-		chatState.transfer = ""
+		chatState.sending = liveEntry{}
+		chatState.receiving = liveEntry{}
 	}
 	chatState.Unlock()
 	RequestRedraw()
@@ -53,12 +65,48 @@ func AddChatMessage(text string, local bool) {
 		return
 	}
 	chatState.Lock()
-	chatState.messages = append(chatState.messages, ChatMessage{Text: text, Local: local})
-	if len(chatState.messages) > 500 {
-		chatState.messages = append([]ChatMessage(nil), chatState.messages[len(chatState.messages)-500:]...)
-	}
+	appendMessageLocked(ChatMessage{Text: text, Local: local})
 	chatState.Unlock()
 	RequestRedraw()
+}
+
+// chatHistoryLimit is how many chat entries are kept.
+const chatHistoryLimit = 500
+
+// appendMessageLocked adds an entry, dropping the oldest beyond the limit
+// (and keeping the live entries pointing at theirs).
+func appendMessageLocked(m ChatMessage) {
+	chatState.messages = append(chatState.messages, m)
+	if drop := len(chatState.messages) - chatHistoryLimit; drop > 0 {
+		chatState.messages = append([]ChatMessage(nil), chatState.messages[drop:]...)
+		for _, e := range []*liveEntry{&chatState.sending, &chatState.receiving} {
+			e.idx = max(0, e.idx-drop)
+		}
+	}
+}
+
+// setLiveLocked shows text in e's chat entry, adding the entry if needed.
+func setLiveLocked(e *liveEntry, local bool, text string) {
+	if e.idx > 0 && e.idx <= len(chatState.messages) {
+		chatState.messages[e.idx-1].Text = text
+		return
+	}
+	appendMessageLocked(ChatMessage{Text: text, Local: local})
+	e.idx = len(chatState.messages)
+}
+
+// progressText describes a transfer in progress: how much of how much, the
+// percentage and the current speed.
+func progressText(verb, name string, done, total int64, rate *transferRate) string {
+	pct := int64(0)
+	if total > 0 {
+		pct = done * 100 / total
+	}
+	text := fmt.Sprintf("%s %s  %s / %s  %d%%", verb, filepath.Base(name), FormatBytes(done), FormatBytes(total), pct)
+	if speed := rate.observe(done, time.Now()); speed > 0 {
+		text += "  " + FormatByteRate(speed)
+	}
+	return text
 }
 
 // cursorBlinkPeriod is one on or off phase of the input cursor.
@@ -79,10 +127,6 @@ func chatKey(r rune) {
 		chatState.Unlock()
 		return
 	}
-	if chatState.transfer != "" {
-		chatState.Unlock()
-		return
-	}
 	switch r {
 	case '\r', '\n':
 		line := strings.TrimSpace(chatState.input)
@@ -90,7 +134,12 @@ func chatKey(r rune) {
 		if line != "" {
 			if info, ok := droppedFile(line); ok {
 				if onFile := chatState.onFile; onFile != nil {
-					chatState.transfer = filepath.Base(info)
+					if !startSendingLocked(info) {
+						chatState.input = line // keep it to send later
+						chatState.Unlock()
+						RequestRedraw()
+						return
+					}
 					chatState.Unlock()
 					go onFile(info)
 					RequestRedraw()
@@ -126,17 +175,15 @@ func chatPaste(s string) {
 		return
 	}
 	chatState.RLock()
-	busy := chatState.transfer != "" || chatState.onText == nil
+	connected := chatState.onText != nil
 	chatState.RUnlock()
-	if busy {
+	if !connected {
 		return
 	}
 	if abs, ok := droppedFile(s); ok {
 		chatState.Lock()
 		onFile := chatState.onFile
-		if onFile != nil && chatState.transfer == "" {
-			chatState.transfer = filepath.Base(abs)
-		} else {
+		if onFile == nil || !startSendingLocked(abs) {
 			onFile = nil
 		}
 		chatState.Unlock()
@@ -153,37 +200,73 @@ func chatPaste(s string) {
 	RequestRedraw()
 }
 
-// sendRate measures the speed of the file being sent.
-var sendRate transferRate
-
-// SetTransferProgress replaces the input line while a file is being sent:
-// how much of how much, the percentage and the current speed.
-func SetTransferProgress(name string, sent, total int64, done bool) {
-	chatState.Lock()
-	if done {
-		chatState.transfer = ""
-		sendRate.reset()
-	} else {
-		pct := int64(0)
-		if total > 0 {
-			pct = sent * 100 / total
-		}
-		text := fmt.Sprintf("Sending %s  %s / %s  %d%%", filepath.Base(name), FormatBytes(sent), FormatBytes(total), pct)
-		if speed := sendRate.observe(sent, time.Now()); speed > 0 {
-			text += "  " + FormatByteRate(speed)
-		}
-		chatState.transfer = text
+// startSendingLocked marks a file as being sent. Only one file is sent at a
+// time: otherwise it notes that in the chat and returns false.
+func startSendingLocked(path string) bool {
+	if chatState.sending.active {
+		appendMessageLocked(ChatMessage{Text: "Wait until the current file is sent: " + filepath.Base(path), Local: true})
+		return false
 	}
+	chatState.sending = liveEntry{active: true}
+	return true
+}
+
+// SetTransferProgress shows the progress of the file being sent in its chat
+// entry on our side.
+func SetTransferProgress(name string, sent, total int64) {
+	chatState.Lock()
+	setLiveLocked(&chatState.sending, true, progressText("Sending", name, sent, total, &chatState.sending.rate))
 	chatState.Unlock()
 	RequestRedraw()
 }
 
-// SetTransferStatus shows a status text in the input line while a transfer is active.
+// SetTransferStatus shows a status of the file being sent (e.g. waiting for
+// the peer's confirmation) in its chat entry.
 func SetTransferStatus(text string) {
 	chatState.Lock()
-	chatState.transfer = text
+	setLiveLocked(&chatState.sending, true, text)
 	chatState.Unlock()
 	RequestRedraw()
+}
+
+// FinishTransfer replaces the sent file's entry with the result; another
+// file can be sent after it.
+func FinishTransfer(text string) {
+	chatState.Lock()
+	setLiveLocked(&chatState.sending, true, text)
+	chatState.sending = liveEntry{}
+	chatState.Unlock()
+	RequestRedraw()
+}
+
+// SetReceiveProgress shows an incoming file's progress in its chat entry on
+// the peer's side; FinishReceive replaces it with the result.
+func SetReceiveProgress(name string, received, total int64) {
+	chatState.Lock()
+	chatState.receiving.active = true
+	setLiveLocked(&chatState.receiving, false, progressText("Receiving", name, received, total, &chatState.receiving.rate))
+	chatState.Unlock()
+	RequestRedraw()
+}
+
+// FinishReceive replaces the incoming file's entry with the result, or adds
+// it as a new entry if there is none.
+func FinishReceive(text string) {
+	chatState.Lock()
+	setLiveLocked(&chatState.receiving, false, text)
+	chatState.receiving = liveEntry{}
+	chatState.Unlock()
+	RequestRedraw()
+}
+
+// TransferSummary describes a finished transfer for its chat entry:
+// size, average speed and time.
+func TransferSummary(size int64, elapsed time.Duration) string {
+	text := FormatBytes(size)
+	if elapsed > 0 && size > 0 {
+		text += ", " + FormatByteRate(float64(size)/elapsed.Seconds()) + ", " + elapsed.Round(100*time.Millisecond).String()
+	}
+	return text
 }
 
 // droppedFile resolves text that a terminal inserts when a file is dragged

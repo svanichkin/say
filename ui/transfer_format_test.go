@@ -52,14 +52,104 @@ func TestTransferRateFollowsTheLastSeconds(t *testing.T) {
 	}
 }
 
-func TestTransferProgressLine(t *testing.T) {
-	SetTransferProgress("/tmp/report.pdf", 0, 10<<20, false)
-	SetTransferProgress("/tmp/report.pdf", 3<<20, 10<<20, false)
+// lastMessages returns the chat entries' texts and sides.
+func lastMessages() []ChatMessage {
 	chatState.RLock()
-	line := chatState.transfer
-	chatState.RUnlock()
-	SetTransferProgress("/tmp/report.pdf", 10<<20, 10<<20, true)
-	if !strings.HasPrefix(line, "Sending report.pdf  3.0 MB / 10 MB  30%") {
-		t.Fatalf("progress line %q", line)
+	defer chatState.RUnlock()
+	return append([]ChatMessage(nil), chatState.messages...)
+}
+
+func TestSentFileShowsProgressInItsChatEntry(t *testing.T) {
+	SetChatActions(func(string) {}, func(string) {})
+	defer SetChatActions(nil, nil)
+	chatState.Lock()
+	chatState.messages = nil
+	if !startSendingLocked("/tmp/report.pdf") {
+		t.Fatal("first file refused")
 	}
+	chatState.Unlock()
+
+	SetTransferProgress("/tmp/report.pdf", 0, 10<<20)
+	SetTransferProgress("/tmp/report.pdf", 3<<20, 10<<20)
+	m := lastMessages()
+	if len(m) != 1 || !m[0].Local || !strings.HasPrefix(m[0].Text, "Sending report.pdf  3.0 MB / 10 MB  30%") {
+		t.Fatalf("entries %+v", m)
+	}
+	// Typing and text messages are not blocked while a file is sent.
+	chatKey('o')
+	chatKey('k')
+	chatState.RLock()
+	input := chatState.input
+	chatState.RUnlock()
+	if input != "ok" {
+		t.Fatalf("input %q while sending", input)
+	}
+	// A second file waits.
+	chatState.Lock()
+	second := startSendingLocked("/tmp/other.bin")
+	chatState.Unlock()
+	if second {
+		t.Fatal("a second file started while one is being sent")
+	}
+	SetTransferStatus("Waiting for report.pdf confirmation…")
+	FinishTransfer("Sent report.pdf (" + TransferSummary(10<<20, 4200*time.Millisecond) + ")")
+	m = lastMessages()
+	if m[0].Text != "Sent report.pdf (10 MB, 2.4 MBps, 4.2s)" || len(m) != 2 {
+		t.Fatalf("entries after the send: %+v", m)
+	}
+	chatState.Lock()
+	again := startSendingLocked("/tmp/other.bin")
+	chatState.Unlock()
+	if !again {
+		t.Fatal("next file refused after the first one finished")
+	}
+	FinishTransfer("done")
+}
+
+func TestReceivedFileShowsProgressInItsChatEntry(t *testing.T) {
+	SetChatActions(func(string) {}, func(string) {})
+	defer SetChatActions(nil, nil)
+	chatState.Lock()
+	chatState.messages = nil
+	chatState.Unlock()
+
+	SetReceiveProgress("photo.jpg", 0, 4<<20)
+	AddChatMessage("hello", false) // the chat goes on meanwhile
+	SetReceiveProgress("photo.jpg", 1<<20, 4<<20)
+	m := lastMessages()
+	if len(m) != 2 || m[0].Local || !strings.HasPrefix(m[0].Text, "Receiving photo.jpg  1.0 MB / 4.0 MB  25%") {
+		t.Fatalf("entries %+v", m)
+	}
+	if out := renderChatScreen(120, 40); !strings.Contains(out, "Receiving photo.jpg") {
+		t.Fatal("receive progress not on screen")
+	}
+	FinishReceive("Received photo.jpg (4.0 MB, 2.4 MBps, 1.7s), saved to Downloads")
+	m = lastMessages()
+	if len(m) != 2 || m[0].Text != "Received photo.jpg (4.0 MB, 2.4 MBps, 1.7s), saved to Downloads" {
+		t.Fatalf("entries after the receive: %+v", m)
+	}
+}
+
+func TestLiveEntryFollowsHistoryTrim(t *testing.T) {
+	SetChatActions(func(string) {}, func(string) {})
+	defer SetChatActions(nil, nil)
+	chatState.Lock()
+	chatState.messages = nil
+	chatState.Unlock()
+	SetReceiveProgress("big.iso", 0, 1<<30)
+	for i := 0; i < chatHistoryLimit+20; i++ {
+		AddChatMessage("x", true)
+	}
+	SetReceiveProgress("big.iso", 1<<29, 1<<30)
+	m := lastMessages()
+	found := 0
+	for _, e := range m {
+		if strings.HasPrefix(e.Text, "Receiving big.iso") {
+			found++
+		}
+	}
+	if found != 1 || len(m) > chatHistoryLimit {
+		t.Fatalf("%d progress entries in %d messages", found, len(m))
+	}
+	FinishReceive("done")
 }

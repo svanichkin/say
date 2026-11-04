@@ -1115,7 +1115,7 @@ func renderChatScreen(cols, rows int) string {
 
 	chatState.RLock()
 	messages := append([]ChatMessage(nil), chatState.messages...)
-	input, transfer := chatState.input, chatState.transfer
+	input := chatState.input
 	chatState.RUnlock()
 	// Our messages sit on the left, the peer's on the right; long messages wrap.
 	type chatLine struct {
@@ -1152,17 +1152,12 @@ func renderChatScreen(cols, rows int) string {
 		b.WriteString(l.text)
 	}
 
-	var line string
-	if transfer != "" {
-		line = truncateWidth(sanitizeLine(transfer), canvasCols)
-	} else {
-		cursor := " "
-		if inputCursorVisible(time.Now()) {
-			cursor = "▏"
-		}
-		// Keep the end of a long input visible, with room for the cursor.
-		line = tailWidth(sanitizeLine(input), canvasCols-1) + cursor
+	cursor := " "
+	if inputCursorVisible(time.Now()) {
+		cursor = "▏"
 	}
+	// Keep the end of a long input visible, with room for the cursor.
+	line := tailWidth(sanitizeLine(input), canvasCols-1) + cursor
 	b := lineAt(inputRow, 1)
 	b.WriteString("\x1b[2K")
 	writeCursorTo(b, inputRow, canvasLeft)
