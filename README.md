@@ -4,8 +4,8 @@ Say is a terminal‑first voice and video call utility that builds an embedded
 Yggdrasil node via [ygg](https://github.com/svanichkin/ygg) and speaks directly
 to other peers over the Ygg overlay network.
 Audio is captured and played with [malgo](https://github.com/gen2brain/malgo)
-(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go Opus
-or AMR-NB, and sent via UDP for low latency. Video frames are sourced through
+(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go AMR-NB,
+Opus or G.722, and sent via UDP for low latency. Video frames are sourced through
 [gocam](https://github.com/svanichkin/gocam), compressed, then rendered in the
 current terminal session using Unicode glyphs.
 
@@ -27,12 +27,42 @@ external Yggdrasil daemon or web stack.
 
 ## Features
 
-- Embedded Yggdrasil node – no separate daemon required.
-- Pure-Go AMR-NB voice (8 kHz mono, 4.75 kbps mode with DTX) or Opus (8 kHz mono, 12 kbps target, VBR and DTX), both with pure-Go acoustic echo cancellation.
-- Video streaming directly in the terminal two‑pane layout.
-- Simple newline text bridge when media is disabled.
+- Embedded Yggdrasil node – no separate daemon required. All call traffic is
+  end-to-end encrypted by Yggdrasil, and peer addresses are derived from their
+  public keys.
+- **Lower voice traffic.** Pure-Go AMR-NB (default, 4.75 kbit/s) uses about
+  **90 % less** bandwidth than the 48 kbit/s G.722 of v0.1.3; Opus (12 kbit/s)
+  about **75 % less**. G.722 is still available with `-audio-codec g722`.
+- Acoustic echo cancellation, aligned with the speaker's device latency.
+- Video in a two-pane terminal layout (square panes), synchronised with the
+  audio of the same peer.
+- **Adaptive video frame rate.** The receiver reports lost and undecodable
+  frames; the sender lowers its frame rate on loss and raises it again when the
+  path is clean (5 fps floor, optional `-fps` cap).
+- **Adaptive jitter buffer.** Audio waits only as long as the network needs:
+  late packets grow the buffer, a steady network shrinks it.
+- **Local network calls.** Peers in the same LAN (or on the same machine) find
+  each other by Yggdrasil multicast and connect directly instead of through
+  internet peers; Say then uses smaller audio buffers for lower latency.
+  `-nolan` turns this off.
+- **Chat and file transfer** during a call (see below).
+- One call at a time: other callers get a "busy" answer; a peer that
+  reconnects after a drop replaces its stale call.
 - Friend list bootstrap via the same `config.json` that holds the Yggdrasil
   settings.
+
+## Chat and file transfer
+
+The lower part of the call screen is a chat. Type a message and press Enter;
+your messages appear on the left, the peer's on the right. Long messages wrap,
+and wide characters (CJK, emoji) are measured correctly.
+
+To send a file, type or paste its path (or drop the file into the terminal,
+which pastes a `file://` URI) and press Enter. Transfer progress replaces the
+input line. The receiver saves the file to `~/Downloads` and confirms it; the
+sender's chat shows **Sent** only after that confirmation, or the receiver's
+error (for example, a full disk). File transfer adapts its rate to the call so
+that voice and video stay smooth.
 
 ## Requirements
 
