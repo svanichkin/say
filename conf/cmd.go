@@ -269,6 +269,7 @@ type AppOptions struct {
 	AudioCodec  string
 	NoLAN       bool
 	NoMic       bool
+	SysAudio    bool // -sysaudio: the system voice unit for microphone and speaker
 	VideoHold   int // cell hold threshold (mean colour difference per pixel); -video-hold
 	HoldDebug   bool
 	ShowVersion bool
@@ -788,6 +789,16 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.NoMic = boolVal
+		case "sysaudio":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -sysaudio: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.SysAudio = boolVal
 		case "nolan":
 			boolVal := true
 			if hasValue && value != "" {

@@ -114,6 +114,7 @@ func run() (err error) {
 
 	udptransport.Configure(true, true)
 	udptransport.SetMicrophone(!opts.NoMic)
+	udptransport.SetSystemVoice(opts.SysAudio)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	ui.SetChatCommandHandler(chatCommand)

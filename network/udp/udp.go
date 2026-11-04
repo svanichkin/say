@@ -137,6 +137,16 @@ func SetMicrophone(enabled bool) {
 	micEnabled = enabled
 }
 
+// systemVoice (-sysaudio) runs microphone and speaker through the system's
+// voice processing unit (macOS VoiceProcessingIO) instead of Say's own
+// devices and echo canceller. Falls back to them where unavailable.
+var systemVoice bool
+
+// SetSystemVoice selects the system voice unit for future sessions.
+func SetSystemVoice(enabled bool) {
+	systemVoice = enabled
+}
+
 // SetAudioCodec selects the codec used by future voice sessions.
 func SetAudioCodec(name string) error {
 	switch name {
@@ -306,12 +316,13 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioNetIn      chan []byte
 		audioSpeakerOut *device.PlaybackQueue
 
-		speakerMu   sync.Mutex                     // serialize device replacement with session cleanup
-		curSpeaker  atomic.Pointer[device.Speaker] // replaced by -audio during the call
-		speakerGen  atomic.Int64
-		startSpeak  func(periodFrames, periods int) (*device.Speaker, error)
-		playoutCmds = make(chan func(*audioPlayout), 4)
-		thisLive    *liveAudio
+		speakerMu        sync.Mutex                     // serialize device replacement with session cleanup
+		curSpeaker       atomic.Pointer[device.Speaker] // replaced by -audio during the call
+		usingSystemVoice bool                           // -sysaudio: one system unit plays and records
+		speakerGen       atomic.Int64
+		startSpeak       func(periodFrames, periods int) (*device.Speaker, error)
+		playoutCmds      = make(chan func(*audioPlayout), 4)
+		thisLive         *liveAudio
 
 		videoCamIn         <-chan device.CameraFrame
 		videoNetIn         chan []byte
@@ -380,13 +391,32 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, err
 		}
+		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
+		audioNetIn = make(chan []byte, audioBufferMaxFrames)
+
+		if systemVoice {
+			// The system unit cancels echo itself: no AEC of ours, and the
+			// microphone comes from the same unit as the speaker.
+			sp, micIn, err := device.StartSystemVoice(audioSampleRate, mediaTickSamples, audioSpeakerOut, stopCh, micEnabled)
+			if err != nil {
+				log.Printf("[audio] system voice unavailable, using Say's own audio: %v", err)
+			} else {
+				log.Printf("[audio] system voice processing (-sysaudio): microphone and speaker through the system unit")
+				usingSystemVoice = true
+				curSpeaker.Store(sp)
+				audioMicIn = micIn
+				if !micEnabled {
+					log.Printf("[audio] microphone disabled (-nomic)")
+				}
+			}
+		}
+	}
+	if useVoice && !usingSystemVoice {
+		var err error
 		aec, err = newAudioEcho(frameSamples)
 		if err != nil {
 			return nil, fmt.Errorf("echo canceller: %w", err)
 		}
-
-		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
-		audioNetIn = make(chan []byte, audioBufferMaxFrames)
 
 		var onRender func([]int16)
 		if aec != nil {
@@ -477,6 +507,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
 		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh, aec: aec}
 		thisLive.restartSpeaker = func(periodFrames, periods int) error {
+			if usingSystemVoice {
+				return errors.New("the speaker buffer is set by the system with -sysaudio")
+			}
 			speakerMu.Lock()
 			defer speakerMu.Unlock()
 			select {

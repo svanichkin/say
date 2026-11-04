@@ -32,6 +32,8 @@ type Speaker struct {
 	// release returns the unplayed rest of the frame the callback was on to
 	// the queue's sample count; called by Close once the device has stopped.
 	release func()
+	// closeDevice replaces the malgo device for other backends (system voice).
+	closeDevice func()
 }
 
 // LatencySamples is the configured device buffer (period × periods) in
@@ -73,16 +75,9 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
 	deviceConfig.Periods = uint32(max(periods, 2))
 
-	var pending []int16
-	var pendingIndex uint16
-	var pendingSamples int
-	var pendingLength, pendingMediaSamples int
 	// Reused by the audio callback so it never allocates (an allocation can
 	// stall the real-time thread on GC assist work).
 	var outSamples []int16
-	var declick crossfade
-	var lastOut int16 // last sample written to the device
-	var starved bool  // the previous callback ran out of audio
 	speaker := &Speaker{ctx: ctx, latencySamples: int(deviceConfig.PeriodSizeInFrames * deviceConfig.Periods)}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
@@ -91,6 +86,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 		speaker.periodTicks = deviceConfig.PeriodSizeInFrames / uint32(samplesPerMediaTick)
 		speaker.tickDur = time.Duration(samplesPerMediaTick) * time.Second / time.Duration(sampleRate)
 	}
+	r := &queueRenderer{speaker: speaker, in: speakerIn, channels: channels, samplesPerMediaTick: samplesPerMediaTick}
 
 	callbacks := malgo.DeviceCallbacks{
 		Data: func(pOutput, pInput []byte, frameCount uint32) {
@@ -106,55 +102,12 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 			if len(pOutput) == 0 || speakerIn == nil {
 				return
 			}
-			if speaker.playbackSet.Load() {
-				speaker.baseTick.Store(speaker.playbackTick.Load())
-				speaker.baseAt.Store(time.Now().UnixNano())
-			}
 			samplesNeeded := int(frameCount) * channels
 			if cap(outSamples) < samplesNeeded {
 				outSamples = make([]int16, samplesNeeded)
 			}
 			outSamples = outSamples[:samplesNeeded]
-			filled := 0
-
-			for filled < samplesNeeded {
-				if len(pending) == 0 {
-					if frame, gap, ok := speakerIn.pop(); ok && frame.Samples != nil {
-						pending = frame.Samples
-						pendingIndex = frame.MediaIndex
-						pendingSamples = 0
-						pendingLength = len(frame.Samples) / channels
-						pendingMediaSamples = frame.MediaSamples
-						if pendingMediaSamples == 0 {
-							pendingMediaSamples = pendingLength
-						}
-						if gap || frame.Discontinuous || starved {
-							// Queued audio was discarded or the queue ran dry: the
-							// new frame does not continue the last output sample.
-							declick.start(lastOut)
-						}
-						starved = false
-					}
-				}
-				if len(pending) == 0 {
-					// Underrun: ramp the last sample down instead of stepping to zero.
-					declick.fadeOut(outSamples[filled:], lastOut)
-					lastOut = 0
-					starved = true
-					break
-				}
-				n := copy(outSamples[filled:], pending)
-				declick.apply(outSamples[filled : filled+n])
-				filled += n
-				lastOut = outSamples[filled-1]
-				pending = pending[n:]
-				speakerIn.consumed(n)
-				pendingSamples += n / channels
-				if samplesPerMediaTick > 0 {
-					speaker.playbackTick.Store(uint32(pendingIndex) + uint32(mediaSamplePosition(pendingSamples, pendingLength, pendingMediaSamples)/samplesPerMediaTick))
-					speaker.playbackSet.Store(true)
-				}
-			}
+			r.render(outSamples)
 
 			n := min(len(outSamples), len(pOutput)/2)
 			for i, v := range outSamples[:n] {
@@ -173,14 +126,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 		},
 	}
 
-	speaker.release = func() {
-		// The device popped this frame but will never play the rest of it.
-		// Left counted, it inflates QueuedSamples for the queue's next
-		// speaker (-audio restarts it), and the playout, believing audio is
-		// queued, stops concealing gaps and stalls on the first missing packet.
-		speakerIn.consumed(len(pending))
-		pending = nil
-	}
+	speaker.release = r.release
 
 	dev, err := malgo.InitDevice(ctx.Context, deviceConfig, callbacks)
 	if err != nil {
@@ -198,6 +144,84 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 
 	speaker.dev = dev
 	return speaker, nil
+}
+
+// queueRenderer fills device buffers from a PlaybackQueue: it hides
+// discontinuities, ramps down on underrun, reports played samples to the
+// queue and advances the speaker's media clock. It runs on the audio thread.
+type queueRenderer struct {
+	speaker             *Speaker
+	in                  *PlaybackQueue
+	channels            int
+	samplesPerMediaTick int
+
+	pending             []int16
+	pendingIndex        uint16
+	pendingSamples      int
+	pendingLength       int
+	pendingMediaSamples int
+	declick             crossfade
+	lastOut             int16 // last sample written to the device
+	starved             bool  // the previous callback ran out of audio
+}
+
+// render fills out completely with the next queued audio (silence after it
+// runs out).
+func (r *queueRenderer) render(out []int16) {
+	speaker := r.speaker
+	if speaker.playbackSet.Load() {
+		speaker.baseTick.Store(speaker.playbackTick.Load())
+		speaker.baseAt.Store(time.Now().UnixNano())
+	}
+	filled := 0
+	for filled < len(out) {
+		if len(r.pending) == 0 {
+			if frame, gap, ok := r.in.pop(); ok && frame.Samples != nil {
+				r.pending = frame.Samples
+				r.pendingIndex = frame.MediaIndex
+				r.pendingSamples = 0
+				r.pendingLength = len(frame.Samples) / r.channels
+				r.pendingMediaSamples = frame.MediaSamples
+				if r.pendingMediaSamples == 0 {
+					r.pendingMediaSamples = r.pendingLength
+				}
+				if gap || frame.Discontinuous || r.starved {
+					// Queued audio was discarded or the queue ran dry: the
+					// new frame does not continue the last output sample.
+					r.declick.start(r.lastOut)
+				}
+				r.starved = false
+			}
+		}
+		if len(r.pending) == 0 {
+			// Underrun: ramp the last sample down instead of stepping to zero.
+			r.declick.fadeOut(out[filled:], r.lastOut)
+			r.lastOut = 0
+			r.starved = true
+			return
+		}
+		n := copy(out[filled:], r.pending)
+		r.declick.apply(out[filled : filled+n])
+		filled += n
+		r.lastOut = out[filled-1]
+		r.pending = r.pending[n:]
+		r.in.consumed(n)
+		r.pendingSamples += n / r.channels
+		if r.samplesPerMediaTick > 0 {
+			speaker.playbackTick.Store(uint32(r.pendingIndex) + uint32(mediaSamplePosition(r.pendingSamples, r.pendingLength, r.pendingMediaSamples)/r.samplesPerMediaTick))
+			speaker.playbackSet.Store(true)
+		}
+	}
+}
+
+// release returns the unplayed rest of the current frame to the queue's
+// sample count. The device popped this frame but will never play the rest
+// of it. Left counted, it inflates QueuedSamples for the queue's next
+// speaker (-audio restarts it), and the playout, believing audio is queued,
+// stops concealing gaps and stalls on the first missing packet.
+func (r *queueRenderer) release() {
+	r.in.consumed(len(r.pending))
+	r.pending = nil
 }
 
 // PlaybackIndex estimates the media index currently audible, compensating for
@@ -254,6 +278,10 @@ func (s *Speaker) Close() {
 			_ = s.dev.Stop()
 			s.dev.Uninit()
 		}
+		if s.closeDevice != nil {
+			s.closeDevice()
+		}
+		// Only once no callback can run any more.
 		if s.release != nil {
 			s.release()
 		}
