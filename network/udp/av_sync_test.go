@@ -30,7 +30,7 @@ func TestAudioLatencyStaysBounded(t *testing.T) {
 	in := make(chan []byte, audioBufferMaxFrames)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	startAudioReceiver(&wg, echoDecoder{}, frame, stop, in, q)
+	startAudioReceiver(&wg, echoDecoder{}, frame, stop, in, q, nil)
 
 	go func() {
 		for i := 0; i < 150; i++ {

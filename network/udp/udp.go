@@ -8,6 +8,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/svanichkin/say/codec"
@@ -300,7 +301,11 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioNetIn      chan []byte
 		audioSpeakerOut *device.PlaybackQueue
 
-		speaker *device.Speaker
+		curSpeaker  atomic.Pointer[device.Speaker] // replaced by -audio during the call
+		speakerGen  atomic.Int64
+		startSpeak  func(periodFrames, periods int) (*device.Speaker, error)
+		playoutCmds = make(chan func(*audioPlayout), 4)
+		thisLive    *liveAudio
 
 		videoCamIn         <-chan device.CameraFrame
 		videoNetIn         chan []byte
@@ -318,9 +323,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stop()
-			if speaker != nil {
-				speaker.Close()
+			if sp := curSpeaker.Load(); sp != nil {
+				sp.Close()
 			}
+			unregisterLiveAudio(thisLive)
 			// Cancellation is asynchronous. Do not let the next call open devices
 			// while the previous capture goroutines are still closing them.
 			if audioMicIn != nil {
@@ -381,16 +387,33 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		log.Printf("[audio] speaker buffer %d ms (%d x %d ms), jitter buffer lead from %d ms (min %d, max %d)",
 			audioSpeakerPeriodFrames*audioSpeakerPeriods*audioFrameMillis, audioSpeakerPeriods, audioSpeakerPeriodFrames*audioFrameMillis,
 			audioBufferLeadFrames*audioFrameMillis, audioLeadMinFrames*audioFrameMillis, audioLeadMaxFrames*audioFrameMillis)
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*audioSpeakerPeriodFrames, audioSpeakerPeriods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
+		startSpeak = func(periodFrames, periods int) (*device.Speaker, error) {
+			// Only the current speaker may stop the session when its device
+			// stops; closing a replaced one (-audio) must not end the call.
+			gen := speakerGen.Add(1)
+			onStop := func() {
+				if speakerGen.Load() == gen {
+					stop()
+				}
+			}
+			sp, err := device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*periodFrames, periods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, onStop)
+			if err != nil {
+				return nil, err
+			}
+			if aec != nil {
+				// Echo of rendered audio reaches the mic about one device buffer later.
+				delay := min(sp.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
+				aec.setSpeakerPeriod(periodFrames)
+				aec.setReferenceDelay(delay)
+				log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, sp.LatencySamples()*1000/audioSampleRate)
+			}
+			return sp, nil
+		}
+		sp, err := startSpeak(audioSpeakerPeriodFrames, audioSpeakerPeriods)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
-		if aec != nil {
-			// Echo of rendered audio reaches the mic about one device buffer later.
-			delay := min(speaker.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
-			aec.setReferenceDelay(delay)
-			log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, speaker.LatencySamples()*1000/audioSampleRate)
-		}
+		curSpeaker.Store(sp)
 
 		// Open capture last, immediately before starting its consumer.
 		if micEnabled {
@@ -443,12 +466,29 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	startReceiver(&wg, pc, stopCh, audioNetIn, videoNetIn, getPeer, setPeer)
 
 	if useVoice && audioNetIn != nil && audioSpeakerOut != nil {
-		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut)
+		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
+		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh}
+		thisLive.restartSpeaker = func(periodFrames, periods int) error {
+			sp, err := startSpeak(periodFrames, periods)
+			if err != nil {
+				return err
+			}
+			if old := curSpeaker.Swap(sp); old != nil {
+				old.Close()
+			}
+			return nil
+		}
+		registerLiveAudio(thisLive)
 	}
 	if useVideo && videoNetIn != nil {
 		var playbackIndex func() (uint16, bool)
-		if speaker != nil {
-			playbackIndex = speaker.PlaybackIndex
+		if curSpeaker.Load() != nil {
+			playbackIndex = func() (uint16, bool) {
+				if sp := curSpeaker.Load(); sp != nil {
+					return sp.PlaybackIndex()
+				}
+				return 0, false
+			}
 		}
 		startVideoReceiver(&wg, stopCh, videoNetIn, videoPeerScreenOut, playbackIndex)
 	}
@@ -1027,7 +1067,7 @@ func audioPacketsExpected(delta int32, afterSID bool) int32 {
 // startAudioReceiver launches a goroutine that decodes speech payloads from
 // netAudioIn and keeps speakerOut continuously fed (see audioPlayout).
 func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
-	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue) {
+	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue, cmds <-chan func(*audioPlayout)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1046,6 +1086,8 @@ func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 				if mediactrl.PlaybackEnabled() {
 					playout.onTick()
 				}
+			case cmd := <-cmds:
+				cmd(playout)
 			case pkt, ok := <-netAudioIn:
 				if !ok {
 					return

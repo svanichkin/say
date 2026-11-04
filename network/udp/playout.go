@@ -56,6 +56,7 @@ type audioPlayout struct {
 	lastAdapt  time.Time
 	lateEvents int64 // packets that arrived after their slot (for tests and logs)
 
+	leadMin      int // frames; the lead does not shrink below this
 	lowWater     int // samples; conceal below this
 	maxQueued    int
 	targetQueued int
@@ -73,6 +74,7 @@ func newAudioPlayout(dec audioDecoder, frameSamples int, out *device.PlaybackQue
 		out:          out,
 		scratch:      make([]int16, frameSamples),
 		lossWindow:   time.Now(),
+		leadMin:      audioLeadMinFrames,
 		lowWater:     frameSamples * audioPlayoutLowFrames,
 		lead:         audioBufferLeadFrames,
 		maxQueued:    frameSamples * audioQueueMaxFrames,
@@ -345,7 +347,7 @@ func (p *audioPlayout) adaptLead(now time.Time) {
 		}
 		return
 	}
-	if p.lead > audioLeadMinFrames && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
+	if p.lead > p.leadMin && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
 		p.lead--
 		p.lastAdapt = now
 		p.shrink = true // push drops the next quiet frame
@@ -375,4 +377,19 @@ func (p *audioPlayout) recordLoss(delta int32, afterSID bool, now time.Time) {
 		p.lossExpected, p.lossMissing = 0, 0
 		p.lossWindow = now
 	}
+}
+
+// configure applies new buffer settings during a call (from -audio). It runs
+// on the receiver goroutine. A larger lead is reached by playing extra
+// frames; a smaller one shrinks over quiet frames as usual.
+func (p *audioPlayout) configure(leadFrames, leadMinFrames, lowFrames int) {
+	p.leadMin = leadMinFrames
+	p.lowWater = p.frameSamples * lowFrames
+	if leadFrames > p.lead && p.ready {
+		p.expand += leadFrames - p.lead
+	} else if leadFrames < p.lead {
+		p.shrink = true
+	}
+	p.lead = leadFrames
+	p.lastLateAt, p.lastAdapt = time.Now(), time.Now()
 }

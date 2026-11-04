@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -115,6 +116,7 @@ func run() (err error) {
 	udptransport.SetMicrophone(!opts.NoMic)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
+	ui.SetChatCommandHandler(chatCommand)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
@@ -512,4 +514,33 @@ func printDonateInfo() {
 
 func printSupportInfo() {
 	fmt.Println(support)
+}
+
+// chatCommand handles local chat commands. "-audio" shows the audio buffers
+// of the call; "-audio LEAD PERIOD PERIODS" (milliseconds, count) changes them.
+func chatCommand(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || fields[0] != "-audio" {
+		return "", false
+	}
+	switch len(fields) {
+	case 1:
+		return udptransport.AudioSettings(), true
+	case 4:
+		var v [3]int
+		for i, f := range fields[1:] {
+			n, err := strconv.Atoi(f)
+			if err != nil {
+				return fmt.Sprintf("audio: %q is not a number", f), true
+			}
+			v[i] = n
+		}
+		reply, err := udptransport.ApplyAudioSettings(v[0], v[1], v[2])
+		if err != nil {
+			return "audio: " + err.Error(), true
+		}
+		return reply, true
+	default:
+		return "usage: -audio  or  -audio LEAD PERIOD PERIODS (e.g. -audio 120 60 2)", true
+	}
 }

@@ -154,6 +154,8 @@ type audioEcho struct {
 	// after the reference. primed is false until that much is queued.
 	delaySamples int
 	primed       bool
+	refMax       int // reference queue limit (samples, beyond the delay)…
+	refTarget    int // …and its trim depth
 
 	mu             sync.Mutex // canceller state, used by the sender goroutine
 	canceller      *echo.Canceller
@@ -176,6 +178,8 @@ func newAudioEcho(frameSamples int) (*audioEcho, error) {
 		canceller:    canceller,
 		frameSamples: frameSamples,
 		refRing:      make([]int16, 0, frameSamples*(audioEchoRefMaxFrames+2)+audioEchoMaxDelaySamples),
+		refMax:       frameSamples * audioEchoRefMaxFrames,
+		refTarget:    frameSamples * audioEchoRefTargetFrames,
 		ref:          make([]int16, frameSamples),
 	}, nil
 }
@@ -188,8 +192,8 @@ func (a *audioEcho) playback(samples []int16) {
 	}
 	a.refMu.Lock()
 	a.refRing = append(a.refRing, samples...)
-	if len(a.refRing) > a.delaySamples+a.frameSamples*audioEchoRefMaxFrames {
-		drop := len(a.refRing) - (a.delaySamples + a.frameSamples*audioEchoRefTargetFrames)
+	if len(a.refRing) > a.delaySamples+a.refMax {
+		drop := len(a.refRing) - (a.delaySamples + a.refTarget)
 		a.refRing = append(a.refRing[:0], a.refRing[drop:]...)
 	}
 	a.refMu.Unlock()
@@ -210,6 +214,18 @@ func (a *audioEcho) nextReference() {
 		a.primed = false
 		clear(a.ref)
 	}
+	a.refMu.Unlock()
+}
+
+// setSpeakerPeriod adapts the reference queue limits to a new speaker period
+// (frames of 20 ms); the speaker hands a whole period at once.
+func (a *audioEcho) setSpeakerPeriod(periodFrames int) {
+	if a == nil {
+		return
+	}
+	a.refMu.Lock()
+	a.refMax = a.frameSamples * 3 * periodFrames
+	a.refTarget = a.frameSamples * 2 * periodFrames
 	a.refMu.Unlock()
 }
 

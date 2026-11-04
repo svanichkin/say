@@ -87,6 +87,19 @@ func chatKey(r rune) {
 	case '\r', '\n':
 		line := strings.TrimSpace(chatState.input)
 		chatState.input = ""
+		if handler := chatCommand; strings.HasPrefix(line, "-") && handler != nil {
+			// Local commands (e.g. -audio) are answered here, not sent.
+			chatState.Unlock()
+			go func() {
+				if reply, ok := handler(line); ok {
+					AddChatMessage("⚙ "+reply, true)
+				} else {
+					AddChatMessage("⚙ unknown command "+strings.Fields(line)[0], true)
+				}
+			}()
+			RequestRedraw()
+			return
+		}
 		if line != "" {
 			if info, ok := droppedFile(line); ok {
 				if onFile := chatState.onFile; onFile != nil {
@@ -222,4 +235,14 @@ func droppedFile(text string) (string, bool) {
 		return "", false
 	}
 	return abs, true
+}
+
+// chatCommand answers local chat commands: lines starting with "-".
+var chatCommand func(line string) (reply string, handled bool)
+
+// SetChatCommandHandler installs the handler for local chat commands.
+func SetChatCommandHandler(handler func(line string) (reply string, handled bool)) {
+	chatState.Lock()
+	chatCommand = handler
+	chatState.Unlock()
 }

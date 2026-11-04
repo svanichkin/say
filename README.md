@@ -36,9 +36,11 @@ external Yggdrasil daemon or web stack.
 - Acoustic echo cancellation, aligned with the speaker's device latency.
 - Video in a two-pane terminal layout (square panes), synchronised with the
   audio of the same peer.
-- **Adaptive video frame rate.** The receiver reports lost and undecodable
-  frames; the sender lowers its frame rate on loss and raises it again when the
-  path is clean (5 fps floor, optional `-fps` cap).
+- **Adaptive video frame rate and detail.** The receiver reports lost and
+  undecodable frames; on loss the sender lowers its frame rate and raises the
+  cell hold (coarser, lighter frames, up to 32 for small and 128 for large
+  pictures), and restores both when the path is clean (5 fps floor, optional
+  `-fps` cap).
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. A full frame follows
@@ -62,7 +64,13 @@ The lower part of the call screen is a chat. Type a message and press Enter;
 your messages appear on the left, the peer's on the right. Long messages wrap,
 and wide characters (CJK, emoji) are measured correctly.
 
-To send a file, type or paste its path (or drop the file into the terminal,
+Lines starting with `-` are local commands and are not sent. `-audio` shows
+the audio buffers of the call (jitter buffer lead, speaker period and number
+of periods); `-audio 120 60 2` sets them live for your own playback (the
+speaker restarts briefly if its buffer changes). The next call starts from the
+automatic per-connection values again.
+
+To send a file, type, paste or drag its path (or drop the file into the terminal,
 which pastes a `file://` URI) and press Enter. Transfer progress replaces the
 input line. The receiver saves the file to `~/Downloads` and confirms it; the
 sender's chat shows **Sent** only after that confirmation, or the receiver's
