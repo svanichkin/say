@@ -28,6 +28,10 @@ type Speaker struct {
 	periodTicks uint32
 	tickDur     time.Duration
 	lastPos     atomic.Uint32 // last returned position + 1 (0: none yet)
+
+	// release returns the unplayed rest of the frame the callback was on to
+	// the queue's sample count; called by Close once the device has stopped.
+	release func()
 }
 
 // LatencySamples is the configured device buffer (period × periods) in
@@ -161,6 +165,15 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 		},
 	}
 
+	speaker.release = func() {
+		// The device popped this frame but will never play the rest of it.
+		// Left counted, it inflates QueuedSamples for the queue's next
+		// speaker (-audio restarts it), and the playout, believing audio is
+		// queued, stops concealing gaps and stalls on the first missing packet.
+		speakerIn.consumed(len(pending))
+		pending = nil
+	}
+
 	dev, err := malgo.InitDevice(ctx.Context, deviceConfig, callbacks)
 	if err != nil {
 		ctx.Uninit()
@@ -232,6 +245,9 @@ func (s *Speaker) Close() {
 		if s.dev != nil {
 			_ = s.dev.Stop()
 			s.dev.Uninit()
+		}
+		if s.release != nil {
+			s.release()
 		}
 		if s.ctx != nil {
 			s.ctx.Uninit()
