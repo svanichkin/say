@@ -113,6 +113,7 @@ func run() (err error) {
 	}
 
 	udptransport.Configure(true, !opts.NoVideo)
+	udptransport.SetMicrophone(!opts.NoMic)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {

@@ -272,6 +272,7 @@ type AppOptions struct {
 	AudioCodec  string
 	EchoCancel  bool
 	NoVideo     bool
+	NoMic       bool
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -760,6 +761,16 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", value)
 			}
 			opts.AudioCodec = codec
+		case "nomic":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -nomic: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.NoMic = boolVal
 		case "novideo":
 			boolVal := true
 			if hasValue && value != "" {

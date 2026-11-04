@@ -23,6 +23,7 @@ var (
 	maxVideoFPS = defaultVideoFPS
 	audioCodec  = "amrnb"
 	echoCancel  = false
+	micEnabled  = true
 )
 
 const (
@@ -66,6 +67,12 @@ const (
 func Configure(enableVoice, enableVideo bool) {
 	useVoice = enableVoice
 	useVideo = enableVideo
+}
+
+// SetMicrophone enables or disables microphone capture for future voice
+// sessions. Without it the session only plays the peer's audio.
+func SetMicrophone(enabled bool) {
+	micEnabled = enabled
 }
 
 // SetEchoCancellation enables or disables acoustic echo cancellation for
@@ -332,9 +339,14 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		}
 
 		// Open capture last, immediately before starting its consumer.
-		audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
-		if err != nil {
-			return nil, fmt.Errorf("mic stream: %w", err)
+		if micEnabled {
+			audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
+			if err != nil {
+				return nil, fmt.Errorf("mic stream: %w", err)
+			}
+		} else {
+			// Listen only: no capture, so no audio is sent (the sender exits).
+			log.Printf("[audio] microphone disabled (-nomic)")
 		}
 	}
 	if err := sessionCtx.Err(); err != nil {
