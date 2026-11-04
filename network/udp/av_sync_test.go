@@ -20,7 +20,7 @@ func (echoDecoder) DecodeFrame(p []byte, dst []int16) (int, error) {
 	return len(dst), nil
 }
 func (echoDecoder) Conceal(dst []int16) (int, error) { clear(dst); return len(dst), nil }
-func (echoDecoder) IsDTXFrame([]byte) bool          { return false }
+func (echoDecoder) IsDTXFrame([]byte) bool           { return false }
 
 // The receiver must keep playback latency near its jitter buffer lead while
 // packets arrive in real time with jitter.
