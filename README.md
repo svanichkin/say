@@ -4,8 +4,8 @@ Say is a terminal‑first voice and video call utility that builds an embedded
 Yggdrasil node via [ygg](https://github.com/svanichkin/ygg) and speaks directly
 to other peers over the Ygg overlay network.
 Audio is captured and played with [malgo](https://github.com/gen2brain/malgo)
-(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go Opus,
-and sent via UDP for low latency. Video frames are sourced through
+(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go Opus
+or AMR-NB, and sent via UDP for low latency. Video frames are sourced through
 [gocam](https://github.com/svanichkin/gocam), compressed, then rendered in the
 current terminal session using Unicode glyphs.
 
@@ -28,7 +28,7 @@ external Yggdrasil daemon or web stack.
 ## Features
 
 - Embedded Yggdrasil node – no separate daemon required.
-- Opus voice (8 kHz mono, 12 kbps target, VBR and DTX) with pure-Go acoustic echo cancellation.
+- Pure-Go AMR-NB voice (8 kHz mono, 4.75 kbps mode with DTX) or Opus (8 kHz mono, 12 kbps target, VBR and DTX), both with pure-Go acoustic echo cancellation.
 - Video streaming directly in the terminal two‑pane layout.
 - Simple newline text bridge when media is disabled.
 - Friend list bootstrap via the same `config.json` that holds the Yggdrasil
@@ -36,7 +36,7 @@ external Yggdrasil daemon or web stack.
 
 ## Requirements
 
-- Go **1.27.3** (minimum) with cgo enabled for native audio I/O. The Opus codec itself is pure Go.
+- Go **1.27.3** (minimum) with cgo enabled for native audio I/O. Both audio codecs are pure Go.
 - A working microphone for voice calls and, if you enable video, a webcam that
   is supported by your OS (V4L2 on Linux, AVFoundation on macOS, Media
   Foundation on Windows).
@@ -227,12 +227,14 @@ either a dial target (`"200:abcd:..."`) or a friend name from contacts
 pass `-config`; bare tokens are no longer treated as profile names.
 
 Audio and video are always enabled when hardware is present; no extra flags are
-required. Relevant CLI switches:
+required. Use the same audio codec on both peers; codec negotiation is not part
+of the current media protocol. Relevant CLI switches:
 
 - Without `-log`, Say writes logs only to stderr. With `-log`, it also writes a log file next to the running executable using the config name, for example `-config client` -> `client.log`. The resolved path is printed on startup. Use `-log debug` for the most detailed file logging.
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP).
 - `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
+- `-audio-codec` – choose `amrnb` (default) or `opus`. AMR-NB uses 4.75 kbit/s; select `opus` on both peers to compare voice quality and traffic.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
 - `-contacts` – override the contacts directory defined in the config.

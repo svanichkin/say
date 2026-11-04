@@ -56,6 +56,9 @@ func run() (err error) {
 	}
 
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
+	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
+		return err
+	}
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
 
 	logWriter, closeLog, logPath, logErr := initLogSink(opts.ConfigPath, opts.LogEnabled)

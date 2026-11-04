@@ -269,6 +269,7 @@ type AppOptions struct {
 	Mode        AppMode
 	ColorFilter string
 	MaxVideoFPS int
+	AudioCodec  string
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -297,6 +298,7 @@ func ParseCLI() (*AppOptions, error) {
 		Transport:   network.TransportYggdrasil,
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 25,
+		AudioCodec:  "amrnb",
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
@@ -746,6 +748,15 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("fps must be between %d and %d", minAllowedFPS, maxAllowedFPS)
 			}
 			opts.MaxVideoFPS = fps
+		case "audio-codec":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-audio-codec requires a value (opus or amrnb)")
+			}
+			codec := strings.ToLower(strings.TrimSpace(value))
+			if codec != "opus" && codec != "amrnb" {
+				return fmt.Errorf("unsupported audio codec %q (choose opus or amrnb)", value)
+			}
+			opts.AudioCodec = codec
 		case "version":
 			boolVal := true
 			if hasValue && value != "" {
@@ -811,7 +822,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec":
 		return true
 	default:
 		return false

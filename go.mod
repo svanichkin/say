@@ -3,11 +3,12 @@ module github.com/svanichkin/say
 go 1.27.3
 
 require (
+	github.com/VoiceBlender/goamr-nb v1.1.0
 	github.com/danieldonoghue/govoip-dsp v0.1.0-rc.2
 	github.com/gen2brain/malgo v0.11.27
 	github.com/klauspost/compress v1.20.3
 	github.com/svanichkin/gocam v0.1.0
-	github.com/svanichkin/ygg v0.5.2
+	github.com/svanichkin/ygg v0.5.6
 	github.com/thesyncim/gopus v0.2.2
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
@@ -24,6 +25,7 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/hjson/hjson-go/v4 v4.7.1 // indirect
 	github.com/quic-go/quic-go v0.65.0 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yggdrasil-network/yggdrasil-go v0.5.15 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect

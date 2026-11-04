@@ -4,6 +4,8 @@ github.com/Arceliar/ironwood v0.0.0-20261023231900-0712eccbb962 h1:SsGZmDZf5iyqf
 github.com/Arceliar/ironwood v0.0.0-20261023231900-0712eccbb962/go.mod h1:+4Nkaq0kqo0xK/XGawV7wVyj2D2LZeLJOzozZp7yhdM=
 github.com/Arceliar/phony v0.0.0-20220903101357-530938a4b13d h1:UK9fsWbWqwIQkMCz1CP+v5pGbsGoWAw6g4AyvMpm1EM=
 github.com/Arceliar/phony v0.0.0-20220903101357-530938a4b13d/go.mod h1:BCnxhRf47C/dy/e/D2pmB8NkB3dQVIrkD98b220rx5Q=
+github.com/VoiceBlender/goamr-nb v1.1.0 h1:gyvPfSZRbIFSIBj6ta8bystjTjokmkehwd+RKP/EZfw=
+github.com/VoiceBlender/goamr-nb v1.1.0/go.mod h1:Eb6MpLAXDAC2TvwdEzNL6rXfcNmIJll8NBUjoAqpRaY=
 github.com/bits-and-blooms/bitset v1.24.2/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/bits-and-blooms/bitset v1.29.0 h1:xq4g46l2NlweICLMDJ8LiyrZJQJTeC2Q0b3CCnLCAbg=
 github.com/bits-and-blooms/bitset v1.29.0/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
@@ -31,12 +33,14 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/svanichkin/gocam v0.1.0 h1:aepAppxSm8uG0D7mVlVYn4alAXHUlSYS8UGNPzzKnNw=
 github.com/svanichkin/gocam v0.1.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
-github.com/svanichkin/ygg v0.5.2 h1:tO8m9KEpJGhQEdporI1s5IrcdGgR2/4ZNiBUBLmr8WA=
-github.com/svanichkin/ygg v0.5.2/go.mod h1:f12p9ax9bfu6j86bng5OEmSjPmN807EVmWtFG+D+/To=
+github.com/svanichkin/ygg v0.5.6 h1:JrVwbudwBTGEnmL25Bs3CO+X62osUbqrZ+U/ObS+RiU=
+github.com/svanichkin/ygg v0.5.6/go.mod h1:PrwFU+U7ojTJ8iNdEe3CHUbXckIrpNQSbqUCA2Crr+U=
 github.com/thesyncim/gopus v0.2.2 h1:Ib8mmsLBon6ylXVk6p7fLxuZNnBzfPA4wT4GBzfWqCI=
 github.com/thesyncim/gopus v0.2.2/go.mod h1:uENpqeR6V8WrMhH5vLJARzFgpMgXJBl5M0cg54LgoA0=
 github.com/twmb/murmur3 v1.1.8 h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=
 github.com/twmb/murmur3 v1.1.8/go.mod h1:Qq/R7NUyOfr65zD+6Q5IHKsJLwP7exErjN6lyyq3OSQ=
+github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
+github.com/wlynxg/anet v0.0.5/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
 github.com/yggdrasil-network/yggdrasil-go v0.5.15 h1:OCMNcSudm6VG240cFjkBLXASpd+df2s8rQWTDzd6xgE=
 github.com/yggdrasil-network/yggdrasil-go v0.5.15/go.mod h1:T51l2nwbGYRBt+pTEjjpEBXmSKSDdumiFHnEGVllw5s=
 go.uber.org/mock v0.6.0 h1:hyF9dfmbgIX5EfOdasqLsWD6xqpNZlXblLB/Dbnwv3Y=

@@ -14,13 +14,13 @@ import (
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 	"github.com/svanichkin/say/ui"
-	"github.com/thesyncim/gopus"
 )
 
 var (
 	useVoice    = true
 	useVideo    bool
 	maxVideoFPS = defaultVideoFPS
+	audioCodec  = "amrnb"
 )
 
 const (
@@ -52,6 +52,17 @@ const (
 func Configure(enableVoice, enableVideo bool) {
 	useVoice = enableVoice
 	useVideo = enableVideo
+}
+
+// SetAudioCodec selects the codec used by future voice sessions.
+func SetAudioCodec(name string) error {
+	switch name {
+	case "opus", "amrnb":
+		audioCodec = name
+		return nil
+	default:
+		return fmt.Errorf("unsupported audio codec %q (choose opus or amrnb)", name)
+	}
 }
 
 // SetMaxVideoFPS clamps and sets the desired max FPS for video capture/encoding.
@@ -130,7 +141,8 @@ func (vs *dataSession) Done() <-chan struct{} {
 	return vs.done
 }
 
-// StartSession establishes a unidirectional or bidirectional UDP voice channel using Opus
+// StartSession establishes a unidirectional or bidirectional UDP voice channel using the
+// selected speech codec
 // for audio and malgo for playback. If a camera stream is active and enableVideo is true,
 // TextFrame-encoded video frames are also sent over the same PacketConn, prefixed with a frame
 // type byte.
@@ -161,8 +173,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 
 	// ======== Audio codec and buffers ========
 	var (
-		enc          *gopus.Encoder
-		dec          *gopus.Decoder
+		enc          audioEncoder
+		dec          audioDecoder
 		aec          *audioEcho
 		frameSamples int
 		mediaEpoch   = time.Now()
@@ -180,7 +192,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	if useVoice {
 		// Init codec
 		var err error
-		enc, dec, frameSamples, err = initAudioCodec()
+		enc, dec, frameSamples, err = initAudioCodec(audioCodec)
 		if err != nil {
 			return nil, err
 		}
@@ -324,10 +336,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 }
 
 // startSender launches goroutines responsible for sending:
-//   - audio: mic → Opus → UDP (mediaKindAudio)
+//   - audio: mic → selected speech codec → UDP (mediaKindAudio)
 //   - video: camera → TextFrame → UDP (mediaKindVideo)
 func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, aec *audioEcho, frameSamples int,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
 ) {
@@ -339,16 +351,16 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 }
 
-// startAudioSender: mic → Opus → UDP (mediaKindAudio)
+// startAudioSender: mic → selected speech codec → UDP (mediaKindAudio)
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc *gopus.Encoder, aec *audioEcho,
+	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho,
 	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
 ) {
 	if !useVoice || enc == nil || audioMicIn == nil {
 		return
 	}
 
-	// ======== Audio sender: mic → Opus → UDP ========
+	// ======== Audio sender: mic → selected codec → UDP ========
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -385,14 +397,19 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return true
 			}
 
-			buf := make([]byte, maxOpusPacket)
-			written, err := enc.EncodeInt16(pcm, buf)
-			if err != nil || written <= 0 {
-				log.Printf("[voice/udp] Opus encode error: bytes=%d err=%v", written, err)
+			buf := make([]byte, maxAudioPacket)
+			written, err := enc.EncodeFrame(pcm, buf)
+			if err != nil {
+				log.Printf("[voice/udp] %s encode error: bytes=%d err=%v", audioCodec, written, err)
 				if stop != nil {
 					stop()
 				}
 				return false
+			}
+			if written == 0 {
+				// AMR-NB DTX omits NO_DATA frames from the wire while the timestamp
+				// still advances with the captured PCM timeline.
+				return true
 			}
 
 			header := encodeMediaHeader(mediaKindAudio, mediaIndex(mediaEpoch, capturedAt))
@@ -811,9 +828,9 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 	}()
 }
 
-// startAudioReceiver launches a goroutine that decodes Opus payloads from netAudioIn into PCM frames
+// startAudioReceiver launches a goroutine that decodes speech payloads from netAudioIn into PCM frames
 // and feeds them into speakerOut.
-func startAudioReceiver(wg *sync.WaitGroup, dec *gopus.Decoder, frameSamples int,
+func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut chan device.PlaybackFrame) {
 	wg.Add(1)
 	go func() {
@@ -911,7 +928,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *gopus.Decoder, frameSamples int
 			frame := make([]int16, frames*frameSamples)
 			for i := 0; i < frames; i++ {
 				out := pcmScratch[:frameSamples]
-				written, err := dec.DecodeInt16(nil, out)
+				written, err := dec.Conceal(out)
 				if err == nil && written > 0 {
 					if written > frameSamples {
 						written = frameSamples
@@ -932,9 +949,9 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *gopus.Decoder, frameSamples int
 			if len(pcmScratch) < frameSamples {
 				pcmScratch = make([]int16, frameSamples)
 			}
-			written, err := dec.DecodeInt16(data, pcmScratch[:frameSamples])
+			written, err := dec.DecodeFrame(data, pcmScratch[:frameSamples])
 			if err != nil || written <= 0 {
-				logs.LogV("[voice/udp] Opus decode error: produced %d samples (len=%d): %v", written, len(data), err)
+				logs.LogV("[voice/udp] %s decode error: produced %d samples (len=%d): %v", audioCodec, written, len(data), err)
 				return false
 			}
 			plcStreak = 0
@@ -1058,7 +1075,12 @@ func startAudioReceiver(wg *sync.WaitGroup, dec *gopus.Decoder, frameSamples int
 				if delta < 0 {
 					continue
 				}
-				recordAudioLoss(delta)
+				// AMR DTX intentionally omits NO_DATA frames and marks its
+				// periodic comfort-noise update with an SID frame. Those timestamp
+				// gaps are silence suppression, not network packet loss.
+				if !dec.IsDTXFrame(payload) {
+					recordAudioLoss(delta)
+				}
 
 				if !decodeAndEnqueue(pendingData, pendingIndex) {
 					if frame := generatePLC(frameSamples); frame != nil {
@@ -1110,6 +1132,11 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		}
 		queue := make([]timedFrame, 0, videoMaxQueuedFrames)
 		lastFrameAt := time.Time{}
+		var (
+			playbackSeen     bool
+			lastPlayback     uint16
+			lastPlaybackMove time.Time
+		)
 		ticker := time.NewTicker(4 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -1132,11 +1159,6 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		}
 
 		presentDue := func() {
-		var (
-			playbackSeen     bool
-			lastPlayback     uint16
-			lastPlaybackMove time.Time
-		)
 			if !mediactrl.PlaybackEnabled() {
 				queue = queue[:0]
 				return
