@@ -2,7 +2,6 @@ package udp
 
 import (
 	"fmt"
-	"log"
 	"sync"
 
 	amrnb "github.com/VoiceBlender/goamr-nb"
@@ -75,14 +74,34 @@ func (amrAudioDecoder) IsDTXFrame(payload []byte) bool {
 	return len(payload) >= 2 && int(payload[1]>>3)&0x0f == amrnb.FTSID
 }
 
-// audioEcho pairs the rendered far-end audio with microphone frames. The
-// library's playback/capture queue expects both streams to be processed in
-// order, so its state and partial render frame are protected by one mutex.
+// Echo reference buffering. The speaker and the microphone are separate
+// devices whose callbacks run on separate threads with independent jitter,
+// while the canceller's own queue holds at most three frames: it discards a
+// Playback when full and passes the microphone through unprocessed when
+// empty. Feeding it directly from both callbacks made the reference jump by
+// a frame back and forth, which corrupted the cancelled microphone signal
+// (audible as a hoarse, crackling voice on the far side).
+//
+// Instead the speaker only appends rendered samples to refRing. Each captured
+// frame takes exactly one frame of reference from it and calls Playback
+// immediately before Capture, so the canceller's queue never over- or
+// underflows. Alignment follows sample counts, not callback timing.
+const (
+	audioEchoRefMaxFrames    = 5 // more queued reference than this means clock drift…
+	audioEchoRefTargetFrames = 2 // …and is trimmed back to this depth
+)
+
+// audioEcho pairs the rendered far-end audio with microphone frames.
 type audioEcho struct {
-	mu             sync.Mutex
+	// refMu guards refRing only; the speaker callback never waits for the
+	// canceller's processing.
+	refMu   sync.Mutex
+	refRing []int16
+
+	mu             sync.Mutex // canceller state, used by the sender goroutine
 	canceller      *echo.Canceller
 	frameSamples   int
-	renderPending  []int16
+	ref            []int16
 	captureKnown   bool
 	captureEnabled bool
 }
@@ -97,28 +116,39 @@ func newAudioEcho(frameSamples int) (*audioEcho, error) {
 		return nil, err
 	}
 	return &audioEcho{
-		canceller:     canceller,
-		frameSamples:  frameSamples,
-		renderPending: make([]int16, 0, frameSamples*2),
+		canceller:    canceller,
+		frameSamples: frameSamples,
+		refRing:      make([]int16, 0, frameSamples*(audioEchoRefMaxFrames+2)),
+		ref:          make([]int16, frameSamples),
 	}, nil
 }
 
-// playback receives the PCM block that is about to be written to the speaker.
+// playback receives the PCM block that is about to be written to the
+// speaker. It runs on the audio thread, so it only copies.
 func (a *audioEcho) playback(samples []int16) {
 	if a == nil || len(samples) == 0 {
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.renderPending = append(a.renderPending, samples...)
-	for len(a.renderPending) >= a.frameSamples {
-		if err := a.canceller.Playback(a.renderPending[:a.frameSamples]); err != nil {
-			log.Printf("[audio/aec] playback frame: %v", err)
-			return
-		}
-		copy(a.renderPending, a.renderPending[a.frameSamples:])
-		a.renderPending = a.renderPending[:len(a.renderPending)-a.frameSamples]
+	a.refMu.Lock()
+	a.refRing = append(a.refRing, samples...)
+	if len(a.refRing) > a.frameSamples*audioEchoRefMaxFrames {
+		drop := len(a.refRing) - a.frameSamples*audioEchoRefTargetFrames
+		a.refRing = append(a.refRing[:0], a.refRing[drop:]...)
 	}
+	a.refMu.Unlock()
+}
+
+// nextReference fills a.ref with the oldest frame of rendered audio, or
+// silence if the speaker has not produced one (nothing to cancel then).
+func (a *audioEcho) nextReference() {
+	a.refMu.Lock()
+	if len(a.refRing) >= a.frameSamples {
+		copy(a.ref, a.refRing[:a.frameSamples])
+		a.refRing = append(a.refRing[:0], a.refRing[a.frameSamples:]...)
+	} else {
+		clear(a.ref)
+	}
+	a.refMu.Unlock()
 }
 
 func (a *audioEcho) setCaptureEnabled(enabled bool) {
@@ -129,18 +159,25 @@ func (a *audioEcho) setCaptureEnabled(enabled bool) {
 	defer a.mu.Unlock()
 	if !a.captureKnown || a.captureEnabled != enabled {
 		a.canceller.Reset()
-		a.renderPending = a.renderPending[:0]
+		a.refMu.Lock()
+		a.refRing = a.refRing[:0]
+		a.refMu.Unlock()
 		a.captureEnabled = enabled
 		a.captureKnown = true
 	}
 }
 
+// capture cancels echo from one microphone frame into out.
 func (a *audioEcho) capture(mic, out []int16) error {
 	if a == nil {
 		return nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.nextReference()
+	if err := a.canceller.Playback(a.ref); err != nil {
+		return err
+	}
 	return a.canceller.Capture(mic, out)
 }
 

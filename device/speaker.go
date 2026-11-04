@@ -51,10 +51,9 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 	var pending []int16
 	var pendingIndex uint16
 	var pendingSamples int
-	var renderPending []int16
-	if onRender != nil {
-		renderPending = make([]int16, 0, frameSamples*channels*2)
-	}
+	// Reused by the audio callback so it never allocates (an allocation can
+	// stall the real-time thread on GC assist work).
+	var outSamples []int16
 	speaker := &Speaker{ctx: ctx}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
@@ -78,26 +77,22 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 			}
 
 			samplesNeeded := int(frameCount) * channels
-			outSamples := make([]int16, samplesNeeded)
+			if cap(outSamples) < samplesNeeded {
+				outSamples = make([]int16, samplesNeeded)
+			}
+			outSamples = outSamples[:samplesNeeded]
 			filled := 0
 
-			pullMore := func() {
-				if len(pending) > 0 {
-					return
-				}
-				if frame, ok := speakerIn.pop(); ok && frame.Samples != nil {
-					pending = frame.Samples
-					pendingIndex = frame.MediaIndex
-					pendingSamples = 0
-				}
-			}
-
 			for filled < samplesNeeded {
-				pullMore()
 				if len(pending) == 0 {
-					for i := filled; i < samplesNeeded; i++ {
-						outSamples[i] = 0
+					if frame, ok := speakerIn.pop(); ok && frame.Samples != nil {
+						pending = frame.Samples
+						pendingIndex = frame.MediaIndex
+						pendingSamples = 0
 					}
+				}
+				if len(pending) == 0 {
+					clear(outSamples[filled:])
 					break
 				}
 				n := copy(outSamples[filled:], pending)
@@ -111,24 +106,14 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 				}
 			}
 
-			b := int16ToBytes(outSamples)
-			if len(b) > len(pOutput) {
-				b = b[:len(pOutput)]
+			n := min(len(outSamples), len(pOutput)/2)
+			for i, v := range outSamples[:n] {
+				pOutput[2*i] = byte(v)
+				pOutput[2*i+1] = byte(v >> 8)
 			}
-			copy(pOutput, b)
-			if len(b) < len(pOutput) {
-				for i := len(b); i < len(pOutput); i++ {
-					pOutput[i] = 0
-				}
-			}
+			clear(pOutput[2*n:])
 			if onRender != nil {
-				renderPending = append(renderPending, outSamples...)
-				frameSize := frameSamples * channels
-				for len(renderPending) >= frameSize {
-					onRender(renderPending[:frameSize])
-					copy(renderPending, renderPending[frameSize:])
-					renderPending = renderPending[:len(renderPending)-frameSize]
-				}
+				onRender(outSamples)
 			}
 		},
 		Stop: func() {
@@ -180,13 +165,4 @@ func (s *Speaker) Close() {
 			s.ctx.Free()
 		}
 	})
-}
-
-func int16ToBytes(samples []int16) []byte {
-	b := make([]byte, len(samples)*2)
-	for i, v := range samples {
-		b[2*i] = byte(v)
-		b[2*i+1] = byte(v >> 8)
-	}
-	return b
 }
