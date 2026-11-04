@@ -1,9 +1,13 @@
 package device
 
-import "time"
+import (
+	"fmt"
+	"log"
+	"time"
+)
 
 // systemVoiceLatencyBlocks estimates the playback latency of the system
-// voice unit in callback blocks (the unit's own buffer plus output).
+// voice unit in callback blocks, used only if the system reports none.
 const systemVoiceLatencyBlocks = 2
 
 // StartSystemVoice runs a call's audio through the system voice unit (see
@@ -75,6 +79,17 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick int, speakerIn *PlaybackQu
 		}
 		return nil, nil, err
 	}
+	// Ask the system how late rendered audio becomes audible, for video
+	// sync, instead of guessing. Set before the speaker is handed out: the
+	// clock fields are read by other goroutines afterwards.
+	out, in := vio.Latency(false), vio.Latency(true)
+	if total := out.Total(); total > 0 && samplesPerMediaTick > 0 {
+		speaker.playbackLatencyTicks = uint32(total * time.Duration(sampleRate) / time.Second / time.Duration(samplesPerMediaTick))
+	}
+	speaker.latencySamples = int(out.Total() * time.Duration(sampleRate) / time.Second)
+	speaker.info = fmt.Sprintf("system voice: output %v; input %v", out, in)
+	log.Printf("[audio] %s", speaker.info)
+
 	speaker.closeDevice = func() {
 		vio.Close()
 		if micOut != nil {

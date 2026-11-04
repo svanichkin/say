@@ -67,3 +67,44 @@ func TestApplyAudioSettingsLive(t *testing.T) {
 		t.Fatal("zero lead accepted")
 	}
 }
+
+func TestAudioSettingsWithSystemVoice(t *testing.T) {
+	defer func(period, periods, lead int) {
+		SetSpeakerBuffer(period*audioFrameMillis, periods)
+		SetJitterLead(lead * audioFrameMillis)
+	}(audioSpeakerPeriodFrames, audioSpeakerPeriods, audioBufferLeadFrames)
+	SetSpeakerBuffer(20, 2)
+	SetJitterLead(40)
+
+	cmds := make(chan func(*audioPlayout), 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	p := newAudioPlayout(fakeDecoder{frame: 160}, 160, device.NewPlaybackQueue(8))
+	go func() {
+		for {
+			select {
+			case f := <-cmds:
+				f(p)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	restarted := false
+	l := &liveAudio{playoutCmds: cmds, stopCh: stop,
+		restartSpeaker: func(int, int) error { restarted = true; return nil },
+		speakerInfo:    func() string { return "system voice: output 40.3 ms" }}
+	registerLiveAudio(l)
+	defer unregisterLiveAudio(l)
+
+	reply, err := ApplyAudioSettings(120, 60, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted || audioSpeakerPeriodFrames != 1 || audioSpeakerPeriods != 2 {
+		t.Fatalf("speaker changed with system voice: restarted=%v, %d x %d", restarted, audioSpeakerPeriodFrames, audioSpeakerPeriods)
+	}
+	if !strings.Contains(reply, "lead 120 ms") || !strings.Contains(reply, "system voice: output 40.3 ms") || strings.Contains(reply, "speaker 20 ms") {
+		t.Fatalf("reply: %s", reply)
+	}
+}

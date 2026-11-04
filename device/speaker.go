@@ -34,6 +34,17 @@ type Speaker struct {
 	release func()
 	// closeDevice replaces the malgo device for other backends (system voice).
 	closeDevice func()
+	// info describes a system-managed device (system voice); empty for malgo.
+	info string
+}
+
+// Info describes a device whose buffers the system manages (-sysaudio):
+// its reported latencies. Empty for Say's own speaker.
+func (s *Speaker) Info() string {
+	if s == nil {
+		return ""
+	}
+	return s.info
 }
 
 // LatencySamples is the configured device buffer (period × periods) in

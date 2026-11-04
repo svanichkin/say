@@ -17,6 +17,7 @@ type liveAudio struct {
 	stopCh         <-chan struct{}
 	restartSpeaker func(periodFrames, periods int) error
 	aec            *audioEcho
+	speakerInfo    func() string // the system-managed device's latencies (-sysaudio), or ""
 }
 
 var (
@@ -58,16 +59,26 @@ func (l *liveAudio) run(f func(*audioPlayout)) bool {
 
 // AudioSettings describes the buffers in use, for the "-audio" chat command.
 func AudioSettings() string {
-	text := fmt.Sprintf("audio: lead %d ms, speaker %d ms x %d", audioBufferLeadFrames*audioFrameMillis,
-		audioSpeakerPeriodFrames*audioFrameMillis, audioSpeakerPeriods)
 	liveMu.Lock()
 	l := live
 	liveMu.Unlock()
+	system := ""
+	if l != nil && l.speakerInfo != nil {
+		system = l.speakerInfo()
+	}
+	text := fmt.Sprintf("audio: lead %d ms", audioBufferLeadFrames*audioFrameMillis)
+	if system == "" {
+		text += fmt.Sprintf(", speaker %d ms x %d", audioSpeakerPeriodFrames*audioFrameMillis, audioSpeakerPeriods)
+	}
 	if l != nil {
 		var cur, queued int
 		if l.run(func(p *audioPlayout) { cur = p.lead; queued = p.out.QueuedSamples() * 1000 / audioSampleRate }) {
 			text += fmt.Sprintf(" (lead now %d ms, queued %d ms)", cur*audioFrameMillis, queued)
 		}
+	}
+	if system != "" {
+		// The system sets the speaker buffer: only the lead can change.
+		return text + "; " + system + ". Change: -audio LEAD PERIOD PERIODS (only LEAD applies with -sysaudio)"
 	}
 	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 40 20 2"
 }
@@ -79,16 +90,21 @@ func ApplyAudioSettings(leadMs, periodMs, periods int) (string, error) {
 	if leadMs < 1 || periodMs < 1 || periods < 2 {
 		return "", fmt.Errorf("want -audio LEAD PERIOD PERIODS with positive milliseconds and at least 2 periods")
 	}
-	oldPeriod, oldPeriods := audioSpeakerPeriodFrames, audioSpeakerPeriods
-	SetSpeakerBuffer(periodMs, periods)
-	SetJitterLead(leadMs)
-	lead, leadMin, low := audioBufferLeadFrames, audioLeadMinFrames, audioPlayoutLowFrames
-
 	liveMu.Lock()
 	l := live
 	liveMu.Unlock()
+	// With -sysaudio the system sets the speaker buffer: only the lead applies.
+	system := l != nil && l.speakerInfo != nil && l.speakerInfo() != ""
+
+	oldPeriod, oldPeriods := audioSpeakerPeriodFrames, audioSpeakerPeriods
+	if !system {
+		SetSpeakerBuffer(periodMs, periods)
+	}
+	SetJitterLead(leadMs)
+	lead, leadMin, low := audioBufferLeadFrames, audioLeadMinFrames, audioPlayoutLowFrames
+
 	if l != nil {
-		if audioSpeakerPeriodFrames != oldPeriod || audioSpeakerPeriods != oldPeriods {
+		if !system && (audioSpeakerPeriodFrames != oldPeriod || audioSpeakerPeriods != oldPeriods) {
 			if err := l.restartSpeaker(audioSpeakerPeriodFrames, audioSpeakerPeriods); err != nil {
 				return "", fmt.Errorf("speaker restart: %w", err)
 			}

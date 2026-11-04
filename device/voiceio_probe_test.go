@@ -36,6 +36,8 @@ func TestVoiceIOProbe(t *testing.T) {
 		t.Skipf("voice unit unavailable: %v", err)
 	}
 	time.Sleep(2 * time.Second)
+	t.Logf("output latency %v", vio.Latency(false))
+	t.Logf("input latency %v", vio.Latency(true))
 	vio.Close()
 	t.Logf("2 s: input %d frames in %d calls (max %d), output %d frames in %d calls (max %d), mic peak %d",
 		inFrames.Load(), inCalls.Load(), maxIn.Load(), outFrames.Load(), outCalls.Load(), maxOut.Load(), inPeak.Load())
