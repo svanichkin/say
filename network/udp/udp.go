@@ -682,6 +682,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			cleanReports   int
 			lastLossReport time.Time
 			videoSeq       byte
+			curHold        = videoShapeHold // raised on a lossy path, see nextVideoHold
 		)
 		fpsLimiter = time.NewTicker(time.Second / time.Duration(curFPS))
 		defer fpsLimiter.Stop()
@@ -725,6 +726,15 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					base := curFPS
 					if sentFPS > 0 && sentFPS < base {
 						base = sentFPS
+					}
+					cells := 0
+					if cols, rows, ok := ui.PeerSlot(); ok {
+						cells = cols * rows
+					}
+					if hold := nextVideoHold(curHold, videoShapeHold, maxVideoHold(cells), loss); hold != curHold {
+						logs.LogV("[video/udp] peer video loss %.0f%%: cell hold %d -> %d", loss*100, curHold, hold)
+						curHold = hold
+						netEncoder.SetShapeHold(curHold)
 					}
 					if next := nextVideoFPS(base, ceiling, loss, &cleanReports); next != curFPS {
 						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, curFPS, next)

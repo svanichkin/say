@@ -65,3 +65,25 @@ func TestKeyframeIntervalStaysAboutHalfASecond(t *testing.T) {
 		}
 	}
 }
+
+func TestVideoHoldAdaptsToLossAndPictureSize(t *testing.T) {
+	if maxVideoHold(800) != 32 || maxVideoHold(12800) != 128 || maxVideoHold(3700) != 80 {
+		t.Fatalf("max hold: %d, %d, %d (want 32, 128, 80)", maxVideoHold(800), maxVideoHold(12800), maxVideoHold(3700))
+	}
+	hold := 10
+	for i := 0; i < 10; i++ { // a bad path
+		hold = nextVideoHold(hold, 10, maxVideoHold(3168), 0.2)
+	}
+	if hold != maxVideoHold(3168) {
+		t.Fatalf("heavy loss: hold %d, want the %d ceiling", hold, maxVideoHold(3168))
+	}
+	for i := 0; i < 40; i++ { // clean again
+		hold = nextVideoHold(hold, 10, maxVideoHold(3168), 0)
+	}
+	if hold != 10 {
+		t.Fatalf("clean path: hold %d, want back at 10", hold)
+	}
+	if got := nextVideoHold(10, 10, 32, 0.05); got != 16 {
+		t.Fatalf("light loss: hold %d, want 16", got)
+	}
+}

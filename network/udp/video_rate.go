@@ -69,6 +69,45 @@ func (m *videoLossMeter) report(now time.Time) {
 	m.expected, m.lost, m.since = 0, 0, now
 }
 
+// Cell hold limits for a lossy path (see maxVideoHold): small pictures reach
+// at most videoHoldSmallMax, large ones videoHoldLargeMax, linearly between
+// videoHoldSmallCells and videoHoldLargeCells.
+const (
+	videoHoldSmallMax   = 32
+	videoHoldLargeMax   = 128
+	videoHoldSmallCells = 1000
+	videoHoldLargeCells = 6400
+	videoHoldStepUp     = 6 // light loss
+	videoHoldStepDown   = 4 // per clean report, back towards -video-hold
+)
+
+// maxVideoHold is the highest cell hold for a picture of the given size: a
+// large picture tolerates coarser cells than a small one.
+func maxVideoHold(cells int) int {
+	switch {
+	case cells <= videoHoldSmallCells:
+		return videoHoldSmallMax
+	case cells >= videoHoldLargeCells:
+		return videoHoldLargeMax
+	}
+	return videoHoldSmallMax + (videoHoldLargeMax-videoHoldSmallMax)*(cells-videoHoldSmallCells)/(videoHoldLargeCells-videoHoldSmallCells)
+}
+
+// nextVideoHold raises the cell hold (fewer changed cells, smaller frames) while
+// the peer loses frames and lowers it back to base on a clean path.
+func nextVideoHold(cur, base, maxHold int, loss float64) int {
+	maxHold = max(maxHold, base)
+	switch {
+	case loss >= videoLossHeavy:
+		return min(maxHold, max(cur, base)*3/2+8)
+	case loss >= videoLossLight:
+		return min(maxHold, cur+videoHoldStepUp)
+	case loss < videoLossClean:
+		return max(base, cur-videoHoldStepDown)
+	}
+	return cur
+}
+
 // nextVideoFPS adapts the sender's frame rate to the peer's reported loss.
 // clean counts consecutive clean reports.
 func nextVideoFPS(cur, maxFPS int, loss float64, clean *int) int {

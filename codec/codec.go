@@ -1428,8 +1428,7 @@ func clampByte(v int) int {
 // difference (sum over the three channels) below which a cell keeps its
 // previous glyph and colours. 0 disables the hold.
 func (e *Encoder) SetShapeHold(threshold int) {
-	e.holdBits = max(0, threshold)
-	e.prevCells = 0
+	e.holdBits = max(0, threshold) // the held cells stay valid for the new threshold
 }
 
 // holdShapes keeps a cell exactly as it was (glyph and both colours) while
