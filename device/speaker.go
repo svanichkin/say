@@ -49,7 +49,7 @@ type PlaybackFrame struct {
 // It reports every played sample back to speakerIn so its latency accounting stays exact.
 // stopCh is observed to output silence when the session stops, and onStop is invoked when
 // the underlying device stops unexpectedly.
-func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
+func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		log.Printf("[malgo] %s", message)
 	})
@@ -65,9 +65,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 	// The 40 ms/two-period configuration crackled with video even when the
 	// application playback queue stayed full and callbacks arrived on time.
 	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
-	if deviceConfig.Periods < 4 {
-		deviceConfig.Periods = 4
-	}
+	deviceConfig.Periods = uint32(max(periods, 2))
 
 	var pending []int16
 	var pendingIndex uint16

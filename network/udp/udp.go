@@ -33,34 +33,72 @@ const (
 	mediaKindVideo   byte = 1
 
 	// Datagram header is [kind:1 | timestamp high:7][timestamp low:8].
-	mediaHeaderBytes                = 2 // packed kind and 15-bit timestamp
-	mediaIndexBytes                 = 2 // timestamp bytes in internal audio/video queues
-	mediaIndexMask           uint16 = 0x7fff
-	mediaIndexHalf           uint16 = 0x4000
-	mediaTickDuration               = 4 * time.Millisecond
-	mediaTickSamples                = 32                        // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                 = 5                         // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames           = 6                         // initial jitter buffer lead: 120 ms; adapts between the two limits below
-	audioLeadMinFrames              = audioPlayoutLowFrames + 2 // 120 ms above nothing: one device period plus 40 ms
-	audioLeadMaxFrames              = 32                        // 640 ms, the fixed lead of v0.1.3
-	audioLeadGrowFrames             = 2                         // per packet that arrived after its slot
-	audioLeadShrinkQuiet            = 10 * time.Second          // no late packets for this long…
-	audioLeadShrinkEvery            = 5 * time.Second           // …shrinks the lead by one frame this often
-	audioQuietRMS                   = 300                       // frames below this RMS count as silence when shrinking the lead
-	audioBufferMaxFrames            = 128                       // queue capacity: 2.56 s
-	audioMaxConsecutivePLCs         = 32                        // tolerate up to 640 ms of missing media before resync
-	audioSpeakerPeriodFrames        = 4                         // 80 ms device period, matching the clean v0.1.3 playback configuration
-	audioPlayoutLowFrames           = audioSpeakerPeriodFrames  // conceal once less than one device period is queued
-	audioCaptureResync              = 60 * time.Millisecond     // capture timeline gap that means lost samples
-	audioDTXUpdateFrames            = 8                         // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames             = 64                        // 1.28 s of queued playback triggers a trim…
-	audioQueueTargetFrames          = audioBufferLeadFrames     // …down to the jitter buffer lead
-	videoBaseStaleThreshold         = 250 * time.Millisecond
-	videoMaxStaleThreshold          = 3 * time.Second
-	videoMaxQueuedFrames            = 96                     // ~3 s at 30 fps
-	videoAudioClockStall            = 200 * time.Millisecond // audio clock considered stopped
-	videoMaxLeadTicks               = int32(videoMaxStaleThreshold / mediaTickDuration)
+	mediaHeaderBytes               = 2 // packed kind and 15-bit timestamp
+	mediaIndexBytes                = 2 // timestamp bytes in internal audio/video queues
+	mediaIndexMask          uint16 = 0x7fff
+	mediaIndexHalf          uint16 = 0x4000
+	mediaTickDuration              = 4 * time.Millisecond
+	mediaTickSamples               = 32                    // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5                     // 20 ms audio frame on a 4 ms common media timeline
+	audioLeadMaxFrames             = 32                    // 640 ms, the fixed lead of v0.1.3
+	audioLeadGrowFrames            = 2                     // per packet that arrived after its slot
+	audioLeadShrinkQuiet           = 10 * time.Second      // no late packets for this long…
+	audioLeadShrinkEvery           = 5 * time.Second       // …shrinks the lead by one frame this often
+	audioQuietRMS                  = 300                   // frames below this RMS count as silence when shrinking the lead
+	audioBufferMaxFrames           = 128                   // queue capacity: 2.56 s
+	audioMaxConsecutivePLCs        = 32                    // tolerate up to 640 ms of missing media before resync
+	audioCaptureResync             = 60 * time.Millisecond // capture timeline gap that means lost samples
+	audioDTXUpdateFrames           = 8                     // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames            = 64                    // 1.28 s of queued playback triggers a trim…
+	videoBaseStaleThreshold        = 250 * time.Millisecond
+	videoMaxStaleThreshold         = 3 * time.Second
+	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
+	videoAudioClockStall           = 200 * time.Millisecond // audio clock considered stopped
+	videoMaxLeadTicks              = int32(videoMaxStaleThreshold / mediaTickDuration)
 )
+
+// Audio buffer settings, adjustable with -lead, -speaker-period and
+// -speaker-periods (see SetJitterLead, SetSpeakerBuffer). Derived values are
+// recomputed by the setters.
+var (
+	audioSpeakerPeriodFrames = 4                            // device period: 80 ms, as in v0.1.3
+	audioSpeakerPeriods      = 4                            // device buffer: 4 periods = 320 ms
+	audioPlayoutLowFrames    = audioSpeakerPeriodFrames     // conceal once less than one device period is queued
+	audioLeadMinFrames       = audioPlayoutLowFrames + 2    // one device period plus 40 ms
+	audioBufferLeadFrames    = 6                            // initial jitter buffer lead: 120 ms; adapts up to audioLeadMaxFrames
+	audioQueueTargetFrames   = audioBufferLeadFrames        // queue trim target
+	audioEchoRefMaxFrames    = 3 * audioSpeakerPeriodFrames // echo reference queue limit…
+	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames // …and its trim depth
+)
+
+// SetSpeakerBuffer sets the speaker device period (ms, rounded to 20 ms
+// frames) and number of periods for future sessions. Zero keeps a value.
+func SetSpeakerBuffer(periodMs, periods int) {
+	if periodMs > 0 {
+		audioSpeakerPeriodFrames = max(1, (periodMs+audioFrameMillis/2)/audioFrameMillis)
+	}
+	if periods > 0 {
+		audioSpeakerPeriods = max(2, periods)
+	}
+	audioPlayoutLowFrames = audioSpeakerPeriodFrames
+	audioLeadMinFrames = audioPlayoutLowFrames + 2
+	audioEchoRefMaxFrames = 3 * audioSpeakerPeriodFrames
+	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames
+	SetJitterLead(audioBufferLeadFrames * audioFrameMillis)
+}
+
+// SetJitterLead sets the initial jitter buffer lead (ms) for future sessions.
+// It must exceed one device period; a lower value also lowers the adaptive
+// minimum.
+func SetJitterLead(ms int) {
+	if ms <= 0 {
+		return
+	}
+	frames := max(audioPlayoutLowFrames+1, (ms+audioFrameMillis/2)/audioFrameMillis)
+	audioBufferLeadFrames = min(frames, audioLeadMaxFrames)
+	audioLeadMinFrames = min(audioPlayoutLowFrames+2, audioBufferLeadFrames)
+	audioQueueTargetFrames = audioBufferLeadFrames
+}
 
 // Configure toggles voice/video capture for future UDP sessions.
 func Configure(enableVoice, enableVideo bool) {
@@ -330,7 +368,10 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if aec != nil {
 			onRender = aec.playback
 		}
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*audioSpeakerPeriodFrames, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
+		log.Printf("[audio] speaker buffer %d ms (%d x %d ms), jitter buffer lead from %d ms (min %d, max %d)",
+			audioSpeakerPeriodFrames*audioSpeakerPeriods*audioFrameMillis, audioSpeakerPeriods, audioSpeakerPeriodFrames*audioFrameMillis,
+			audioBufferLeadFrames*audioFrameMillis, audioLeadMinFrames*audioFrameMillis, audioLeadMaxFrames*audioFrameMillis)
+		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*audioSpeakerPeriodFrames, audioSpeakerPeriods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}

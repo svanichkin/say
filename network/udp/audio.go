@@ -138,13 +138,8 @@ func (amrAudioDecoder) IsDTXFrame(payload []byte) bool {
 // frame takes exactly one frame of reference from it and calls Playback
 // immediately before Capture, so the canceller's queue never over- or
 // underflows. Alignment follows sample counts, not callback timing.
-const (
-	// Allow overlap between whole speaker periods and batched microphone
-	// callbacks. The old 100 -> 40 ms trim discarded live reference with an
-	// 80 ms speaker period, depending on the phase of the two devices.
-	audioEchoRefMaxFrames    = 3 * audioSpeakerPeriodFrames
-	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames
-)
+// audioEchoRefMaxFrames/TargetFrames (udp.go) allow overlap between whole
+// speaker periods and batched microphone callbacks.
 
 // audioEcho pairs the rendered far-end audio with microphone frames.
 type audioEcho struct {

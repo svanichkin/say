@@ -18,6 +18,14 @@ type yggTransport struct {
 	readyOnce sync.Once
 }
 
+// lanEnabled turns on Yggdrasil LAN discovery (multicast); see SetLAN.
+var lanEnabled = true
+
+// SetLAN enables or disables LAN discovery for transports set up afterwards.
+func SetLAN(enabled bool) {
+	lanEnabled = enabled
+}
+
 func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	t := &yggTransport{
 		readyCh: make(chan struct{}),
@@ -29,7 +37,7 @@ func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	// LAN discovery: peers in the same local network (or on the same machine)
 	// find each other by multicast and connect directly instead of through
 	// public peers on the internet, which cuts latency and jitter.
-	ygg.SetLAN(true, "")
+	ygg.SetLAN(lanEnabled, "")
 	ygg.SetConnectivityHandler(func(connected bool) {
 		if connected {
 			t.readyOnce.Do(func() {

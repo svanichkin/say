@@ -234,6 +234,9 @@ of the current media protocol. Relevant CLI switches:
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP). With `ygg`, nodes in the same local network discover each other by multicast and connect directly, bypassing internet peers.
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is sent and the rate adapts to the peer's frame loss (down to 5 fps).
+- `-lead=MS` – initial jitter buffer lead in milliseconds (default `120`); it still grows when packets arrive late and shrinks on a steady network.
+- `-speaker-period=MS` and `-speaker-periods=N` – speaker device buffer: period length (default `80`, rounded to 20 ms) and number of periods (default `4`). Smaller means lower latency but more risk of crackling.
+- `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-novideo` – audio and chat only: the camera is not opened and no video is encoded or drawn.
 - `-aec=true` – enable acoustic echo cancellation (off by default; it can colour the voice).

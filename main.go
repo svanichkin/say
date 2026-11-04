@@ -114,6 +114,9 @@ func run() (err error) {
 
 	udptransport.Configure(true, !opts.NoVideo)
 	udptransport.SetMicrophone(!opts.NoMic)
+	udptransport.SetSpeakerBuffer(opts.SpeakerMs, opts.SpeakerN)
+	udptransport.SetJitterLead(opts.LeadMs)
+	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {
