@@ -32,9 +32,8 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 	cfg.Capture.Format = malgo.FormatS16
 	cfg.Capture.Channels = uint32(channels)
 	cfg.SampleRate = uint32(sampleRate)
-	// Match the AEC/audio codec processing cadence (20 ms). The sender still handles
-	// backends that return a different callback size by re-framing the PCM.
-	cfg.PeriodSizeInMilliseconds = 20
+	// Keep the backend's default capture period, as in v0.1.3 (60 ms blocks on
+	// macOS). The sender re-frames the PCM into 20 ms codec frames.
 
 	var mu sync.Mutex
 	closed := false
