@@ -48,6 +48,15 @@ type audioPlayout struct {
 	lossMissing  uint64
 	lossWindow   time.Time
 
+	// Adaptive jitter buffer lead in frames (audioLeadMinFrames..Max). A
+	// packet arriving after its slot grows it; quiet periods shrink it.
+	lead       int
+	expand     int  // frames still to insert to reach a grown lead
+	shrink     bool // drop the next quiet frame to reach a shrunk lead
+	lastLateAt time.Time
+	lastAdapt  time.Time
+	lateEvents int64 // packets that arrived after their slot (for tests and logs)
+
 	lowWater     int // samples; conceal below this
 	maxQueued    int
 	targetQueued int
@@ -66,6 +75,7 @@ func newAudioPlayout(dec audioDecoder, frameSamples int, out *device.PlaybackQue
 		scratch:      make([]int16, frameSamples),
 		lossWindow:   time.Now(),
 		lowWater:     frameSamples * audioPlayoutLowFrames,
+		lead:         audioBufferLeadFrames,
 		maxQueued:    frameSamples * audioQueueMaxFrames,
 		targetQueued: frameSamples * audioQueueTargetFrames,
 	}
@@ -113,6 +123,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 			p.reset()
 		} else {
 			diag.RxLate.Inc()
+			p.growLead(now)
 			return
 		}
 	}
@@ -135,6 +146,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 
 	if !p.started {
 		p.started, p.nextIndex = true, index
+		p.lastLateAt, p.lastAdapt = now, now
 	}
 	rel := mediaIndexDelta(index, p.nextIndex)
 	if rel > audioMaxConsecutivePLCs*audioFrameTicks && receivedGap > audioMaxConsecutivePLCs*audioFrameTicks {
@@ -149,7 +161,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		p.nextIndex = index
 	}
 	if !p.ready && p.primeDeadline.IsZero() {
-		p.primeDeadline = now.Add(time.Duration(audioBufferLeadFrames*audioFrameMillis) * time.Millisecond)
+		p.primeDeadline = now.Add(time.Duration(p.lead*audioFrameMillis) * time.Millisecond)
 	}
 	p.insert(queuedPacket{index: index, payload: append([]byte(nil), payload...)})
 	p.pump(now)
@@ -217,7 +229,7 @@ func (p *audioPlayout) slotDue(now time.Time) bool {
 	// While priming nothing plays yet; give reordered packets a full lead
 	// of later audio to arrive before declaring the slot lost.
 	newest := p.pending[len(p.pending)-1].index
-	return mediaIndexDelta(newest, p.nextIndex) >= audioBufferLeadFrames*audioFrameTicks
+	return mediaIndexDelta(newest, p.nextIndex) >= int32(p.lead*audioFrameTicks)
 }
 
 // onTick conceals the next slot when the speaker is about to run dry.
@@ -240,6 +252,7 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 			diag.RxConcealTick.Inc()
 		}
 	}
+	p.adaptLead(now)
 	if !p.ready || len(p.pending) > 0 || p.out.QueuedSamples() >= p.lowWater {
 		return
 	}
@@ -288,11 +301,18 @@ func (p *audioPlayout) push(pcm []int16) {
 	copy(samples, pcm)
 	frame := device.PlaybackFrame{Samples: samples, MediaIndex: p.nextIndex}
 	p.nextIndex = advanceMediaIndex(p.nextIndex, audioFrameTicks)
+	if p.ready && p.shrink && p.out.QueuedSamples() > p.frameSamples*p.lead && isQuiet(samples) {
+		// Skip a frame of near-silence to shorten the buffer inaudibly; the
+		// media timeline still advances, so video sync stays correct.
+		p.shrink = false
+		diag.RxShrunk.Inc()
+		return
+	}
 
 	if !p.ready {
 		p.pre = append(p.pre, frame)
 		p.preSample += len(samples)
-		if p.preSample < p.frameSamples*audioBufferLeadFrames {
+		if p.preSample < p.frameSamples*p.lead {
 			return
 		}
 		for _, f := range p.pre {
@@ -306,11 +326,62 @@ func (p *audioPlayout) push(pcm []int16) {
 	// Bound latency by queued audio time: after a network stall the delayed
 	// burst would otherwise stay queued and delay all further speech. The
 	// speaker crossfades over the resulting discontinuity.
-	if dropped := p.out.TrimLatency(p.maxQueued, p.targetQueued); dropped > 0 {
+	if dropped := p.out.TrimLatency(p.maxQueued, p.frameSamples*p.lead); dropped > 0 {
 		diag.RxTrimmed.Add(int64(dropped))
 		logs.LogV("[voice/udp] drop %d stale audio frames (playback latency over %d ms)",
 			dropped, audioQueueMaxFrames*audioFrameMillis)
 	}
+}
+
+// growLead reacts to a packet that arrived after its slot was concealed:
+// the buffer was too short for the network's jitter.
+func (p *audioPlayout) growLead(now time.Time) {
+	p.lateEvents++
+	p.lastLateAt = now
+	if !p.ready || p.lead >= audioLeadMaxFrames {
+		return
+	}
+	grow := min(audioLeadGrowFrames, audioLeadMaxFrames-p.lead)
+	p.lead += grow
+	p.expand += grow
+	p.lastAdapt = now
+	logs.LogV("[voice/udp] jitter buffer lead grows to %d ms", p.lead*audioFrameMillis)
+}
+
+// adaptLead inserts the frames a grown lead still needs, and shrinks the
+// lead again after a quiet period.
+func (p *audioPlayout) adaptLead(now time.Time) {
+	diag.RxLeadMs.Observe(int64(p.lead * audioFrameMillis))
+	if !p.ready {
+		p.expand = 0
+		return
+	}
+	if p.expand > 0 {
+		// Play one extra concealed frame without consuming a slot: the
+		// timeline shifts by a frame and later packets get more time.
+		p.expand--
+		next := p.nextIndex
+		if p.conceal() {
+			p.nextIndex = next
+			diag.RxExpanded.Inc()
+		}
+		return
+	}
+	if p.lead > audioLeadMinFrames && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
+		p.lead--
+		p.lastAdapt = now
+		p.shrink = true // push drops the next quiet frame
+		logs.LogV("[voice/udp] jitter buffer lead shrinks to %d ms", p.lead*audioFrameMillis)
+	}
+}
+
+// isQuiet reports whether a frame is near-silent (pause between words).
+func isQuiet(samples []int16) bool {
+	var acc int64
+	for _, v := range samples {
+		acc += int64(v) * int64(v)
+	}
+	return acc < int64(len(samples))*audioQuietRMS*audioQuietRMS
 }
 
 func (p *audioPlayout) recordLoss(delta int32, afterSID bool, now time.Time) {
