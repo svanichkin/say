@@ -7,6 +7,7 @@ import (
 	"time"
 
 	malgo "github.com/gen2brain/malgo"
+	"github.com/svanichkin/say/diag"
 )
 
 // AudioCaptureFrame is a microphone block and the monotonic time at which
@@ -37,6 +38,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 
 	var mu sync.Mutex
 	closed := false
+	var lastCallbackAt time.Time
 
 	callbacks := malgo.DeviceCallbacks{
 		Data: func(pOutput, pInput []byte, frameCount uint32) {
@@ -44,6 +46,26 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 				return
 			}
 			samples := bytesToInt16Mic(pInput)
+			now := time.Now()
+			if !lastCallbackAt.IsZero() {
+				ivl := now.Sub(lastCallbackAt).Microseconds()
+				diag.MicIntervalMaxUs.Observe(ivl)
+				diag.MicIntervalMinUs.Observe(ivl)
+			}
+			lastCallbackAt = now
+			diag.MicCallbacks.Inc()
+			diag.MicSamples.Add(int64(len(samples)))
+			diag.MicBlockMin.Observe(int64(len(samples)))
+			diag.MicBlockMax.Observe(int64(len(samples)))
+			var peak int64
+			for _, v := range samples {
+				a := diag.Abs16(v)
+				peak = max(peak, a)
+				if a >= 32000 {
+					diag.MicClipped.Inc()
+				}
+			}
+			diag.MicPeak.Observe(peak)
 			// The callback runs once the block is complete; its first sample was
 			// captured one block duration earlier.
 			blockFrames := len(samples) / max(channels, 1)
@@ -52,6 +74,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			select {
 			case out <- frame:
 			default:
+				diag.MicDrops.Inc()
 				// Keep the newest capture time when downstream is late. The gap is
 				// visible to the media timeline instead of silently compressing audio.
 				select {

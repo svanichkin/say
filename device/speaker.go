@@ -4,8 +4,10 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	malgo "github.com/gen2brain/malgo"
+	"github.com/svanichkin/say/diag"
 )
 
 // Speaker handles audio playback via malgo.
@@ -57,6 +59,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 	var declick crossfade
 	var lastOut int16 // last sample written to the device
 	var starved bool  // the previous callback ran out of audio
+	var lastCallbackAt time.Time
 	speaker := &Speaker{ctx: ctx}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
@@ -78,6 +81,17 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 			if len(pOutput) == 0 || speakerIn == nil {
 				return
 			}
+			cbStart := time.Now()
+			if !lastCallbackAt.IsZero() {
+				ivl := cbStart.Sub(lastCallbackAt).Microseconds()
+				diag.SpkIntervalMaxUs.Observe(ivl)
+				diag.SpkIntervalMinUs.Observe(ivl)
+			}
+			lastCallbackAt = cbStart
+			diag.SpkCallbacks.Inc()
+			diag.SpkFrameCount.Observe(int64(frameCount))
+			defer func() { diag.SpkCallbackMaxUs.Observe(time.Since(cbStart).Microseconds()) }()
+			wasStarved := starved
 
 			samplesNeeded := int(frameCount) * channels
 			if cap(outSamples) < samplesNeeded {
@@ -89,6 +103,10 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 			for filled < samplesNeeded {
 				if len(pending) == 0 {
 					if frame, gap, ok := speakerIn.pop(); ok && frame.Samples != nil {
+						diag.SpkFrames.Inc()
+						if gap {
+							diag.SpkGaps.Inc()
+						}
 						pending = frame.Samples
 						pendingIndex = frame.MediaIndex
 						pendingSamples = 0
@@ -101,6 +119,12 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 					}
 				}
 				if len(pending) == 0 {
+					if filled == 0 && wasStarved {
+						diag.SpkIdle.Inc()
+					} else {
+						diag.SpkUnderruns.Inc()
+						diag.SpkUnderrunSamples.Add(int64(samplesNeeded - filled))
+					}
 					// Underrun: ramp the last sample down instead of stepping to zero.
 					declick.fadeOut(outSamples[filled:], lastOut)
 					lastOut = 0

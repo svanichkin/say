@@ -12,6 +12,7 @@ import (
 
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/device"
+	"github.com/svanichkin/say/diag"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 	"github.com/svanichkin/say/ui"
@@ -361,6 +362,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	}
 
 	// ======== Receiver and decoders ========
+	diag.Start(stopCh)
 	startReceiver(&wg, pc, stopCh, audioNetIn, videoNetIn, getPeer, setPeer)
 
 	if useVoice && audioNetIn != nil && audioSpeakerOut != nil {
@@ -454,7 +456,11 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			}
 
 			buf := make([]byte, maxAudioPacket)
+			diag.TxFrames.Inc()
+			diag.TxLagMaxMs.Observe(time.Since(capturedAt).Milliseconds())
+			encStart := time.Now()
 			written, err := enc.EncodeFrame(pcm, buf)
+			diag.TxEncodeMaxUs.Observe(time.Since(encStart).Microseconds())
 			if err != nil {
 				log.Printf("[voice/udp] %s encode error: bytes=%d err=%v", audioCodec, written, err)
 				if stop != nil {
@@ -463,6 +469,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 			if written == 0 {
+				diag.TxDTX.Inc()
 				// AMR-NB DTX omits NO_DATA frames from the wire while the timestamp
 				// still advances with the captured PCM timeline.
 				return true
@@ -476,6 +483,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			n, err := pc.WriteTo(out, addr)
 			if err != nil {
 				if !isFatalSendError(err) {
+					diag.TxSendErrors.Inc()
 					sendErrLog.report("voice", err)
 					return true
 				}
@@ -486,6 +494,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return false
 			}
 			sentPkts++
+			diag.TxPackets.Inc()
 			if n > mediaHeaderBytes {
 				sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
 			}
@@ -551,7 +560,14 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				// jump by a tick or two. Resynchronize only when samples were
 				// really lost, e.g. capture blocks dropped while we were late.
 				expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
+				if timelineValid {
+					d := capture.CapturedAt.Sub(expected).Microseconds()
+					diag.TxDeltaMaxUs.Observe(max(d, -d))
+				}
 				if delta := capture.CapturedAt.Sub(expected); !timelineValid || delta > audioCaptureResync || delta < -audioCaptureResync {
+					if timelineValid {
+						diag.TxResyncs.Inc()
+					}
 					pcmBuf = pcmBuf[:0]
 					pcmStartAt = capture.CapturedAt
 					timelineValid = true
