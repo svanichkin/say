@@ -144,12 +144,6 @@ type videoAdapt struct {
 // last second (0 if unknown), maxHold the hold ceiling for the picture size.
 func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold int) {
 	maxHold = max(maxHold, baseHold)
-	// Adapt from the rate actually sent: without a cap the limiter sits
-	// above the camera's own rate.
-	base := a.fps
-	if sentFPS > 0 && sentFPS < base {
-		base = sentFPS
-	}
 	switch {
 	case loss >= videoLossLight:
 		if a.hold < maxHold {
@@ -157,20 +151,28 @@ func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold in
 			a.clean = 0
 			return
 		}
+		// Lower from the rate actually sent: without a cap the limiter sits
+		// above the camera's own rate.
+		base := a.fps
+		if sentFPS > 0 && sentFPS < base {
+			base = sentFPS
+		}
 		if a.fpsTarget == 0 {
 			a.fpsTarget = base
 		}
 		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
 	case loss < videoLossClean:
-		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
+		// A clean report never lowers the rate: a second in which the camera
+		// delivered few frames (a busy machine) is not loss.
 		if a.fpsTarget > 0 {
+			a.fps = nextVideoFPS(a.fps, ceiling, loss, &a.clean)
 			if a.fps < min(a.fpsTarget, ceiling) {
 				return
 			}
-			a.fpsTarget = 0
+			a.fps, a.fpsTarget = ceiling, 0 // restored: lift the limiter again
 		}
 		a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
 	default:
-		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
+		a.clean = 0
 	}
 }

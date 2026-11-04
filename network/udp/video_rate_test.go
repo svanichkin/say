@@ -125,3 +125,16 @@ func TestVideoAdaptRaisesHoldBeforeLoweringFPS(t *testing.T) {
 		t.Fatalf("clean path: fps %d, hold %d; want %d, %d", a.fps, a.hold, ceiling, base)
 	}
 }
+
+func TestVideoAdaptCleanReportNeverLowersFPS(t *testing.T) {
+	a := videoAdapt{fps: 60, hold: 10}
+	// A busy machine: the camera delivered only 7 frames, no loss at all.
+	a.update(0, 7, 60, 10, 80)
+	if a.fps != 60 {
+		t.Fatalf("clean report with 7 frames sent: %d fps, want 60", a.fps)
+	}
+	a.update(0.02, 7, 60, 10, 80) // between clean and light loss
+	if a.fps != 60 {
+		t.Fatalf("2%% loss with 7 frames sent: %d fps, want 60", a.fps)
+	}
+}
