@@ -267,13 +267,7 @@ type AppOptions struct {
 	ColorFilter string
 	MaxVideoFPS int
 	AudioCodec  string
-	EchoCancel  bool
-	NoVideo     bool
-	NoMic       bool
 	NoLAN       bool
-	LeadMs      int // initial jitter buffer lead; 0: default
-	SpeakerMs   int // speaker device period; 0: default
-	SpeakerN    int // speaker device periods; 0: default
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -303,7 +297,6 @@ func ParseCLI() (*AppOptions, error) {
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
-		EchoCancel:  false,
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
@@ -762,22 +755,6 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", value)
 			}
 			opts.AudioCodec = codec
-		case "lead", "speaker-period", "speaker-periods":
-			if !hasValue || value == "" {
-				return fmt.Errorf("-%s requires a value", key)
-			}
-			n, err := strconv.Atoi(value)
-			if err != nil || n < 1 {
-				return fmt.Errorf("invalid -%s %q: want a positive number", key, value)
-			}
-			switch key {
-			case "lead":
-				opts.LeadMs = n
-			case "speaker-period":
-				opts.SpeakerMs = n
-			default:
-				opts.SpeakerN = n
-			}
 		case "nolan":
 			boolVal := true
 			if hasValue && value != "" {
@@ -788,36 +765,6 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.NoLAN = boolVal
-		case "nomic":
-			boolVal := true
-			if hasValue && value != "" {
-				parsed, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("invalid value for -nomic: %q", value)
-				}
-				boolVal = parsed
-			}
-			opts.NoMic = boolVal
-		case "novideo":
-			boolVal := true
-			if hasValue && value != "" {
-				parsed, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("invalid value for -novideo: %q", value)
-				}
-				boolVal = parsed
-			}
-			opts.NoVideo = boolVal
-		case "aec":
-			boolVal := true
-			if hasValue && value != "" {
-				parsed, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("invalid value for -aec: %q", value)
-				}
-				boolVal = parsed
-			}
-			opts.EchoCancel = boolVal
 		case "version":
 			boolVal := true
 			if hasValue && value != "" {
@@ -883,7 +830,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "lead", "speaker-period", "speaker-periods":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec":
 		return true
 	default:
 		return false

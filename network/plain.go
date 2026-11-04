@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -75,4 +76,8 @@ func detectPlainLocalAddr() string {
 	}
 
 	return fallbackV6
+}
+
+func (t *plainTransport) IsLocalPeer(host string) bool {
+	return isLocalIP(net.ParseIP(strings.Trim(host, "[]")))
 }

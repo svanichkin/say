@@ -56,7 +56,6 @@ func run() (err error) {
 	}
 
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
-	udptransport.SetEchoCancellation(opts.EchoCancel)
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
 		return err
 	}
@@ -112,10 +111,7 @@ func run() (err error) {
 		initialStatus = "Client starting…"
 	}
 
-	udptransport.Configure(true, !opts.NoVideo)
-	udptransport.SetMicrophone(!opts.NoMic)
-	udptransport.SetSpeakerBuffer(opts.SpeakerMs, opts.SpeakerN)
-	udptransport.SetJitterLead(opts.LeadMs)
+	udptransport.Configure(true, true)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
 	ui.EnsureRenderer(appCtx)
@@ -177,7 +173,10 @@ func run() (err error) {
 
 	var mediaFactory tcpsignal.MediaSessionFactory
 	if udpConn != nil {
-		mediaFactory = func(remote *net.UDPAddr) (tcpsignal.MediaSession, error) {
+		mediaFactory = func(peerHost string, remote *net.UDPAddr) (tcpsignal.MediaSession, error) {
+			// Pick the audio buffers for this call: a peer in the local
+			// network gets the low-latency set.
+			udptransport.ApplyNetworkProfile(transport.IsLocalPeer(peerHost))
 			return udptransport.StartSession(udpConn, remote)
 		}
 	}

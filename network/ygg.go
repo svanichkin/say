@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	ygg "github.com/svanichkin/ygg"
+	"github.com/yggdrasil-network/yggdrasil-go/src/address"
 )
 
 type yggTransport struct {
@@ -95,4 +97,22 @@ func (t *yggTransport) Close() error {
 		return nil
 	}
 	return t.node.Close()
+}
+
+// IsLocalPeer reports whether host is a direct Yggdrasil peer connected over
+// a local address, which is how LAN discovery (multicast) peers appear.
+func (t *yggTransport) IsLocalPeer(host string) bool {
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || t.node == nil || t.node.Core == nil {
+		return false
+	}
+	for _, p := range t.node.Core.GetPeers() {
+		if !p.Up || len(p.Key) == 0 {
+			continue
+		}
+		if net.IP(address.AddrForKey(p.Key)[:]).Equal(ip) && isLocalIP(uriHostIP(p.URI)) {
+			return true
+		}
+	}
+	return false
 }

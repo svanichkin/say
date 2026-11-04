@@ -9,4 +9,4 @@ type MediaSession interface {
 
 // MediaSessionFactory starts an optional media session for a given peer.
 // When remote is nil, the session should learn the peer from incoming traffic.
-type MediaSessionFactory func(remote *net.UDPAddr) (MediaSession, error)
+type MediaSessionFactory func(peerHost string, remote *net.UDPAddr) (MediaSession, error)

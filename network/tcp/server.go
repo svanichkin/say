@@ -125,7 +125,7 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 
 	// Start media session (audio/video) on incoming side, learning peer address from first packet.
 	if mediaFactory != nil {
-		if sess, err := mediaFactory(nil); err != nil {
+		if sess, err := mediaFactory(strings.Trim(hostOnly, "[]"), nil); err != nil {
 			log.Printf("[media] start incoming failed: %v", err)
 		} else if sess != nil {
 			defer sess.Stop()

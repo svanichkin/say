@@ -110,7 +110,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 		if err != nil {
 			log.Printf("[media] invalid remote address %q: %v", host, err)
 		} else {
-			if sess, err := mediaFactory(raddr); err != nil {
+			if sess, err := mediaFactory(strings.Trim(host, "[]"), raddr); err != nil {
 				log.Printf("[media] failed to start: %v", err)
 			} else if sess != nil {
 				defer sess.Stop()

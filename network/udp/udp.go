@@ -22,8 +22,6 @@ var (
 	useVideo    bool
 	maxVideoFPS = 0 // optional -fps cap; 0: no cap, the rate adapts to loss
 	audioCodec  = "amrnb"
-	echoCancel  = false
-	micEnabled  = true
 )
 
 const (
@@ -87,6 +85,26 @@ func SetSpeakerBuffer(periodMs, periods int) {
 	SetJitterLead(audioBufferLeadFrames * audioFrameMillis)
 }
 
+// Audio buffer sets per connection, tuned by listening tests: a peer reached
+// through the internet, and one directly in the local network.
+const (
+	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 60, 2, 120
+	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 80
+)
+
+// ApplyNetworkProfile selects the buffer set for the next session.
+func ApplyNetworkProfile(lan bool) {
+	if lan {
+		SetSpeakerBuffer(lanSpeakerPeriodMs, lanSpeakerPeriods)
+		SetJitterLead(lanLeadMs)
+		log.Printf("[audio] peer in the local network: %d ms x %d speaker buffer, %d ms lead", lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs)
+		return
+	}
+	SetSpeakerBuffer(netSpeakerPeriodMs, netSpeakerPeriods)
+	SetJitterLead(netLeadMs)
+	log.Printf("[audio] peer over the internet: %d ms x %d speaker buffer, %d ms lead", netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs)
+}
+
 // SetJitterLead sets the initial jitter buffer lead (ms) for future sessions.
 // It must exceed one device period; a lower value also lowers the adaptive
 // minimum.
@@ -104,18 +122,6 @@ func SetJitterLead(ms int) {
 func Configure(enableVoice, enableVideo bool) {
 	useVoice = enableVoice
 	useVideo = enableVideo
-}
-
-// SetMicrophone enables or disables microphone capture for future voice
-// sessions. Without it the session only plays the peer's audio.
-func SetMicrophone(enabled bool) {
-	micEnabled = enabled
-}
-
-// SetEchoCancellation enables or disables acoustic echo cancellation for
-// future voice sessions.
-func SetEchoCancellation(enabled bool) {
-	echoCancel = enabled
 }
 
 // SetAudioCodec selects the codec used by future voice sessions.
@@ -352,13 +358,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, err
 		}
-		if echoCancel {
-			aec, err = newAudioEcho(frameSamples)
-			if err != nil {
-				return nil, fmt.Errorf("echo canceller: %w", err)
-			}
-		} else {
-			log.Printf("[audio/aec] echo cancellation disabled")
+		aec, err = newAudioEcho(frameSamples)
+		if err != nil {
+			return nil, fmt.Errorf("echo canceller: %w", err)
 		}
 
 		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
@@ -383,14 +385,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		}
 
 		// Open capture last, immediately before starting its consumer.
-		if micEnabled {
-			audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
-			if err != nil {
-				return nil, fmt.Errorf("mic stream: %w", err)
-			}
-		} else {
-			// Listen only: no capture, so no audio is sent (the sender exits).
-			log.Printf("[audio] microphone disabled (-nomic)")
+		audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
+		if err != nil {
+			return nil, fmt.Errorf("mic stream: %w", err)
 		}
 	}
 	if err := sessionCtx.Err(); err != nil {
