@@ -87,3 +87,41 @@ func TestVideoHoldAdaptsToLossAndPictureSize(t *testing.T) {
 		t.Fatalf("light loss: hold %d, want 16", got)
 	}
 }
+
+func TestVideoAdaptRaisesHoldBeforeLoweringFPS(t *testing.T) {
+	const ceiling, base, maxHold = 25, 10, 80
+	a := videoAdapt{fps: ceiling, hold: base}
+	// Loss: the hold climbs to its maximum while the frame rate stays put.
+	for i := 0; a.hold < maxHold; i++ {
+		if i > 20 {
+			t.Fatalf("hold stuck at %d", a.hold)
+		}
+		a.update(0.2, ceiling, ceiling, base, maxHold)
+		if a.fps != ceiling {
+			t.Fatalf("fps lowered to %d while hold was %d < %d", a.fps, a.hold, maxHold)
+		}
+	}
+	// Only then the frame rate drops.
+	a.update(0.2, ceiling, ceiling, base, maxHold)
+	if a.fps >= ceiling || a.hold != maxHold {
+		t.Fatalf("hold exhausted: fps %d, hold %d; want fps below %d", a.fps, a.hold, ceiling)
+	}
+	a.update(0.05, a.fps, ceiling, base, maxHold)
+	low := a.fps
+	// Clean path: the frame rate comes back first, the detail after it.
+	for i := 0; a.fps < ceiling; i++ {
+		if i > 100 {
+			t.Fatalf("fps stuck at %d", a.fps)
+		}
+		if a.hold != maxHold {
+			t.Fatalf("hold lowered to %d at %d fps (from %d), before fps was restored", a.hold, a.fps, low)
+		}
+		a.update(0, a.fps, ceiling, base, maxHold)
+	}
+	for i := 0; i < 40; i++ {
+		a.update(0, a.fps, ceiling, base, maxHold)
+	}
+	if a.fps != ceiling || a.hold != base {
+		t.Fatalf("clean path: fps %d, hold %d; want %d, %d", a.fps, a.hold, ceiling, base)
+	}
+}

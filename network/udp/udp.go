@@ -718,13 +718,12 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		var fpsLimiter *time.Ticker
 		var (
 			ceiling        = videoFPSCeiling()
-			curFPS         = ceiling // adapted to the peer's video loss
-			cleanReports   int
 			lastLossReport time.Time
 			videoSeq       byte
-			curHold        = videoShapeHold // raised on a lossy path, see nextVideoHold
+			// adapted to the peer's video loss: hold first, then fps
+			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold}
 		)
-		fpsLimiter = time.NewTicker(time.Second / time.Duration(curFPS))
+		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
 		defer fpsLimiter.Stop()
 
 		for {
@@ -761,26 +760,20 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				// Adapt the frame rate to the peer's latest loss report.
 				if loss, at := ui.PeerVideoLossSnapshot(); fpsLimiter != nil && at.After(lastLossReport) {
 					lastLossReport = at
-					// Adapt from the rate actually sent: without a cap the
-					// limiter sits above the camera's own rate.
-					base := curFPS
-					if sentFPS > 0 && sentFPS < base {
-						base = sentFPS
-					}
 					cells := 0
 					if cols, rows, ok := ui.PeerSlot(); ok {
 						cells = cols * rows
 					}
-					if hold := nextVideoHold(curHold, videoShapeHold, maxVideoHold(cells), loss); hold != curHold {
-						logs.LogV("[video/udp] peer video loss %.0f%%: cell hold %d -> %d", loss*100, curHold, hold)
-						curHold = hold
-						netEncoder.SetShapeHold(curHold)
+					prevFPS, prevHold := adapt.fps, adapt.hold
+					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
+					if adapt.hold != prevHold {
+						logs.LogV("[video/udp] peer video loss %.0f%%: cell hold %d -> %d", loss*100, prevHold, adapt.hold)
+						netEncoder.SetShapeHold(adapt.hold)
 					}
-					if next := nextVideoFPS(base, ceiling, loss, &cleanReports); next != curFPS {
-						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, curFPS, next)
-						curFPS = next
-						fpsLimiter.Reset(time.Second / time.Duration(curFPS))
-						netEncoder.SetKeyframeInterval(videoKeyframeFrames(curFPS))
+					if adapt.fps != prevFPS {
+						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, prevFPS, adapt.fps)
+						fpsLimiter.Reset(time.Second / time.Duration(adapt.fps))
+						netEncoder.SetKeyframeInterval(videoKeyframeFrames(adapt.fps))
 					}
 				}
 

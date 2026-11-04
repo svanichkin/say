@@ -37,10 +37,11 @@ external Yggdrasil daemon or web stack.
 - Video in a two-pane terminal layout (square panes), synchronised with the
   audio of the same peer.
 - **Adaptive video frame rate and detail.** The receiver reports lost and
-  undecodable frames; on loss the sender lowers its frame rate and raises the
-  cell hold (coarser, lighter frames, up to 32 for small and 128 for large
-  pictures), and restores both when the path is clean (5 fps floor, optional
-  `-fps` cap).
+  undecodable frames; on loss the sender first raises the cell hold (coarser,
+  lighter frames, up to 32 for small and 128 for large pictures) and lowers
+  its frame rate only once the hold is at its maximum. On a clean path the
+  frame rate comes back first, then the detail (5 fps floor, optional `-fps`
+  cap).
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. A full frame follows

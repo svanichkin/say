@@ -129,3 +129,48 @@ func nextVideoFPS(cur, maxFPS int, loss float64, clean *int) int {
 	}
 	return cur
 }
+
+// videoAdapt is the sender's reaction to the peer's video loss. On loss it
+// first coarsens the picture (cell hold up to its maximum) and lowers the
+// frame rate only once the hold is exhausted; on a clean path it restores the
+// frame rate first and then the detail.
+type videoAdapt struct {
+	fps, hold int
+	fpsTarget int // rate to restore before the hold may drop; 0: fps not lowered
+	clean     int // consecutive clean reports (see nextVideoFPS)
+}
+
+// update applies one loss report. sentFPS is the rate actually sent in the
+// last second (0 if unknown), maxHold the hold ceiling for the picture size.
+func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold int) {
+	maxHold = max(maxHold, baseHold)
+	// Adapt from the rate actually sent: without a cap the limiter sits
+	// above the camera's own rate.
+	base := a.fps
+	if sentFPS > 0 && sentFPS < base {
+		base = sentFPS
+	}
+	switch {
+	case loss >= videoLossLight:
+		if a.hold < maxHold {
+			a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
+			a.clean = 0
+			return
+		}
+		if a.fpsTarget == 0 {
+			a.fpsTarget = base
+		}
+		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
+	case loss < videoLossClean:
+		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
+		if a.fpsTarget > 0 {
+			if a.fps < min(a.fpsTarget, ceiling) {
+				return
+			}
+			a.fpsTarget = 0
+		}
+		a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
+	default:
+		a.fps = nextVideoFPS(base, ceiling, loss, &a.clean)
+	}
+}
