@@ -40,7 +40,7 @@ const (
 	mediaTickDuration               = 4 * time.Millisecond
 	mediaTickSamples                = 32                        // 4 ms at the 8 kHz audio clock
 	audioFrameTicks                 = 5                         // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames           = 12                        // initial jitter buffer lead: 240 ms; adapts between the two limits below
+	audioBufferLeadFrames           = 6                         // initial jitter buffer lead: 120 ms; adapts between the two limits below
 	audioLeadMinFrames              = audioPlayoutLowFrames + 2 // 120 ms above nothing: one device period plus 40 ms
 	audioLeadMaxFrames              = 32                        // 640 ms, the fixed lead of v0.1.3
 	audioLeadGrowFrames             = 2                         // per packet that arrived after its slot
