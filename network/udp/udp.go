@@ -41,14 +41,14 @@ const (
 	mediaTickDuration               = 4 * time.Millisecond
 	mediaTickSamples                = 32                       // 4 ms at the 8 kHz audio clock
 	audioFrameTicks                 = 5                        // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames           = 6                        // 120 ms jitter buffer: 80 ms of jitter above the device period
-	audioBufferMaxFrames            = 32                       // 640 ms cap, allowing high-jitter bursts to drain
+	audioBufferLeadFrames           = 32                       // 640 ms jitter buffer, as in v0.1.3 (hypothesis test)
+	audioBufferMaxFrames            = 128                      // queue capacity: 2.56 s
 	audioMaxConsecutivePLCs         = 32                       // tolerate up to 640 ms of missing media before resync
 	audioSpeakerPeriodFrames        = 2                        // speaker device period: 40 ms, as in the G.722 version
 	audioPlayoutLowFrames           = audioSpeakerPeriodFrames // conceal once less than one device period is queued
 	audioCaptureResync              = 60 * time.Millisecond    // capture timeline gap that means lost samples
 	audioDTXUpdateFrames            = 8                        // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames             = 15                       // 300 ms of queued playback triggers a trim…
+	audioQueueMaxFrames             = 64                       // 1.28 s of queued playback triggers a trim…
 	audioQueueTargetFrames          = audioBufferLeadFrames    // …down to the jitter buffer lead
 	videoBaseStaleThreshold         = 250 * time.Millisecond
 	videoMaxStaleThreshold          = 3 * time.Second
