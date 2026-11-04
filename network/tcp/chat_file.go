@@ -16,26 +16,49 @@ import (
 	"github.com/svanichkin/say/ui"
 )
 
-const fileChunkBytes = 8 * 1024
+// fileChunkBytes is the file data per frame: the largest that fits the
+// 16-bit frame length together with the chunk header (id and offset).
+const fileChunkBytes = 60 * 1024
 
+// File transfer pacing. TCP alone would fill every queue on the path and
+// delay the call's audio and video, which share it; the pacer instead keeps
+// the extra delay it causes small (a delay-based controller like LEDBAT,
+// which background downloads use). The control connection's ping/pong is
+// the probe: it travels in the same TCP stream as the file data, so its RTT
+// grows as soon as the file builds a queue.
 const (
-	fileRateMin       = 16 * 1024
-	fileRateStart     = 64 * 1024
-	fileRateStep      = 8 * 1024
+	fileRateStart     = 1 << 20   // bytes/s
+	fileRateMin       = 64 * 1024 // bytes/s
+	fileRateIncrease  = 1.25      // per clean probe
+	fileRateDecrease  = 0.7       // when the queue or media loss grows
+	fileQueueTarget   = 40 * time.Millisecond
+	fileQueueSevere   = 200 * time.Millisecond
 	fileLossThreshold = 0.02
-	rttBaselineWindow = 30 * time.Second
+	fileLossSevere    = 0.05
+	fileSeverePause   = 200 * time.Millisecond
+	fileProbeInterval = 250 * time.Millisecond // ping interval while a file is sent
+	// fileBurstCredit lets the pacer catch up after sleeping too long (the
+	// Windows timer ticks every ~15.6 ms), so the average rate holds.
+	fileBurstCredit = 20 * time.Millisecond
+	// The base RTT is the minimum over rttBuckets of rttBucketSpan: long
+	// enough that a transfer's own queue does not become the baseline.
+	rttBucketSpan = 30 * time.Second
+	rttBuckets    = 10
 )
 
 var nextTransferID atomic.Uint32
 
 type adaptiveFilePacer struct {
 	mu          sync.Mutex
-	rate        int64
-	baseRTT     time.Duration
-	baseRTTAt   time.Time
-	goodReports int
-	pauseUntil  time.Time
+	rate        float64 // bytes/s
+	rttMin      [rttBuckets]time.Duration
+	rttBucket   int
+	rttBucketAt time.Time
 	activeFiles int
+	next        time.Time // when the next chunk may go (token bucket)
+	pauseUntil  time.Time
+	limited     bool      // the rate held the sender back since the last probe
+	holdUntil   time.Time // after a decrease: probes still show the old queue
 }
 
 func newAdaptiveFilePacer() *adaptiveFilePacer {
@@ -48,7 +71,7 @@ func (p *adaptiveFilePacer) beginFile() {
 	}
 	p.mu.Lock()
 	p.activeFiles++
-	p.goodReports = 0
+	p.limited = false
 	p.mu.Unlock()
 }
 
@@ -60,66 +83,108 @@ func (p *adaptiveFilePacer) endFile() {
 	if p.activeFiles > 0 {
 		p.activeFiles--
 	}
-	p.goodReports = 0
 	p.mu.Unlock()
 }
 
+// active reports whether a file is being sent (the keepalive then probes
+// more often).
+func (p *adaptiveFilePacer) active() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.activeFiles > 0
+}
+
+// baseRTT is the smallest RTT seen recently: the path without our queue.
+func (p *adaptiveFilePacer) baseRTT() time.Duration {
+	var base time.Duration
+	for _, r := range p.rttMin {
+		if r > 0 && (base == 0 || r < base) {
+			base = r
+		}
+	}
+	return base
+}
+
+func (p *adaptiveFilePacer) recordRTT(rtt time.Duration, now time.Time) {
+	if p.rttBucketAt.IsZero() {
+		p.rttBucketAt = now
+	}
+	for now.Sub(p.rttBucketAt) >= rttBucketSpan {
+		p.rttBucket = (p.rttBucket + 1) % rttBuckets
+		p.rttMin[p.rttBucket] = 0
+		p.rttBucketAt = p.rttBucketAt.Add(rttBucketSpan)
+	}
+	if cur := p.rttMin[p.rttBucket]; cur == 0 || rtt < cur {
+		p.rttMin[p.rttBucket] = rtt
+	}
+}
+
+// observe adapts the rate to one probe: the control connection's RTT and
+// the media loss the peer reports.
 func (p *adaptiveFilePacer) observe(rtt time.Duration, loss float64) {
+	p.observeAt(rtt, loss, time.Now())
+}
+
+func (p *adaptiveFilePacer) observeAt(rtt time.Duration, loss float64, now time.Time) {
 	if p == nil || rtt <= 0 {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := time.Now()
-	if p.baseRTT == 0 || now.Sub(p.baseRTTAt) > rttBaselineWindow {
-		p.baseRTT = rtt
-		p.baseRTTAt = now
-	} else if rtt < p.baseRTT {
-		p.baseRTT = rtt
-		p.baseRTTAt = now
-	}
+	p.recordRTT(rtt, now)
 	if p.activeFiles == 0 {
 		return
 	}
-	congestionRTT := p.baseRTT + 100*time.Millisecond
-	if scaled := p.baseRTT + p.baseRTT/2; scaled > congestionRTT {
-		congestionRTT = scaled
-	}
-	congested := loss >= fileLossThreshold || rtt > congestionRTT
-	if congested {
-		p.rate /= 2
-		if p.rate < fileRateMin {
-			p.rate = fileRateMin
-		}
-		p.goodReports = 0
-		if loss >= 0.05 || rtt > p.baseRTT+250*time.Millisecond {
-			p.pauseUntil = time.Now().Add(400 * time.Millisecond)
-		}
+	queue := rtt - p.baseRTT()
+	limited := p.limited
+	p.limited = false
+	if now.Before(p.holdUntil) {
+		// Probes sent before the last decrease still see the queue it
+		// is draining: one decrease per round trip, not one per probe.
 		return
 	}
-	p.goodReports++
-	if p.goodReports >= 3 {
-		p.rate += fileRateStep
-		p.goodReports = 0
+	switch {
+	case loss >= fileLossSevere || queue > fileQueueSevere:
+		p.rate *= 0.5
+		p.pauseUntil = now.Add(fileSeverePause)
+		p.holdUntil = now.Add(rtt + fileSeverePause)
+	case loss >= fileLossThreshold || queue > fileQueueTarget:
+		p.rate *= fileRateDecrease
+		p.holdUntil = now.Add(rtt)
+	case limited:
+		// Grow only while the rate holds the sender back: a slow disk or
+		// a small file must not leave a huge rate for the next burst.
+		p.rate *= fileRateIncrease
 	}
+	p.rate = max(p.rate, fileRateMin)
 }
 
+// waitAfterChunk paces the transfer: a token bucket at the current rate.
 func (p *adaptiveFilePacer) waitAfterChunk(n int) {
 	if p == nil || n <= 0 {
 		return
 	}
 	p.mu.Lock()
-	rate := p.rate
-	pause := time.Until(p.pauseUntil)
+	now := time.Now()
+	start := p.next
+	if earliest := now.Add(-fileBurstCredit); start.Before(earliest) {
+		start = earliest
+	}
+	if start.Before(p.pauseUntil) {
+		start = p.pauseUntil
+	}
+	p.next = start.Add(time.Duration(float64(n) / p.rate * float64(time.Second)))
+	wait := p.next.Sub(now)
+	if wait > 0 {
+		p.limited = true
+	}
 	p.mu.Unlock()
-	if rate < 1 {
-		rate = fileRateMin
+	if wait > time.Millisecond {
+		time.Sleep(wait)
 	}
-	delay := time.Duration((int64(n)*int64(time.Second) + int64(rate) - 1) / int64(rate))
-	if pause > 0 {
-		delay += pause
-	}
-	time.Sleep(delay)
 }
 
 type incomingFile struct {
@@ -221,12 +286,14 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 			fail(id, name, err.Error())
 			return
 		}
-		tmp := filepath.Join(dir, fmt.Sprintf(".%s.%d.part", name, id))
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		// A unique name: transfer ids restart with every call, and a part
+		// left by an interrupted transfer must not block the next one.
+		f, err := os.CreateTemp(dir, "."+name+".*.part")
 		if err != nil {
 			fail(id, name, err.Error())
 			return
 		}
+		tmp := f.Name()
 		abortIncoming(incoming)
 		*incoming = &incomingFile{id: id, name: name, total: total, tmp: tmp, file: f, began: time.Now()}
 		ui.SetReceiveProgress(name, 0, total)

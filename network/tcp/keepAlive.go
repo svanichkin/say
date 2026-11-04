@@ -99,7 +99,9 @@ func (ka *tcpKeepalive) expired(now time.Time) bool {
 }
 
 // startTCPKeepalive sends periodic pings and closes the connection if no matching pong arrives.
-func startTCPKeepalive(ctx context.Context, conn net.Conn, interval, timeout time.Duration, send bool) (*tcpKeepalive, func()) {
+// While fast reports true (a file is being sent) it pings every
+// fileProbeInterval: the file pacer measures its queue with these pings.
+func startTCPKeepalive(ctx context.Context, conn net.Conn, interval, timeout time.Duration, send bool, fast func() bool) (*tcpKeepalive, func()) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -122,13 +124,19 @@ func startTCPKeepalive(ctx context.Context, conn net.Conn, interval, timeout tim
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(interval)
+		tick := min(interval, fileProbeInterval)
+		ticker := time.NewTicker(tick)
 		defer ticker.Stop()
+		var lastPing time.Time
 		for {
 			select {
 			case <-keepCtx.Done():
 				return
-			case <-ticker.C:
+			case now := <-ticker.C:
+				if (fast == nil || !fast()) && now.Sub(lastPing) < interval-tick/2 {
+					continue
+				}
+				lastPing = now
 				payload := ka.newPing()
 				logs.LogV("[keepalive] ping → %T", conn)
 				if err := writeFrameSafe(conn, framePing, payload); err != nil {

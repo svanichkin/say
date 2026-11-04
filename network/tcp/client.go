@@ -95,7 +95,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
 
-	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, keepaliveInterval, keepaliveTimeout, true)
+	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, keepaliveInterval, keepaliveTimeout, true, pacer.active)
 	defer stopKeepalive()
 
 	if termSync != nil && termSync.Local != nil {

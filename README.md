@@ -97,7 +97,8 @@ MBps). When the transfer ends the entry shows the result with the size, the
 average speed and the time. The input line stays free: you can keep
 chatting; a second file waits until the first one is sent. The receiver saves the file to `~/Downloads` and confirms it; the
 sender's chat shows **Sent** only after that confirmation, or the receiver's
-error (for example, a full disk). File transfer adapts its rate to the call so
+error (for example, a full disk). File transfer runs as fast as the path allows
+(there is no fixed limit) while keeping the extra delay it adds small, so
 that voice and video stay smooth.
 
 ## Requirements

@@ -140,7 +140,7 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 		log.Printf("[media] transport is disabled")
 	}
 
-	tcpKA, stopKeepalive := startTCPKeepalive(ctx, conn, keepaliveInterval, keepaliveTimeout, true)
+	tcpKA, stopKeepalive := startTCPKeepalive(ctx, conn, keepaliveInterval, keepaliveTimeout, true, pacer.active)
 	if stopKeepalive != nil {
 		defer stopKeepalive()
 	}
