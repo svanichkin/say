@@ -33,25 +33,26 @@ const (
 	mediaKindVideo   byte = 1
 
 	// Datagram header is [kind:1 | timestamp high:7][timestamp low:8].
-	mediaHeaderBytes               = 2 // packed kind and 15-bit timestamp
-	mediaIndexBytes                = 2 // timestamp bytes in internal audio/video queues
-	mediaIndexMask          uint16 = 0x7fff
-	mediaIndexHalf          uint16 = 0x4000
-	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32                    // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5                     // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames          = 6                     // 120 ms jitter buffer: 80 ms of jitter above the device period
-	audioBufferMaxFrames           = 32                    // 640 ms cap, allowing high-jitter bursts to drain
-	audioMaxConsecutivePLCs        = 32                    // tolerate up to 640 ms of missing media before resync
-	audioPlayoutLowFrames          = 2                     // conceal once less than 40 ms is queued
-	audioDTXUpdateFrames           = 8                     // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames            = 15                    // 300 ms of queued playback triggers a trim…
-	audioQueueTargetFrames         = audioBufferLeadFrames // …down to the jitter buffer lead
-	videoBaseStaleThreshold        = 250 * time.Millisecond
-	videoMaxStaleThreshold         = 3 * time.Second
-	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
-	videoAudioClockStall           = 200 * time.Millisecond // audio clock considered stopped
-	videoMaxLeadTicks              = int32(videoMaxStaleThreshold / mediaTickDuration)
+	mediaHeaderBytes                = 2 // packed kind and 15-bit timestamp
+	mediaIndexBytes                 = 2 // timestamp bytes in internal audio/video queues
+	mediaIndexMask           uint16 = 0x7fff
+	mediaIndexHalf           uint16 = 0x4000
+	mediaTickDuration               = 4 * time.Millisecond
+	mediaTickSamples                = 32                       // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                 = 5                        // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames           = 6                        // 120 ms jitter buffer: 80 ms of jitter above the device period
+	audioBufferMaxFrames            = 32                       // 640 ms cap, allowing high-jitter bursts to drain
+	audioMaxConsecutivePLCs         = 32                       // tolerate up to 640 ms of missing media before resync
+	audioSpeakerPeriodFrames        = 2                        // speaker device period: 40 ms, as in the G.722 version
+	audioPlayoutLowFrames           = audioSpeakerPeriodFrames // conceal once less than one device period is queued
+	audioDTXUpdateFrames            = 8                        // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames             = 15                       // 300 ms of queued playback triggers a trim…
+	audioQueueTargetFrames          = audioBufferLeadFrames    // …down to the jitter buffer lead
+	videoBaseStaleThreshold         = 250 * time.Millisecond
+	videoMaxStaleThreshold          = 3 * time.Second
+	videoMaxQueuedFrames            = 96                     // ~3 s at 30 fps
+	videoAudioClockStall            = 200 * time.Millisecond // audio clock considered stopped
+	videoMaxLeadTicks               = int32(videoMaxStaleThreshold / mediaTickDuration)
 )
 
 // Configure toggles voice/video capture for future UDP sessions.
@@ -267,7 +268,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if aec != nil {
 			onRender = aec.playback
 		}
-		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
+		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*audioSpeakerPeriodFrames, mediaTickSamples, audioSpeakerOut, stopCh, onRender, stop)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
