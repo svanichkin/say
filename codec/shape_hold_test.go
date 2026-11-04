@@ -136,17 +136,19 @@ func TestHoldDebugTintsOnlyHeldCells(t *testing.T) {
 	for i := range still {
 		still[i] = byte(90 + i%7)
 	}
-	run := func(debug bool) (heldCount int, out []byte) {
+	run := func(debug bool) (heldCount int, last *TextFrame) {
 		enc := NewEncoder(false, 0, 0, false)
 		enc.SetShapeHold(10)
 		enc.SetHoldDebug(debug)
-		var last []byte
+		dec := NewDecoder()
 		for f := 0; f < 3; f++ {
 			data, err := enc.Encode(Frame{Data: still, Width: w, Height: h}, 16, 8)
 			if err != nil {
 				t.Fatal(err)
 			}
-			last = data
+			if last, err = dec.Decode(data); err != nil { // in order: deltas need the keyframe
+				t.Fatal(err)
+			}
 		}
 		for _, hld := range enc.held {
 			if hld {
@@ -155,17 +157,16 @@ func TestHoldDebugTintsOnlyHeldCells(t *testing.T) {
 		}
 		return heldCount, last
 	}
-	plain, _ := run(false)
-	tinted, out := run(true)
+	plain, pf := run(false)
+	tinted, tf := run(true)
 	if plain != tinted || plain == 0 {
 		t.Fatalf("held cells: %d without tint, %d with tint (want equal, > 0)", plain, tinted)
 	}
-	tf, err := NewDecoder().Decode(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A still grey picture: held cells must now carry the lilac tint (Cb > 128).
-	if tf.BgYCbCr[1] <= 132 {
-		t.Fatalf("held cell not tinted: Cb=%d", tf.BgYCbCr[1])
+	// Held cells move halfway towards lilac (allowing for palette quantization).
+	for k := 0; k < 3; k++ {
+		want := (int(pf.BgYCbCr[k]) + int(holdDebugLilac[k])) / 2
+		if d := int(tf.BgYCbCr[k]) - want; d < -12 || d > 12 {
+			t.Fatalf("channel %d: tinted %d, want about %d (untinted %d)", k, tf.BgYCbCr[k], want, pf.BgYCbCr[k])
+		}
 	}
 }
