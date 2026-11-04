@@ -18,6 +18,12 @@ func TestBufferSettingsDerivedValues(t *testing.T) {
 	if audioBufferLeadFrames != 10 || audioQueueTargetFrames != 10 {
 		t.Fatalf("lead 200 ms: %d frames, trim target %d", audioBufferLeadFrames, audioQueueTargetFrames)
 	}
+	// A period below one 20 ms frame keeps its milliseconds for the device;
+	// the playout rounds it up to a whole frame.
+	SetSpeakerBuffer(10, 2)
+	if audioSpeakerPeriodMs != 10 || audioSpeakerPeriodFrames != 1 || audioPlayoutLowFrames != 1 {
+		t.Fatalf("10 ms x 2: period %d ms, %d frames, low %d", audioSpeakerPeriodMs, audioSpeakerPeriodFrames, audioPlayoutLowFrames)
+	}
 	// A lead at or below one device period is raised just above it.
 	SetSpeakerBuffer(80, 4)
 	SetJitterLead(40)

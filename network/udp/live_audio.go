@@ -15,7 +15,7 @@ import (
 type liveAudio struct {
 	playoutCmds    chan<- func(*audioPlayout)
 	stopCh         <-chan struct{}
-	restartSpeaker func(periodFrames, periods int) error
+	restartSpeaker func(periodMs, periods int) error
 	aec            *audioEcho
 	speakerInfo    func() string // the system-managed device's latencies (-sysaudio), or ""
 }
@@ -68,7 +68,7 @@ func AudioSettings() string {
 	}
 	text := fmt.Sprintf("audio: lead %d ms", audioBufferLeadFrames*audioFrameMillis)
 	if system == "" {
-		text += fmt.Sprintf(", speaker %d ms x %d", audioSpeakerPeriodFrames*audioFrameMillis, audioSpeakerPeriods)
+		text += fmt.Sprintf(", speaker %d ms x %d", audioSpeakerPeriodMs, audioSpeakerPeriods)
 	}
 	if l != nil {
 		var cur, queued int
@@ -80,7 +80,7 @@ func AudioSettings() string {
 		// The system sets the speaker buffer: only the lead can change.
 		return text + "; " + system + ". Change: -audio LEAD PERIOD PERIODS (only LEAD applies with -sysaudio)"
 	}
-	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 40 20 2"
+	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 40 10 2"
 }
 
 // ApplyAudioSettings sets the lead (ms), speaker period (ms) and number of
@@ -96,7 +96,7 @@ func ApplyAudioSettings(leadMs, periodMs, periods int) (string, error) {
 	// With -sysaudio the system sets the speaker buffer: only the lead applies.
 	system := l != nil && l.speakerInfo != nil && l.speakerInfo() != ""
 
-	oldPeriod, oldPeriods := audioSpeakerPeriodFrames, audioSpeakerPeriods
+	oldPeriod, oldPeriods := audioSpeakerPeriodMs, audioSpeakerPeriods
 	if !system {
 		SetSpeakerBuffer(periodMs, periods)
 	}
@@ -104,8 +104,8 @@ func ApplyAudioSettings(leadMs, periodMs, periods int) (string, error) {
 	lead, leadMin, low := audioBufferLeadFrames, audioLeadMinFrames, audioPlayoutLowFrames
 
 	if l != nil {
-		if !system && (audioSpeakerPeriodFrames != oldPeriod || audioSpeakerPeriods != oldPeriods) {
-			if err := l.restartSpeaker(audioSpeakerPeriodFrames, audioSpeakerPeriods); err != nil {
+		if !system && (audioSpeakerPeriodMs != oldPeriod || audioSpeakerPeriods != oldPeriods) {
+			if err := l.restartSpeaker(audioSpeakerPeriodMs, audioSpeakerPeriods); err != nil {
 				return "", fmt.Errorf("speaker restart: %w", err)
 			}
 		}

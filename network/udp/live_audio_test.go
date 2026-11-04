@@ -56,8 +56,8 @@ func TestApplyAudioSettingsLive(t *testing.T) {
 	if _, err := ApplyAudioSettings(200, 40, 3); err != nil {
 		t.Fatal(err)
 	}
-	if len(restarts) != 1 || restarts[0] != [2]int{2, 3} {
-		t.Fatalf("restarts %v, want [[2 3]]", restarts)
+	if len(restarts) != 1 || restarts[0] != [2]int{40, 3} {
+		t.Fatalf("restarts %v, want [[40 3]] (period in ms)", restarts)
 	}
 	l.run(func(*audioPlayout) {})
 	if p.lowWater != 2*160 || p.leadMin != 4 {
@@ -70,9 +70,9 @@ func TestApplyAudioSettingsLive(t *testing.T) {
 
 func TestAudioSettingsWithSystemVoice(t *testing.T) {
 	defer func(period, periods, lead int) {
-		SetSpeakerBuffer(period*audioFrameMillis, periods)
+		SetSpeakerBuffer(period, periods)
 		SetJitterLead(lead * audioFrameMillis)
-	}(audioSpeakerPeriodFrames, audioSpeakerPeriods, audioBufferLeadFrames)
+	}(audioSpeakerPeriodMs, audioSpeakerPeriods, audioBufferLeadFrames)
 	SetSpeakerBuffer(20, 2)
 	SetJitterLead(40)
 

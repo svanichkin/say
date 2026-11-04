@@ -59,7 +59,8 @@ const (
 // -speaker-periods (see SetJitterLead, SetSpeakerBuffer). Derived values are
 // recomputed by the setters.
 var (
-	audioSpeakerPeriodFrames = 4                            // device period: 80 ms, as in v0.1.3
+	audioSpeakerPeriodMs     = 80                           // device period in real time (any device sample rate)
+	audioSpeakerPeriodFrames = 4                            // the device period in whole 20 ms frames, rounded up
 	audioSpeakerPeriods      = 4                            // device buffer: 4 periods = 320 ms
 	audioPlayoutLowFrames    = audioSpeakerPeriodFrames     // conceal once less than one device period is queued
 	audioLeadMinFrames       = audioPlayoutLowFrames + 2    // one device period plus 40 ms
@@ -69,11 +70,13 @@ var (
 	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames // …and its trim depth
 )
 
-// SetSpeakerBuffer sets the speaker device period (ms, rounded to 20 ms
-// frames) and number of periods for future sessions. Zero keeps a value.
+// SetSpeakerBuffer sets the speaker device period (ms) and number of
+// periods for future sessions. Zero keeps a value. The playout and the echo
+// canceller work in whole 20 ms frames: they use the period rounded up.
 func SetSpeakerBuffer(periodMs, periods int) {
 	if periodMs > 0 {
-		audioSpeakerPeriodFrames = max(1, (periodMs+audioFrameMillis/2)/audioFrameMillis)
+		audioSpeakerPeriodMs = periodMs
+		audioSpeakerPeriodFrames = max(1, (periodMs+audioFrameMillis-1)/audioFrameMillis)
 	}
 	if periods > 0 {
 		audioSpeakerPeriods = max(2, periods)
@@ -85,11 +88,13 @@ func SetSpeakerBuffer(periodMs, periods int) {
 	SetJitterLead(audioBufferLeadFrames * audioFrameMillis)
 }
 
-// Audio buffer sets per connection, tuned by listening tests: a peer reached
-// through the internet, and one directly in the local network.
+// Audio buffer sets per connection: a peer reached through the internet,
+// and one directly in the local network. The speaker runs like the system
+// voice unit on macOS (an IO buffer of 512 frames at 48 kHz, ~10.7 ms): two
+// 10 ms periods.
 const (
-	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 20, 2, 40
-	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 20, 2, 40
+	netSpeakerPeriodMs, netSpeakerPeriods, netLeadMs = 10, 2, 40
+	lanSpeakerPeriodMs, lanSpeakerPeriods, lanLeadMs = 10, 2, 40
 )
 
 // audioLeadAdaptive lets late packets grow the jitter buffer lead and quiet
@@ -423,9 +428,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			onRender = aec.playback
 		}
 		log.Printf("[audio] speaker buffer %d ms (%d x %d ms), jitter buffer lead from %d ms (min %d, max %d)",
-			audioSpeakerPeriodFrames*audioSpeakerPeriods*audioFrameMillis, audioSpeakerPeriods, audioSpeakerPeriodFrames*audioFrameMillis,
+			audioSpeakerPeriodMs*audioSpeakerPeriods, audioSpeakerPeriods, audioSpeakerPeriodMs,
 			audioBufferLeadFrames*audioFrameMillis, audioLeadMinFrames*audioFrameMillis, audioLeadMaxFrames*audioFrameMillis)
-		startSpeak = func(periodFrames, periods int) (*device.Speaker, error) {
+		startSpeak = func(periodMs, periods int) (*device.Speaker, error) {
 			// Only the current speaker may stop the session when its device
 			// stops; closing a replaced one (-audio) must not end the call.
 			gen := speakerGen.Add(1)
@@ -434,20 +439,20 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 					stop()
 				}
 			}
-			sp, err := device.StartSpeaker(audioSampleRate, audioChannels, frameSamples*periodFrames, periods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, onStop)
+			sp, err := device.StartSpeaker(audioSampleRate, audioChannels, audioSampleRate*periodMs/1000, periods, mediaTickSamples, audioSpeakerOut, stopCh, onRender, onStop)
 			if err != nil {
 				return nil, err
 			}
 			if aec != nil {
 				// Echo of rendered audio reaches the mic about one device buffer later.
 				delay := min(sp.LatencySamples()-audioSampleRate*audioEchoDelayMarginMs/1000, audioEchoMaxDelaySamples)
-				aec.setSpeakerPeriod(periodFrames)
+				aec.setSpeakerPeriod(max(1, (periodMs+audioFrameMillis-1)/audioFrameMillis))
 				aec.setReferenceDelay(delay)
 				log.Printf("[audio/aec] reference delay %d ms (speaker buffer %d ms)", delay*1000/audioSampleRate, sp.LatencySamples()*1000/audioSampleRate)
 			}
 			return sp, nil
 		}
-		sp, err := startSpeak(audioSpeakerPeriodFrames, audioSpeakerPeriods)
+		sp, err := startSpeak(audioSpeakerPeriodMs, audioSpeakerPeriods)
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
@@ -507,7 +512,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
 		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh, aec: aec,
 			speakerInfo: func() string { return curSpeaker.Load().Info() }}
-		thisLive.restartSpeaker = func(periodFrames, periods int) error {
+		thisLive.restartSpeaker = func(periodMs, periods int) error {
 			if usingSystemVoice {
 				return errors.New("the speaker buffer is set by the system with -sysaudio")
 			}
@@ -523,7 +528,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			if old := curSpeaker.Swap(nil); old != nil {
 				old.Close()
 			}
-			sp, err := startSpeak(periodFrames, periods)
+			sp, err := startSpeak(periodMs, periods)
 			if err != nil {
 				stop()
 				return err

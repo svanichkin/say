@@ -556,6 +556,6 @@ func chatCommand(line string) (string, bool) {
 		}
 		return reply, true
 	default:
-		return "usage: -audio  or  -audio LEAD PERIOD PERIODS (e.g. -audio 40 20 2)", true
+		return "usage: -audio  or  -audio LEAD PERIOD PERIODS (e.g. -audio 40 10 2)", true
 	}
 }

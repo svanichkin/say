@@ -86,9 +86,10 @@ audio. Compare channels to locate whether distortion starts before or after
 AEC; a real device recording is needed to verify its estimated delay.
 
 The `-audio` target changes gradually; the reported queued PCM excludes the
-sound device's own buffer. Each new call starts with a 20 ms x 2 speaker buffer
-and the smallest lead above one device period (40 ms), in the LAN and over the
-internet alike.
+sound device's own buffer. Each new call starts with a 10 ms x 2 speaker buffer
+(like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms lead, in the
+LAN and over the internet alike. The speaker period is real time on any device
+sample rate.
 
 ## Chat and file transfer
 
@@ -98,7 +99,7 @@ and wide characters (CJK, emoji) are measured correctly.
 
 Lines starting with `-` are local commands and are not sent. `-audio` shows
 the audio buffers of the call (target lead, actual queued PCM, speaker period
-and number of periods); `-audio 40 20 2` sets them live for your own playback (the
+and number of periods); `-audio 40 10 2` sets them live for your own playback (the
 speaker restarts briefly if its buffer changes). The next call starts from the
 automatic per-connection values again. `-aec` shows the echo canceller and
 `-aec off` / `-aec on` switches it for the call in progress (to hear whether it

@@ -82,19 +82,24 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	// The connection profile supplies the requested device period and count.
-	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
+	// The connection profile supplies the device period and count. The period
+	// goes in milliseconds: a size in frames is passed to the device as is,
+	// in the device's own frames (48 kHz), so 160 frames meant to be 20 ms at
+	// 8 kHz became 3.3 ms. Milliseconds are converted at the device's rate.
+	deviceConfig.PeriodSizeInMilliseconds = uint32(max(1, (periodSamples*1000+sampleRate/2)/sampleRate))
 	deviceConfig.Periods = uint32(max(periods, 2))
 
 	// Reused by the audio callback so it never allocates (an allocation can
 	// stall the real-time thread on GC assist work).
 	var outSamples []int16
-	speaker := &Speaker{ctx: ctx, latencySamples: int(deviceConfig.PeriodSizeInFrames * deviceConfig.Periods)}
+	// periodSamples is the period at our sample rate (the device's own frames
+	// differ); the latency model counts in our samples.
+	speaker := &Speaker{ctx: ctx, latencySamples: periodSamples * int(deviceConfig.Periods)}
 	if samplesPerMediaTick > 0 {
 		// The callback cursor is ahead of audible playback by approximately the
 		// configured device buffer. Account for that when scheduling video.
-		speaker.playbackLatencyTicks = uint32(deviceConfig.PeriodSizeInFrames * deviceConfig.Periods / uint32(samplesPerMediaTick))
-		speaker.periodTicks = deviceConfig.PeriodSizeInFrames / uint32(samplesPerMediaTick)
+		speaker.playbackLatencyTicks = uint32(periodSamples * int(deviceConfig.Periods) / samplesPerMediaTick)
+		speaker.periodTicks = uint32(max(1, periodSamples/samplesPerMediaTick))
 		speaker.tickDur = time.Duration(samplesPerMediaTick) * time.Second / time.Duration(sampleRate)
 	}
 	r := &queueRenderer{speaker: speaker, in: speakerIn, channels: channels, samplesPerMediaTick: samplesPerMediaTick}
