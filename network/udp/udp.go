@@ -38,14 +38,15 @@ const (
 	mediaIndexMask          uint16 = 0x7fff
 	mediaIndexHalf          uint16 = 0x4000
 	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32 // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5  // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames          = 4  // 80 ms startup jitter buffer
-	audioBufferMaxFrames           = 32 // 640 ms cap, allowing high-jitter bursts to drain
-	audioMaxConsecutivePLCs        = 32 // tolerate up to 640 ms of missing media before resync
-	audioDTXUpdateFrames           = 8  // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames            = 15 // 300 ms of queued playback triggers a trim…
-	audioQueueTargetFrames         = 6  // …down to 120 ms (jitter buffer lead plus headroom)
+	mediaTickSamples               = 32                    // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5                     // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames          = 4                     // 80 ms startup jitter buffer
+	audioBufferMaxFrames           = 32                    // 640 ms cap, allowing high-jitter bursts to drain
+	audioMaxConsecutivePLCs        = 32                    // tolerate up to 640 ms of missing media before resync
+	audioCaptureResync             = 60 * time.Millisecond // capture timeline gap that means lost samples
+	audioDTXUpdateFrames           = 8                     // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames            = 15                    // 300 ms of queued playback triggers a trim…
+	audioQueueTargetFrames         = 6                     // …down to 120 ms (jitter buffer lead plus headroom)
 	videoBaseStaleThreshold        = 250 * time.Millisecond
 	videoMaxStaleThreshold         = 3 * time.Second
 	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
@@ -420,8 +421,9 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		var (
 			sentPkts, sentBytes uint64
 		)
-		var pcmBuf []int16 // post-processed PCM ready for encoding
-		var pcmStartAt time.Time
+		var pcmBuf []int16       // post-processed PCM ready for encoding
+		var pcmStartAt time.Time // capture time of pcmBuf[0], or of the next sample when empty
+		var timelineValid bool
 
 		tick := time.NewTicker(time.Second)
 		lastRateSample := time.Now()
@@ -533,22 +535,24 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						aec.setCaptureEnabled(false)
 					}
 					pcmBuf = pcmBuf[:0]
+					timelineValid = false
 					continue
 				}
 				if aec != nil {
 					aec.setCaptureEnabled(true)
 				}
 
-				if len(pcmBuf) == 0 {
+				// The timeline follows the sample count, also across frames that
+				// drained pcmBuf completely (drainAvailable advances pcmStartAt).
+				// Callback times jitter by several milliseconds, which is not a
+				// gap; re-reading the clock for every block made packet timestamps
+				// jump by a tick or two. Resynchronize only when samples were
+				// really lost, e.g. capture blocks dropped while we were late.
+				expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
+				if delta := capture.CapturedAt.Sub(expected); !timelineValid || delta > audioCaptureResync || delta < -audioCaptureResync {
+					pcmBuf = pcmBuf[:0]
 					pcmStartAt = capture.CapturedAt
-				} else {
-					expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
-					if delta := capture.CapturedAt.Sub(expected); delta > 4*time.Millisecond || delta < -4*time.Millisecond {
-						// Do not concatenate samples across a capture gap. The next packet's
-						// media index carries the discontinuity to the receiver.
-						pcmBuf = pcmBuf[:0]
-						pcmStartAt = capture.CapturedAt
-					}
+					timelineValid = true
 				}
 				pcmBuf = append(pcmBuf, capture.Samples...)
 

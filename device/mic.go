@@ -32,8 +32,9 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 	cfg.Capture.Format = malgo.FormatS16
 	cfg.Capture.Channels = uint32(channels)
 	cfg.SampleRate = uint32(sampleRate)
-	// Keep the backend's default capture period, as in v0.1.3 (60 ms blocks on
-	// macOS). The sender re-frames the PCM into 20 ms codec frames.
+	// Match the AEC/audio codec processing cadence (20 ms). The sender still handles
+	// backends that return a different callback size by re-framing the PCM.
+	cfg.PeriodSizeInMilliseconds = 20
 
 	var mu sync.Mutex
 	closed := false
@@ -43,8 +44,11 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			if len(pInput) == 0 {
 				return
 			}
-			capturedAt := time.Now()
 			samples := bytesToInt16Mic(pInput)
+			// The callback runs once the block is complete; its first sample was
+			// captured one block duration earlier.
+			blockFrames := len(samples) / max(channels, 1)
+			capturedAt := time.Now().Add(-time.Duration(blockFrames) * time.Second / time.Duration(sampleRate))
 			frame := AudioCaptureFrame{Samples: samples, CapturedAt: capturedAt}
 			select {
 			case out <- frame:
