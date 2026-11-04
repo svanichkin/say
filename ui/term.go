@@ -956,9 +956,7 @@ func renderTermFrames() {
 	}
 	var data string
 	if ChatConnected() {
-		local, _, _ := localFrameSnapshot()
-		remote, _, _ := remoteFrameSnapshot()
-		data = renderChatScreen(cols, rows, local, remote)
+		data = renderChatScreen(cols, rows)
 	} else {
 		data = renderConnectionScreen(cols, rows, currentStatusMessage())
 	}
@@ -997,7 +995,9 @@ func renderConnectionScreen(cols, rows int, status string) string {
 // renderChatScreen draws the call's video panes, conversation, and input line.
 // Every visible cell is rewritten on each call, so the screen is cleared only
 // when the layout changes.
-func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
+func renderChatScreen(cols, rows int) string {
+	local, _, localAt := localFrameSnapshot()
+	remote, _, remoteAt := remoteFrameSnapshot()
 	vs, ok := calcViewportSlots(cols, rows)
 	if !ok {
 		return ""
@@ -1035,8 +1035,11 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 	peerLeft := sepCol + termSeparator
 	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows+1, sepCol)
 	appendHorizontalSeparator(&out, canvasLeft, canvasCols, chatTop-1)
-	writeChatPane(&out, local, canvasTop, videoLeft, vs.selfSlot, "Your video")
-	writeChatPane(&out, remote, canvasTop, peerLeft, vs.peerSlot, "Peer video")
+	now := time.Now()
+	localIdle := writeChatPane(&out, local, localAt, localFrameType, now, canvasTop, videoLeft, vs.selfSlot)
+	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, now, canvasTop, peerLeft, vs.peerSlot)
+	// Animate the noise while a pane has no signal.
+	updateNoiseAnimation(localIdle || remoteIdle)
 
 	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
 	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
@@ -1044,6 +1047,12 @@ func renderChatScreen(cols, rows int, local, remote *codec.TextFrame) string {
 	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
 	if latencyLabel != "" {
 		remoteCaption += " " + latencyLabel
+	}
+	if localIdle {
+		localCaption = noSignalLabel
+	}
+	if remoteIdle {
+		remoteCaption = noSignalLabel
 	}
 	if !mediactrl.CaptureEnabled() {
 		localCaption = "MUTED"
@@ -1134,29 +1143,42 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 
 // writeChatPane fills a video slot: the frame when available (centered and
 // clipped to the slot), otherwise a blank pane with a placeholder label.
-func writeChatPane(out *strings.Builder, frame *codec.TextFrame, top, left int, slot slotSize, fallback string) {
+// noSignalLabel marks a pane without live video, as in v0.1.3.
+const noSignalLabel = "NO SIGNAL"
+
+// writeChatPane fills a video slot with the frame (centered and clipped to
+// the slot). Without a frame yet, or when frames stopped for longer than
+// frameFreezeThreshold, it shows animated noise and, after testCardDelay, the
+// TV test card, labelled NO SIGNAL. It reports whether the pane has no signal.
+func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.Time, frameType string, now time.Time, top, left int, slot slotSize) bool {
+	idle := frame == nil || (!updatedAt.IsZero() && now.Sub(updatedAt) > frameFreezeThreshold)
+	if idle {
+		if updateIdlePatternSlot(frameType, true, now) {
+			frame = testCardTextFrame(slot.cols, slot.rows)
+		} else {
+			frame = noiseTextFrame(slot.cols, slot.rows)
+		}
+	} else {
+		updateIdlePatternSlot(frameType, false, now)
+	}
 	if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
 		writeTextFrame(out, frame, top, left)
-		return
+	} else {
+		blank := strings.Repeat(" ", slot.cols)
+		for r := 0; r < slot.rows; r++ {
+			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", top+r, left, blank))
+		}
+		if frame != nil {
+			// The peer may still be encoding for a previous slot size.
+			visCols, visRows := min(frame.Cols, slot.cols), min(frame.Rows, slot.rows)
+			offCol, offRow := max(0, (frame.Cols-slot.cols)/2), max(0, (frame.Rows-slot.rows)/2)
+			writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows)
+		}
 	}
-	blank := strings.Repeat(" ", slot.cols)
-	for r := 0; r < slot.rows; r++ {
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", top+r, left, blank))
+	if idle {
+		writeCenterLabel(out, noSignalLabel, top, left, slot.cols, slot.rows)
 	}
-	if frame != nil {
-		// The peer may still be encoding for a previous slot size.
-		visCols, visRows := min(frame.Cols, slot.cols), min(frame.Rows, slot.rows)
-		offCol, offRow := max(0, (frame.Cols-slot.cols)/2), max(0, (frame.Rows-slot.rows)/2)
-		writeTextFrameRegion(out, frame, top+(slot.rows-visRows)/2, left+(slot.cols-visCols)/2, offCol, offRow, visCols, visRows)
-		return
-	}
-	// The call is connected here; the connection status belongs to the
-	// status screen, not to an empty video pane.
-	label := truncateWidth(fallback, slot.cols)
-	row := top + slot.rows/2
-	col := left + max(0, (slot.cols-displayWidth(label))/2)
-	// Faint default colour: readable on light and dark terminals alike.
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[0m\x1b[2m%s\x1b[0m", row, col, label))
+	return idle
 }
 
 var noisePaletteYCbCr = [2][3]byte{
