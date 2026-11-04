@@ -49,8 +49,8 @@ func TestApplyAudioSettingsLive(t *testing.T) {
 		t.Fatalf("speaker restarted for a lead change: %v", restarts)
 	}
 	l.run(func(*audioPlayout) {}) // wait for the playout goroutine
-	if p.lead != 10 || p.expand != 4 {
-		t.Fatalf("lead %d frames, expand %d; want 10 and 4", p.lead, p.expand)
+	if p.lead != 10 || p.adjust != 4*160 {
+		t.Fatalf("lead %d frames, adjust %d samples; want 10 and 640", p.lead, p.adjust)
 	}
 	// The speaker buffer changes: one restart with the new period and count.
 	if _, err := ApplyAudioSettings(200, 40, 3); err != nil {

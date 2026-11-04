@@ -134,10 +134,10 @@ func (amrAudioDecoder) IsDTXFrame(payload []byte) bool {
 // a frame back and forth, which corrupted the cancelled microphone signal
 // (audible as a hoarse, crackling voice on the far side).
 //
-// Instead the speaker only appends rendered samples to refRing. Each captured
-// frame takes exactly one frame of reference from it and calls Playback
-// immediately before Capture, so the canceller's queue never over- or
-// underflows. Alignment follows sample counts, not callback timing.
+// The speaker appends rendered samples to refRing. Each captured frame takes
+// exactly one reference frame and calls Cancel directly, avoiding the DSP's
+// additional buffered Playback/Capture delay. Alignment follows sample counts;
+// any queue discontinuity resets the adaptive filter before it is used again.
 // audioEchoRefMaxFrames/TargetFrames (udp.go) allow overlap between whole
 // speaker periods and batched microphone callbacks.
 
@@ -152,13 +152,15 @@ type audioEcho struct {
 	// latency: rendered audio reaches the microphone only after the device
 	// buffer has played it, and the filter models echo up to audioEchoTailMs
 	// after the reference. primed is false until that much is queued.
-	delaySamples int
-	primed       bool
-	refMax       int // reference queue limit (samples, beyond the delay)…
-	refTarget    int // …and its trim depth
+	delaySamples     int
+	refDiscontinuity bool // guarded by refMu; reset the filter before using a new alignment
+	primed           bool
+	refMax           int // reference queue limit (samples, beyond the delay)…
+	refTarget        int // …and its trim depth
 
 	mu             sync.Mutex // canceller state, used by the sender goroutine
 	canceller      *echo.Canceller
+	trace          *audioTrace
 	bypass         bool // "-aec off": the microphone passes unprocessed
 	frameSamples   int
 	ref            []int16
@@ -196,13 +198,14 @@ func (a *audioEcho) playback(samples []int16) {
 	if len(a.refRing) > a.delaySamples+a.refMax {
 		drop := len(a.refRing) - (a.delaySamples + a.refTarget)
 		a.refRing = append(a.refRing[:0], a.refRing[drop:]...)
+		a.refDiscontinuity = true
 	}
 	a.refMu.Unlock()
 }
 
 // nextReference fills a.ref with the oldest frame of rendered audio, or
 // silence if the speaker has not produced one (nothing to cancel then).
-func (a *audioEcho) nextReference() {
+func (a *audioEcho) nextReference() bool {
 	a.refMu.Lock()
 	if !a.primed && len(a.refRing) >= a.delaySamples+a.frameSamples {
 		a.primed = true
@@ -212,10 +215,16 @@ func (a *audioEcho) nextReference() {
 		a.refRing = append(a.refRing[:0], a.refRing[a.frameSamples:]...)
 	} else {
 		// Not primed yet, or the speaker stalled: hold the delay again.
+		if a.primed {
+			a.refDiscontinuity = true
+		}
 		a.primed = false
 		clear(a.ref)
 	}
+	reset := a.refDiscontinuity
+	a.refDiscontinuity = false
 	a.refMu.Unlock()
+	return reset
 }
 
 // setSpeakerPeriod adapts the reference queue limits to a new speaker period
@@ -238,6 +247,8 @@ func (a *audioEcho) setReferenceDelay(samples int) {
 	a.refMu.Lock()
 	a.delaySamples = max(0, samples)
 	a.primed = false
+	a.refRing = a.refRing[:0]
+	a.refDiscontinuity = true
 	a.refMu.Unlock()
 }
 
@@ -288,15 +299,22 @@ func (a *audioEcho) capture(mic, out []int16) error {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.nextReference() // keep the reference flowing even when bypassed
+	// Keep the reference flowing even while cancellation is bypassed.
+	if a.nextReference() {
+		a.canceller.Reset()
+	}
+	var err error
 	if a.bypass {
 		copy(out, mic)
-		return nil
+	} else {
+		// Pair explicitly: our reference queue already aligns whole frames.
+		// Playback/Capture would add a second, hidden two-frame queue.
+		err = a.canceller.Cancel(mic, a.ref, out)
 	}
-	if err := a.canceller.Playback(a.ref); err != nil {
-		return err
+	if err == nil && a.trace != nil {
+		a.trace.record(mic, a.ref, out)
 	}
-	return a.canceller.Capture(mic, out)
+	return err
 }
 
 // initAudioCodec creates a mono 8 kHz speech codec. AMR-NB is fixed at its
@@ -350,4 +368,20 @@ func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
 	}
 
 	return opusAudioEncoder{encoder: enc}, opusAudioDecoder{decoder: dec}, audioSampleRate * audioFrameMillis / 1000, nil
+}
+
+// skipCapture accounts for discarded microphone PCM before pairing the next
+// frame. Never continue adapting an echo filter across an unreported jump.
+func (a *audioEcho) skipCapture(samples int) {
+	if a == nil {
+		return
+	}
+	a.refMu.Lock()
+	n := min(max(samples, 0), len(a.refRing))
+	a.refRing = append(a.refRing[:0], a.refRing[n:]...)
+	if len(a.refRing) == 0 {
+		a.primed = false
+	}
+	a.refDiscontinuity = true
+	a.refMu.Unlock()
 }

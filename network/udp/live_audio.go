@@ -64,9 +64,9 @@ func AudioSettings() string {
 	l := live
 	liveMu.Unlock()
 	if l != nil {
-		var cur int
-		if l.run(func(p *audioPlayout) { cur = p.lead }) {
-			text += fmt.Sprintf(" (lead now %d ms)", cur*audioFrameMillis)
+		var cur, queued int
+		if l.run(func(p *audioPlayout) { cur = p.lead; queued = p.out.QueuedSamples() * 1000 / audioSampleRate }) {
+			text += fmt.Sprintf(" (lead now %d ms, queued %d ms)", cur*audioFrameMillis, queued)
 		}
 	}
 	return text + ". Change: -audio LEAD PERIOD PERIODS, e.g. -audio 120 60 2"
@@ -93,7 +93,9 @@ func ApplyAudioSettings(leadMs, periodMs, periods int) (string, error) {
 				return "", fmt.Errorf("speaker restart: %w", err)
 			}
 		}
-		l.run(func(p *audioPlayout) { p.configure(lead, leadMin, low) })
+		if !l.run(func(p *audioPlayout) { p.configure(lead, leadMin, low) }) {
+			return "", fmt.Errorf("audio settings were not acknowledged by the receiver")
+		}
 	}
 	return AudioSettings(), nil
 }

@@ -164,3 +164,30 @@ func TestAudioEchoBypassPassesMicrophone(t *testing.T) {
 		t.Fatal("disabled after -aec on")
 	}
 }
+
+func TestCaptureDropAdvancesEchoReference(t *testing.T) {
+	a, err := newAudioEcho(160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.setCaptureEnabled(true)
+	for frame := 1; frame <= 8; frame++ {
+		pcm := make([]int16, 160)
+		for i := range pcm {
+			pcm[i] = int16(frame)
+		}
+		a.playback(pcm)
+	}
+	a.skipCapture(3 * 160)
+	if !a.nextReference() {
+		t.Fatal("capture gap did not invalidate the learned echo path")
+	}
+	for _, v := range a.ref {
+		if v != 4 {
+			t.Fatalf("after 3 lost mic frames, reference is %d instead of 4", v)
+		}
+	}
+	if a.nextReference() {
+		t.Fatal("stable reference must not repeatedly reset the filter")
+	}
+}

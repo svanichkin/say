@@ -41,3 +41,14 @@ func TestCrossfadeSmoothsDiscontinuities(t *testing.T) {
 		t.Fatalf("fade-out does not reach silence: %d", out[len(out)-1])
 	}
 }
+
+func TestStretchedFrameUsesOriginalMediaDuration(t *testing.T) {
+	for _, length := range []int{152, 160, 168} {
+		if got := mediaSamplePosition(length, length, 160); got != 160 {
+			t.Fatalf("%d PCM samples advanced media by %d", length, got)
+		}
+		if got := mediaSamplePosition(length/2, length, 160); got != 80 {
+			t.Fatalf("middle of stretched frame: %d", got)
+		}
+	}
+}

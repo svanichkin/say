@@ -37,18 +37,17 @@ const (
 	mediaIndexMask          uint16 = 0x7fff
 	mediaIndexHalf          uint16 = 0x4000
 	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32                    // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5                     // 20 ms audio frame on a 4 ms common media timeline
-	audioLeadMaxFrames             = 32                    // 640 ms, the fixed lead of v0.1.3
-	audioLeadGrowFrames            = 2                     // per packet that arrived after its slot
-	audioLeadShrinkQuiet           = 10 * time.Second      // no late packets for this long…
-	audioLeadShrinkEvery           = 5 * time.Second       // …shrinks the lead by one frame this often
-	audioQuietRMS                  = 300                   // frames below this RMS count as silence when shrinking the lead
-	audioBufferMaxFrames           = 128                   // queue capacity: 2.56 s
-	audioMaxConsecutivePLCs        = 32                    // tolerate up to 640 ms of missing media before resync
-	audioCaptureResync             = 60 * time.Millisecond // capture timeline gap that means lost samples
-	audioDTXUpdateFrames           = 8                     // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames            = 64                    // 1.28 s of queued playback triggers a trim…
+	mediaTickSamples               = 32               // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5                // 20 ms audio frame on a 4 ms common media timeline
+	audioLeadMaxFrames             = 32               // 640 ms, the fixed lead of v0.1.3
+	audioLeadGrowFrames            = 2                // per packet that arrived after its slot
+	audioLeadShrinkQuiet           = 10 * time.Second // no late packets for this long…
+	audioLeadShrinkEvery           = 5 * time.Second  // …shrinks the lead by one frame this often
+	audioQuietRMS                  = 300              // frames below this RMS count as silence when shrinking the lead
+	audioBufferMaxFrames           = 128              // queue capacity: 2.56 s
+	audioMaxConsecutivePLCs        = 32               // tolerate up to 640 ms of missing media before resync
+	audioDTXUpdateFrames           = 8                // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames            = 64               // 1.28 s of queued playback triggers a trim…
 	videoBaseStaleThreshold        = 250 * time.Millisecond
 	videoMaxStaleThreshold         = 3 * time.Second
 	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
@@ -265,6 +264,7 @@ func (vs *dataSession) Done() <-chan struct{} {
 func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) {
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	stopCh := make(chan struct{})
+	pc = newMediaPacketConn(pc, stopCh)
 	var stopOnce sync.Once
 	var cleanupOnce sync.Once
 	var wg sync.WaitGroup
@@ -301,6 +301,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioNetIn      chan []byte
 		audioSpeakerOut *device.PlaybackQueue
 
+		speakerMu   sync.Mutex                     // serialize device replacement with session cleanup
 		curSpeaker  atomic.Pointer[device.Speaker] // replaced by -audio during the call
 		speakerGen  atomic.Int64
 		startSpeak  func(periodFrames, periods int) (*device.Speaker, error)
@@ -323,9 +324,11 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stop()
-			if sp := curSpeaker.Load(); sp != nil {
+			speakerMu.Lock()
+			if sp := curSpeaker.Swap(nil); sp != nil {
 				sp.Close()
 			}
+			speakerMu.Unlock()
 			unregisterLiveAudio(thisLive)
 			// Cancellation is asynchronous. Do not let the next call open devices
 			// while the previous capture goroutines are still closing them.
@@ -469,13 +472,24 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		startAudioReceiver(&wg, dec, frameSamples, stopCh, audioNetIn, audioSpeakerOut, playoutCmds)
 		thisLive = &liveAudio{playoutCmds: playoutCmds, stopCh: stopCh, aec: aec}
 		thisLive.restartSpeaker = func(periodFrames, periods int) error {
-			sp, err := startSpeak(periodFrames, periods)
-			if err != nil {
-				return err
+			speakerMu.Lock()
+			defer speakerMu.Unlock()
+			select {
+			case <-stopCh:
+				return net.ErrClosed
+			default:
 			}
-			if old := curSpeaker.Swap(sp); old != nil {
+			// Never run two device callbacks against the same PCM/reference queue.
+			speakerGen.Add(1) // retiring this device must not stop the call
+			if old := curSpeaker.Swap(nil); old != nil {
 				old.Close()
 			}
+			sp, err := startSpeak(periodFrames, periods)
+			if err != nil {
+				stop()
+				return err
+			}
+			curSpeaker.Store(sp)
 			return nil
 		}
 		registerLiveAudio(thisLive)
@@ -524,166 +538,6 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	if useVideo {
 		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
 	}
-}
-
-// startAudioSender: mic → selected speech codec → UDP (mediaKindAudio)
-func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
-	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho,
-	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
-) {
-	if !useVoice || enc == nil || audioMicIn == nil {
-		return
-	}
-
-	// ======== Audio sender: mic → selected codec → UDP ========
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
-		var (
-			sentPkts, sentBytes uint64
-		)
-		var pcmBuf []int16       // post-processed PCM ready for encoding
-		var pcmStartAt time.Time // capture time of pcmBuf[0], or of the next sample when empty
-		var timelineValid bool
-
-		tick := time.NewTicker(time.Second)
-		lastRateSample := time.Now()
-		defer tick.Stop()
-
-		need := frameSamples * audioChannels
-		aecSamples := make([]int16, need)
-
-		sendChunk := func(chunk []int16, capturedAt time.Time) bool {
-			pcm := chunk
-			if aec != nil {
-				if err := aec.capture(chunk, aecSamples); err != nil {
-					log.Printf("[audio/aec] capture frame: %v", err)
-				} else {
-					pcm = aecSamples
-				}
-			}
-
-			addr := getPeer()
-			if addr == nil {
-				return true
-			}
-
-			if len(chunk) == 0 {
-				return true
-			}
-
-			buf := make([]byte, maxAudioPacket)
-			written, err := enc.EncodeFrame(pcm, buf)
-			if err != nil {
-				log.Printf("[voice/udp] %s encode error: bytes=%d err=%v", audioCodec, written, err)
-				if stop != nil {
-					stop()
-				}
-				return false
-			}
-			if written == 0 {
-				// AMR-NB DTX omits NO_DATA frames from the wire while the timestamp
-				// still advances with the captured PCM timeline.
-				return true
-			}
-
-			header := encodeMediaHeader(mediaKindAudio, mediaIndex(mediaEpoch, capturedAt))
-			out := make([]byte, mediaHeaderBytes+written)
-			copy(out[:mediaHeaderBytes], header[:])
-			copy(out[mediaHeaderBytes:], buf[:written])
-
-			n, err := pc.WriteTo(out, addr)
-			if err != nil {
-				if !isFatalSendError(err) {
-					sendErrLog.report("voice", err)
-					return true
-				}
-				log.Printf("[voice/udp] write error: %v", err)
-				if stop != nil {
-					stop()
-				}
-				return false
-			}
-			sentPkts++
-			if n > mediaHeaderBytes {
-				sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
-			}
-			return true
-		}
-
-		drainAvailable := func() bool {
-			for len(pcmBuf) >= need {
-				chunk := pcmBuf[:need]
-				pcmBuf = pcmBuf[need:]
-				if !sendChunk(chunk, pcmStartAt) {
-					return false
-				}
-				pcmStartAt = pcmStartAt.Add(time.Duration(need) * time.Second / time.Duration(audioSampleRate))
-			}
-			return true
-		}
-
-		for {
-			select {
-			case <-stopCh:
-				return
-
-			case <-tick.C:
-				elapsed := time.Since(lastRateSample)
-				if elapsed <= 0 {
-					elapsed = time.Second
-				}
-				rateKBps := (float64(sentBytes) / 1024) / elapsed.Seconds()
-				logs.LogV("[voice/udp] tx: %d pkts, %.2f kB/s", sentPkts, rateKBps)
-				ui.UpdateTxAudioRate(rateKBps)
-				sentPkts, sentBytes = 0, 0
-				lastRateSample = time.Now()
-
-			case capture, ok := <-audioMicIn:
-				if !ok {
-					if !drainAvailable() {
-						return
-					}
-					return
-				}
-
-				if len(capture.Samples) == 0 {
-					continue
-				}
-
-				if !mediactrl.CaptureEnabled() {
-					if aec != nil {
-						aec.setCaptureEnabled(false)
-					}
-					pcmBuf = pcmBuf[:0]
-					timelineValid = false
-					continue
-				}
-				if aec != nil {
-					aec.setCaptureEnabled(true)
-				}
-
-				// The timeline follows the sample count, also across frames that
-				// drained pcmBuf completely (drainAvailable advances pcmStartAt).
-				// Callback times jitter by several milliseconds, which is not a
-				// gap; re-reading the clock for every block made packet timestamps
-				// jump by a tick or two. Resynchronize only when samples were
-				// really lost, e.g. capture blocks dropped while we were late.
-				expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
-				if delta := capture.CapturedAt.Sub(expected); !timelineValid || delta > audioCaptureResync || delta < -audioCaptureResync {
-					pcmBuf = pcmBuf[:0]
-					pcmStartAt = capture.CapturedAt
-					timelineValid = true
-				}
-				pcmBuf = append(pcmBuf, capture.Samples...)
-
-				if !drainAvailable() {
-					return
-				}
-			}
-		}
-	}()
 }
 
 // startVideoSender: camera → TextFrame → UDP (mediaKindVideo)

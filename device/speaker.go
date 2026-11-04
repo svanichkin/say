@@ -47,6 +47,10 @@ func (s *Speaker) LatencySamples() int {
 type PlaybackFrame struct {
 	Samples    []int16
 	MediaIndex uint16
+	// MediaSamples is the original duration before PCM rate adjustment. Zero
+	// means len(Samples), for unmodified frames.
+	MediaSamples  int
+	Discontinuous bool // an earlier PCM segment was removed
 }
 
 // StartSpeaker initializes a playback device that consumes PCM frames from speakerIn.
@@ -65,15 +69,14 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	// Preserve v0.1.3's 80 ms period and minimum of four device periods.
-	// The 40 ms/two-period configuration crackled with video even when the
-	// application playback queue stayed full and callbacks arrived on time.
+	// The connection profile supplies the requested device period and count.
 	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
 	deviceConfig.Periods = uint32(max(periods, 2))
 
 	var pending []int16
 	var pendingIndex uint16
 	var pendingSamples int
+	var pendingLength, pendingMediaSamples int
 	// Reused by the audio callback so it never allocates (an allocation can
 	// stall the real-time thread on GC assist work).
 	var outSamples []int16
@@ -120,7 +123,12 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 						pending = frame.Samples
 						pendingIndex = frame.MediaIndex
 						pendingSamples = 0
-						if gap || starved {
+						pendingLength = len(frame.Samples) / channels
+						pendingMediaSamples = frame.MediaSamples
+						if pendingMediaSamples == 0 {
+							pendingMediaSamples = pendingLength
+						}
+						if gap || frame.Discontinuous || starved {
 							// Queued audio was discarded or the queue ran dry: the
 							// new frame does not continue the last output sample.
 							declick.start(lastOut)
@@ -143,7 +151,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, periods, samplesPerMediaT
 				speakerIn.consumed(n)
 				pendingSamples += n / channels
 				if samplesPerMediaTick > 0 {
-					speaker.playbackTick.Store(uint32(pendingIndex) + uint32(pendingSamples/samplesPerMediaTick))
+					speaker.playbackTick.Store(uint32(pendingIndex) + uint32(mediaSamplePosition(pendingSamples, pendingLength, pendingMediaSamples)/samplesPerMediaTick))
 					speaker.playbackSet.Store(true)
 				}
 			}
@@ -292,4 +300,12 @@ func (c *crossfade) fadeOut(dst []int16, from int16) {
 			dst[i] = 0
 		}
 	}
+}
+
+// Map stretched PCM back to the sender clock for video synchronization.
+func mediaSamplePosition(played, outputLength, mediaLength int) int {
+	if outputLength <= 0 {
+		return 0
+	}
+	return played * mediaLength / outputLength
 }

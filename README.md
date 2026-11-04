@@ -33,7 +33,9 @@ external Yggdrasil daemon or web stack.
 - **Lower voice traffic.** Pure-Go AMR-NB (default, 4.75 kbit/s) uses about
   **90 % less** bandwidth than the 48 kbit/s G.722 of v0.1.3; Opus (12 kbit/s)
   about **75 % less**. G.722 is still available with `-audio-codec g722`.
-- Acoustic echo cancellation, aligned with the speaker's device latency.
+- Acoustic echo cancellation with a reference delay estimated from the requested
+  speaker buffer. The filter resets on reference discontinuities; actual device
+  latency (especially Bluetooth) can differ from this estimate.
 - Video in a two-pane terminal layout (square panes), synchronised with the
   audio of the same peer.
 - **Adaptive video frame rate and detail.** The receiver reports lost and
@@ -47,8 +49,14 @@ external Yggdrasil daemon or web stack.
   hundred bytes per frame instead of several kilobytes. A full frame follows
   about every half second, so a lost packet freezes the picture briefly
   instead of corrupting it. Both peers need this version.
-- **Adaptive jitter buffer.** Audio waits only as long as the network needs:
-  late packets grow the buffer, a steady network shrinks it.
+- **Adaptive jitter buffer.** Packets arriving after an actual concealed slot
+  grow the target delay; duplicates do not. Delay changes adjust decoded PCM
+  duration, never the codec's loss history. Temporary resampling is bounded to
+  5% (it can slightly change pitch while adjusting); steady clock drift uses at
+  most one sample per 20 ms frame. Quiet frames can shorten excess delay sooner.
+- Capture sample indices survive dropped microphone blocks. A separate bounded
+  send queue prevents a stalled transport from blocking capture/AEC; old encoded
+  speech is discarded with its original timestamp preserved.
 - **Local network calls.** Peers in the same LAN (or on the same machine) find
   each other by Yggdrasil multicast and connect directly instead of through
   internet peers; Say then uses smaller audio buffers for lower latency.
@@ -59,6 +67,27 @@ external Yggdrasil daemon or web stack.
 - Friend list bootstrap via the same `config.json` that holds the Yggdrasil
   settings.
 
+## Audio diagnostics
+
+To compare raw microphone, echo reference and processed microphone, opt in to
+local recording before launching Say:
+
+```sh
+SAY_AUDIO_TRACE=/tmp/say-audio ./bin/say
+```
+
+Each call writes a separate private three-channel WAV file (8 kHz, 16-bit PCM):
+channel 1 is the microphone, channel 2 is the exact reference passed to the echo
+filter, channel 3 is its output. Disk writes run separately from capture; the
+log reports any diagnostic frames dropped if the disk cannot keep up. Recording
+is off unless this environment variable is set. These files contain the call's
+audio. Compare channels to locate whether distortion starts before or after
+AEC; a real device recording is needed to verify its estimated delay.
+
+The `-audio` target changes gradually; the reported queued PCM excludes the
+sound device's own buffer. Automatic defaults for each new call are 80 ms lead
+and a 20 ms x 2 speaker buffer for LAN, or 120 ms lead and 60 ms x 2 for internet.
+
 ## Chat and file transfer
 
 The lower part of the call screen is a chat. Type a message and press Enter;
@@ -66,8 +95,8 @@ your messages appear on the left, the peer's on the right. Long messages wrap,
 and wide characters (CJK, emoji) are measured correctly.
 
 Lines starting with `-` are local commands and are not sent. `-audio` shows
-the audio buffers of the call (jitter buffer lead, speaker period and number
-of periods); `-audio 120 60 2` sets them live for your own playback (the
+the audio buffers of the call (target lead, actual queued PCM, speaker period
+and number of periods); `-audio 120 60 2` sets them live for your own playback (the
 speaker restarts briefly if its buffer changes). The next call starts from the
 automatic per-connection values again. `-aec` shows the echo canceller and
 `-aec off` / `-aec on` switches it for the call in progress (to hear whether it

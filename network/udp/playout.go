@@ -50,8 +50,11 @@ type audioPlayout struct {
 	// Adaptive jitter buffer lead in frames (audioLeadMinFrames..Max). A
 	// packet arriving after its slot grows it; quiet periods shrink it.
 	lead       int
-	expand     int  // frames still to insert to reach a grown lead
-	shrink     bool // drop the next quiet frame to reach a shrunk lead
+	adjust     int     // PCM samples to add (>0) or remove (<0), never decoder slots
+	level      float64 // smoothed PCM queue occupancy for clock drift correction
+	missed     [audioBufferMaxFrames]missedSlot
+	missedHead int
+	pcmGap     bool
 	lastLateAt time.Time
 	lastAdapt  time.Time
 	lateEvents int64 // packets that arrived after their slot (for tests and logs)
@@ -60,6 +63,11 @@ type audioPlayout struct {
 	lowWater     int // samples; conceal below this
 	maxQueued    int
 	targetQueued int
+}
+
+type missedSlot struct {
+	index uint16
+	valid bool
 }
 
 type queuedPacket struct {
@@ -88,12 +96,18 @@ func (p *audioPlayout) reset() {
 	p.pending = p.pending[:0]
 	p.concealed = 0
 	p.lateCount = 0
+	p.adjust, p.level = 0, 0
+	p.pcmGap = false
+	p.missed = [audioBufferMaxFrames]missedSlot{}
 	p.out.Clear()
 	p.rebuffer()
 }
 
 // rebuffer stops feeding the speaker until the jitter buffer is primed again.
 func (p *audioPlayout) rebuffer() {
+	p.adjust, p.level = 0, 0
+	p.pcmGap = false
+	p.missed = [audioBufferMaxFrames]missedSlot{}
 	p.ready = false
 	p.pre, p.preSample = p.pre[:0], 0
 	p.primeDeadline = time.Time{}
@@ -121,7 +135,11 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 			logs.LogV("[voice/udp] reanchor idle playback from index %d to %d after %d advancing late packets", p.nextIndex, index, p.lateCount)
 			p.reset()
 		} else {
-			p.growLead(now)
+			// Only an actually concealed slot can prove the buffer was too short.
+			// A decoded duplicate must neither grow the lead nor count as loss.
+			if p.takeMissed(index) {
+				p.growLead(now)
+			}
 			return
 		}
 	}
@@ -177,8 +195,6 @@ func (p *audioPlayout) insert(pkt queuedPacket) {
 			break
 		}
 		i--
-	}
-	if i < len(p.pending) {
 	}
 	p.pending = append(p.pending, queuedPacket{})
 	copy(p.pending[i+1:], p.pending[i:])
@@ -253,6 +269,7 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 }
 
 func (p *audioPlayout) decode(payload []byte) {
+	p.takeMissed(p.nextIndex) // retire history from an earlier timestamp cycle
 	written, err := p.dec.DecodeFrame(payload, p.scratch)
 	if err != nil || written <= 0 {
 		logs.LogV("[voice/udp] %s decode error: produced %d samples (len=%d): %v", audioCodec, written, len(payload), err)
@@ -269,6 +286,9 @@ func (p *audioPlayout) conceal() bool {
 	if p.concealed >= audioMaxConsecutivePLCs {
 		return false
 	}
+	p.takeMissed(p.nextIndex)
+	p.missed[p.missedHead] = missedSlot{index: p.nextIndex, valid: true}
+	p.missedHead = (p.missedHead + 1) % len(p.missed)
 	p.concealed++
 	written, err := p.dec.Conceal(p.scratch)
 	if err != nil || written <= 0 {
@@ -283,14 +303,52 @@ func (p *audioPlayout) conceal() bool {
 func (p *audioPlayout) push(pcm []int16) {
 	samples := make([]int16, p.frameSamples)
 	copy(samples, pcm)
-	frame := device.PlaybackFrame{Samples: samples, MediaIndex: p.nextIndex}
+	index := p.nextIndex
 	p.nextIndex = advanceMediaIndex(p.nextIndex, audioFrameTicks)
-	if p.ready && p.shrink && p.out.QueuedSamples() > p.frameSamples*p.lead && isQuiet(samples) {
-		// Skip a frame of near-silence to shorten the buffer inaudibly; the
-		// media timeline still advances, so video sync stays correct.
-		p.shrink = false
-		return
+	if p.ready {
+		q := p.out.QueuedSamples()
+		if p.adjust <= -p.frameSamples && isQuiet(samples) && q > p.frameSamples*p.lead {
+			// Repay the entire requested reduction over quiet frames, not just
+			// one frame. No codec state or sample-time history is rolled back.
+			p.adjust += p.frameSamples
+			p.pcmGap = true
+			p.level = 0
+			return
+		}
+		delta := 0
+		if p.adjust != 0 {
+			// At most 5% temporary rate correction. Preserve frame endpoints
+			// so consecutive PCM blocks still join without a discontinuity.
+			limit := max(1, p.frameSamples/20)
+			delta = max(-limit, min(limit, p.adjust))
+			if delta < 0 && q < p.lowWater {
+				delta = 0
+			}
+			p.adjust -= delta
+			p.level = 0
+		} else {
+			// Average the device-period sawtooth over several seconds. A tiny
+			// continuous rate correction compensates independent audio clocks.
+			level := float64(q + len(samples))
+			if p.level == 0 {
+				p.level = level
+			}
+			p.level += (level - p.level) / 200
+			target := float64(max(p.lead*p.frameSamples, p.lowWater+p.frameSamples))
+			band := float64(p.frameSamples) / 2
+			if p.level > target+band && q > p.lowWater {
+				delta = -1
+			}
+			if p.level < target-band {
+				delta = 1
+			}
+		}
+		if delta != 0 {
+			samples = resizePCM(samples, len(samples)+delta)
+		}
 	}
+	frame := device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples, Discontinuous: p.pcmGap}
+	p.pcmGap = false
 
 	if !p.ready {
 		p.pre = append(p.pre, frame)
@@ -310,6 +368,7 @@ func (p *audioPlayout) push(pcm []int16) {
 	// burst would otherwise stay queued and delay all further speech. The
 	// speaker crossfades over the resulting discontinuity.
 	if dropped := p.out.TrimLatency(p.maxQueued, p.frameSamples*p.lead); dropped > 0 {
+		p.adjust, p.level = 0, 0
 		logs.LogV("[voice/udp] drop %d stale audio frames (playback latency over %d ms)",
 			dropped, audioQueueMaxFrames*audioFrameMillis)
 	}
@@ -325,32 +384,44 @@ func (p *audioPlayout) growLead(now time.Time) {
 	}
 	grow := min(audioLeadGrowFrames, audioLeadMaxFrames-p.lead)
 	p.lead += grow
-	p.expand += grow
+	p.adjust += grow * p.frameSamples
 	p.lastAdapt = now
 	logs.LogV("[voice/udp] jitter buffer lead grows to %d ms", p.lead*audioFrameMillis)
 }
 
-// adaptLead inserts the frames a grown lead still needs, and shrinks the
-// lead again after a quiet period.
+// takeMissed consumes a recently concealed slot once. Decoded duplicates and
+// repeats of a late packet cannot trigger repeated delay growth.
+func (p *audioPlayout) takeMissed(index uint16) bool {
+	found := false
+	for i := range p.missed {
+		slot := &p.missed[i]
+		if slot.valid && absIndexDelta(index, slot.index) <= audioFrameTicks/2 {
+			slot.valid = false
+			found = true
+		}
+	}
+	return found
+}
+
+func absIndexDelta(a, b uint16) int32 {
+	d := mediaIndexDelta(a, b)
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// adaptLead changes the target only. push adjusts PCM duration; the decoder
+// advances exactly once per media slot, including actual losses and DTX.
 func (p *audioPlayout) adaptLead(now time.Time) {
 	if !p.ready {
-		p.expand = 0
+		p.adjust = 0
 		return
 	}
-	if p.expand > 0 {
-		// Play one extra concealed frame without consuming a slot: the
-		// timeline shifts by a frame and later packets get more time.
-		p.expand--
-		next := p.nextIndex
-		if p.conceal() {
-			p.nextIndex = next
-		}
-		return
-	}
-	if p.lead > p.leadMin && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
+	if p.adjust == 0 && p.lead > p.leadMin && now.Sub(p.lastLateAt) >= audioLeadShrinkQuiet && now.Sub(p.lastAdapt) >= audioLeadShrinkEvery {
 		p.lead--
 		p.lastAdapt = now
-		p.shrink = true // push drops the next quiet frame
+		p.adjust -= p.frameSamples
 		logs.LogV("[voice/udp] jitter buffer lead shrinks to %d ms", p.lead*audioFrameMillis)
 	}
 }
@@ -380,16 +451,15 @@ func (p *audioPlayout) recordLoss(delta int32, afterSID bool, now time.Time) {
 }
 
 // configure applies new buffer settings during a call (from -audio). It runs
-// on the receiver goroutine. A larger lead is reached by playing extra
-// frames; a smaller one shrinks over quiet frames as usual.
+// on the receiver goroutine. The PCM rate controller gradually reaches the
+// new target without adding decoder slots. Quiet frames can be removed sooner.
 func (p *audioPlayout) configure(leadFrames, leadMinFrames, lowFrames int) {
 	p.leadMin = leadMinFrames
 	p.lowWater = p.frameSamples * lowFrames
-	if leadFrames > p.lead && p.ready {
-		p.expand += leadFrames - p.lead
-	} else if leadFrames < p.lead {
-		p.shrink = true
+	if p.ready {
+		p.adjust += (leadFrames - p.lead) * p.frameSamples
 	}
+	p.level = 0
 	p.lead = leadFrames
 	p.lastLateAt, p.lastAdapt = time.Now(), time.Now()
 }

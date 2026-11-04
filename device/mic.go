@@ -14,6 +14,8 @@ import (
 type AudioCaptureFrame struct {
 	Samples    []int16
 	CapturedAt time.Time
+	// FirstSample is counted before enqueueing, including discarded blocks.
+	FirstSample uint64
 }
 
 // StartMicrophoneStream starts capturing microphone PCM samples with the given sample rate and channel count.
@@ -37,6 +39,8 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 
 	var mu sync.Mutex
 	closed := false
+	var firstSample uint64
+	var captureEpoch time.Time
 
 	callbacks := malgo.DeviceCallbacks{
 		Data: func(pOutput, pInput []byte, frameCount uint32) {
@@ -47,8 +51,12 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			// The callback runs once the block is complete; its first sample was
 			// captured one block duration earlier.
 			blockFrames := len(samples) / max(channels, 1)
-			capturedAt := time.Now().Add(-time.Duration(blockFrames) * time.Second / time.Duration(sampleRate))
-			frame := AudioCaptureFrame{Samples: samples, CapturedAt: capturedAt}
+			if captureEpoch.IsZero() {
+				captureEpoch = time.Now().Add(-time.Duration(blockFrames) * time.Second / time.Duration(sampleRate))
+			}
+			capturedAt := captureEpoch.Add(time.Duration(firstSample) * time.Second / time.Duration(sampleRate))
+			frame := AudioCaptureFrame{Samples: samples, CapturedAt: capturedAt, FirstSample: firstSample}
+			firstSample += uint64(blockFrames)
 			select {
 			case out <- frame:
 			default:
