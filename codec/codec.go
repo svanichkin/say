@@ -667,10 +667,13 @@ func (e *Encoder) Encode(frame Frame, cols, rows int) ([]byte, error) {
 	}
 
 	if keyframe == 0 && e.shouldForcePeriodicKeyframe() {
+		// A periodic keyframe only lets a receiver that lost the last one
+		// recover. The current palette still fits, so resend it with the
+		// reused indices: rebuilding it from this frame's slightly noisy
+		// colours made a static picture shift colours at every keyframe.
 		keyframe = 1
-	}
-
-	if keyframe == 1 {
+		palBytes = flattenPalette(e.lastPalette)
+	} else if keyframe == 1 {
 		palette, paletteExpanded := buildPaletteFromColors(fgColors, bgColors, totalCells)
 		palBytes = flattenPalette(palette)
 
