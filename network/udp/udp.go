@@ -44,7 +44,7 @@ const (
 	audioBufferLeadFrames           = 32                       // 640 ms jitter buffer, as in v0.1.3 (hypothesis test)
 	audioBufferMaxFrames            = 128                      // queue capacity: 2.56 s
 	audioMaxConsecutivePLCs         = 32                       // tolerate up to 640 ms of missing media before resync
-	audioSpeakerPeriodFrames        = 2                        // speaker device period: 40 ms, as in the G.722 version
+	audioSpeakerPeriodFrames        = 4                        // 80 ms device period, matching the clean v0.1.3 playback configuration
 	audioPlayoutLowFrames           = audioSpeakerPeriodFrames // conceal once less than one device period is queued
 	audioCaptureResync              = 60 * time.Millisecond    // capture timeline gap that means lost samples
 	audioDTXUpdateFrames            = 8                        // AMR-NB sends a SID update at least every 8 frames in DTX
@@ -206,6 +206,7 @@ func (vs *dataSession) Done() <-chan struct{} {
 // TextFrame-encoded video frames are also sent over the same PacketConn, prefixed with a frame
 // type byte.
 func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) {
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	stopCh := make(chan struct{})
 	var stopOnce sync.Once
 	var cleanupOnce sync.Once
@@ -238,15 +239,69 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		frameSamples int
 		mediaEpoch   = time.Now()
 
-		micCancel context.CancelFunc = func() {}
-
 		audioMicIn <-chan device.AudioCaptureFrame
 
 		audioNetIn      chan []byte
 		audioSpeakerOut *device.PlaybackQueue
 
 		speaker *device.Speaker
+
+		videoCamIn         <-chan device.CameraFrame
+		videoNetIn         chan []byte
+		videoSelfScreenOut chan *codec.TextFrame
+		videoPeerScreenOut chan *codec.TextFrame
 	)
+
+	// Install the stop callback before starting either audio device.
+	stop = func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+			cancelSession()
+		})
+	}
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			stop()
+			if speaker != nil {
+				speaker.Close()
+			}
+			// Cancellation is asynchronous. Do not let the next call open devices
+			// while the previous capture goroutines are still closing them.
+			if audioMicIn != nil {
+				for range audioMicIn {
+				}
+			}
+			if videoCamIn != nil {
+				for range videoCamIn {
+				}
+			}
+			ui.ClearLocalFrame()
+			ui.ClearRemoteFrame()
+		})
+	}
+	started := false
+	defer func() {
+		if !started {
+			cleanup()
+		}
+	}()
+
+	// A cold camera start can take over a second. Complete it before starting
+	// audio: otherwise microphone samples and AEC reference accumulate while
+	// there is no sender to consume them, making the first call unlike a reconnect.
+	if useVideo {
+		camCtx, cancel := context.WithCancel(sessionCtx)
+		var err error
+		videoCamIn, err = device.StartCameraStream(camCtx)
+		if err != nil {
+			cancel()
+			log.Printf("[video] camera stream disabled: %v", err)
+		}
+		videoSelfScreenOut = make(chan *codec.TextFrame, 1)
+		videoPeerScreenOut = make(chan *codec.TextFrame, 1)
+		videoNetIn = make(chan []byte, 1)
+		ui.EnsureRenderer(context.Background())
+	}
 
 	if useVoice {
 		// Init codec
@@ -265,16 +320,6 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			log.Printf("[audio/aec] echo cancellation disabled")
 		}
 
-		micCtx, cancel := context.WithCancel(context.Background())
-		micCancel = cancel
-
-		// microphone PCM input channel
-		audioMicIn, err = device.StartMicrophoneStream(micCtx, audioSampleRate, audioChannels)
-		if err != nil {
-			micCancel()
-			return nil, fmt.Errorf("mic stream: %w", err)
-		}
-
 		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
 		audioNetIn = make(chan []byte, audioBufferMaxFrames)
 
@@ -286,59 +331,15 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		if err != nil {
 			return nil, fmt.Errorf("speaker: %w", err)
 		}
-	}
 
-	cleanup := func() {
-		cleanupOnce.Do(func() {
-			if speaker != nil {
-				speaker.Close()
-			}
-			ui.ClearLocalFrame()
-			ui.ClearRemoteFrame()
-		})
-	}
-
-	var (
-		camCancel context.CancelFunc = func() {}
-
-		videoCamIn <-chan device.CameraFrame
-
-		videoNetIn         chan []byte
-		videoSelfScreenOut chan *codec.TextFrame
-		videoPeerScreenOut chan *codec.TextFrame
-	)
-
-	// ======== Stop function for the whole session ========
-	stop = func() {
-		stopOnce.Do(func() {
-			micCancel()
-			if camCancel != nil {
-				camCancel()
-			}
-			close(stopCh)
-		})
-	}
-
-	// ======== Video codec and buffers ========
-	if useVideo {
-		var err error
-		camCtx, cancel := context.WithCancel(context.Background())
-		camCancel = cancel
-
-		// camera frames from local webcam (if available)
-		videoCamIn, err = device.StartCameraStream(camCtx)
+		// Open capture last, immediately before starting its consumer.
+		audioMicIn, err = device.StartMicrophoneStream(sessionCtx, audioSampleRate, audioChannels)
 		if err != nil {
-			cancel()
-			log.Printf("[video] camera stream disabled: %v", err)
+			return nil, fmt.Errorf("mic stream: %w", err)
 		}
-
-		videoSelfScreenOut = make(chan *codec.TextFrame, 1)
-		videoPeerScreenOut = make(chan *codec.TextFrame, 1)
-		videoNetIn = make(chan []byte, 1)
 	}
-
-	if useVideo {
-		ui.EnsureRenderer(context.Background())
+	if err := sessionCtx.Err(); err != nil {
+		return nil, fmt.Errorf("media stopped during startup: %w", err)
 	}
 
 	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
@@ -401,6 +402,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		return nil
 	}
 
+	started = true
 	return &dataSession{stop: stopFunc, done: done}, nil
 }
 
