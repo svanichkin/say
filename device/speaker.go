@@ -25,9 +25,10 @@ type PlaybackFrame struct {
 }
 
 // StartSpeaker initializes a playback device that consumes PCM frames from speakerIn.
+// It reports every played sample back to speakerIn so its latency accounting stays exact.
 // stopCh is observed to output silence when the session stops, and onStop is invoked when
 // the underlying device stops unexpectedly.
-func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, speakerIn <-chan PlaybackFrame, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
+func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, speakerIn *PlaybackQueue, stopCh <-chan struct{}, onRender func([]int16), onStop func()) (*Speaker, error) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		log.Printf("[malgo] %s", message)
 	})
@@ -84,14 +85,10 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 				if len(pending) > 0 {
 					return
 				}
-				select {
-				case frame, ok := <-speakerIn:
-					if ok && frame.Samples != nil {
-						pending = frame.Samples
-						pendingIndex = frame.MediaIndex
-						pendingSamples = 0
-					}
-				default:
+				if frame, ok := speakerIn.pop(); ok && frame.Samples != nil {
+					pending = frame.Samples
+					pendingIndex = frame.MediaIndex
+					pendingSamples = 0
 				}
 			}
 
@@ -106,6 +103,7 @@ func StartSpeaker(sampleRate, channels, frameSamples, samplesPerMediaTick int, s
 				n := copy(outSamples[filled:], pending)
 				filled += n
 				pending = pending[n:]
+				speakerIn.consumed(n)
 				pendingSamples += n / channels
 				if samplesPerMediaTick > 0 {
 					speaker.playbackTick.Store(uint32(pendingIndex) + uint32(pendingSamples/samplesPerMediaTick))

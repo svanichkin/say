@@ -2,6 +2,7 @@ package udp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -36,11 +37,15 @@ const (
 	mediaIndexMask          uint16 = 0x7fff
 	mediaIndexHalf          uint16 = 0x4000
 	mediaTickDuration              = 4 * time.Millisecond
-	mediaTickSamples               = 32 // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                = 5  // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames          = 4  // 80 ms startup jitter buffer
-	audioBufferMaxFrames           = 32 // 640 ms cap, allowing high-jitter bursts to drain
-	audioMaxConsecutivePLCs        = 32 // tolerate up to 640 ms of missing media before resync
+	mediaTickSamples               = 32                    // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                = 5                     // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames          = 4                     // 80 ms startup jitter buffer
+	audioBufferMaxFrames           = 32                    // 640 ms cap, allowing high-jitter bursts to drain
+	audioMaxConsecutivePLCs        = 32                    // tolerate up to 640 ms of missing media before resync
+	audioCaptureResync             = 60 * time.Millisecond // capture timeline gap that means lost samples
+	audioDTXUpdateFrames           = 8                     // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames            = 15                    // 300 ms of queued playback triggers a trim…
+	audioQueueTargetFrames         = 6                     // …down to 120 ms (jitter buffer lead plus headroom)
 	videoBaseStaleThreshold        = 250 * time.Millisecond
 	videoMaxStaleThreshold         = 3 * time.Second
 	videoMaxQueuedFrames           = 96                     // ~3 s at 30 fps
@@ -74,6 +79,39 @@ func SetMaxVideoFPS(fps int) {
 		fps = maxVideoFPSLimit
 	}
 	maxVideoFPS = fps
+}
+
+// maxMediaDatagram is the largest media datagram we send. Every frame within
+// codec.MaxFrameCells fits, with room below the 65507-byte IPv4 UDP limit.
+const maxMediaDatagram = 60000
+
+// isFatalSendError reports whether a UDP send error means the socket is gone.
+// Everything else (timeouts, ICMP-triggered "connection refused", "no buffer
+// space", "message too long") only loses that one packet.
+func isFatalSendError(err error) bool {
+	return errors.Is(err, net.ErrClosed)
+}
+
+// sendErrorLog rate-limits logging of non-fatal send errors, which can repeat
+// for every packet while the peer is unreachable.
+type sendErrorLog struct {
+	mu      sync.Mutex
+	last    time.Time
+	dropped int
+}
+
+var sendErrLog sendErrorLog
+
+func (l *sendErrorLog) report(kind string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if time.Since(l.last) < time.Second {
+		l.dropped++
+		return
+	}
+	log.Printf("[%s/udp] send failed (packet dropped, %d more since last report): %v", kind, l.dropped, err)
+	l.last = time.Now()
+	l.dropped = 0
 }
 
 // mediaIndex maps local monotonic capture time onto the common media timeline.
@@ -184,7 +222,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		audioMicIn <-chan device.AudioCaptureFrame
 
 		audioNetIn      chan []byte
-		audioSpeakerOut chan device.PlaybackFrame
+		audioSpeakerOut *device.PlaybackQueue
 
 		speaker *device.Speaker
 	)
@@ -211,7 +249,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 			return nil, fmt.Errorf("mic stream: %w", err)
 		}
 
-		audioSpeakerOut = make(chan device.PlaybackFrame, audioBufferMaxFrames)
+		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
 		audioNetIn = make(chan []byte, audioBufferMaxFrames)
 
 		speaker, err = device.StartSpeaker(audioSampleRate, audioChannels, frameSamples, mediaTickSamples, audioSpeakerOut, stopCh, aec.playback, stop)
@@ -419,8 +457,8 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 			n, err := pc.WriteTo(out, addr)
 			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					log.Printf("[voice/udp] write timeout: %v", err)
+				if !isFatalSendError(err) {
+					sendErrLog.report("voice", err)
 					return true
 				}
 				log.Printf("[voice/udp] write error: %v", err)
@@ -490,10 +528,12 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				if len(pcmBuf) == 0 {
 					pcmStartAt = capture.CapturedAt
 				} else {
+					// The timeline follows the sample count; callback times jitter by
+					// several milliseconds (and block sizes vary when the backend
+					// resamples), which is not a gap. Resynchronize only when samples
+					// were really lost, e.g. capture blocks dropped while we were late.
 					expected := pcmStartAt.Add(time.Duration(len(pcmBuf)) * time.Second / time.Duration(audioSampleRate))
-					if delta := capture.CapturedAt.Sub(expected); delta > 4*time.Millisecond || delta < -4*time.Millisecond {
-						// Do not concatenate samples across a capture gap. The next packet's
-						// media index carries the discontinuity to the receiver.
+					if delta := capture.CapturedAt.Sub(expected); delta > audioCaptureResync || delta < -audioCaptureResync {
 						pcmBuf = pcmBuf[:0]
 						pcmStartAt = capture.CapturedAt
 					}
@@ -647,6 +687,12 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						continue
 					}
 
+					if mediaHeaderBytes+len(dataNet) > maxMediaDatagram {
+						// Cannot happen within codec.MaxFrameCells; never send an
+						// oversized datagram that the network would drop or fragment.
+						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", mediaHeaderBytes+len(dataNet), maxMediaDatagram)
+						continue
+					}
 					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
 					out := make([]byte, mediaHeaderBytes+len(dataNet))
 					copy(out[:mediaHeaderBytes], header[:])
@@ -654,8 +700,9 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
-						if ne, ok := err.(net.Error); ok && ne.Timeout() {
-							log.Printf("[video/udp] send timeout: %v", err)
+						// A lost video frame is harmless; only a closed socket ends the session.
+						if !isFatalSendError(err) {
+							sendErrLog.report("video", err)
 							continue
 						}
 						log.Printf("[video/udp] send: %v", err)
@@ -828,290 +875,58 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 	}()
 }
 
-// startAudioReceiver launches a goroutine that decodes speech payloads from netAudioIn into PCM frames
-// and feeds them into speakerOut.
+// audioPacketsExpected returns how many packets the sender transmitted in a
+// timestamp gap of delta ticks, counting the packet that ends the gap. After a
+// SID frame the sender is in DTX and only transmits a SID update every
+// audioDTXUpdateFrames frames, so suppressed silence is not loss; only a missed
+// update is.
+func audioPacketsExpected(delta int32, afterSID bool) int32 {
+	frames := (delta + audioFrameTicks/2) / audioFrameTicks
+	if frames < 1 {
+		frames = 1
+	}
+	if afterSID {
+		return 1 + (frames-1)/audioDTXUpdateFrames
+	}
+	return frames
+}
+
+// startAudioReceiver launches a goroutine that decodes speech payloads from
+// netAudioIn and keeps speakerOut continuously fed (see audioPlayout).
 func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
-	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut chan device.PlaybackFrame) {
+	stopCh <-chan struct{}, netAudioIn <-chan []byte, speakerOut *device.PlaybackQueue) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ui.UpdateRxAudioLoss(0)
-
-		buffer := make([]device.PlaybackFrame, 0, audioBufferMaxFrames)
-		bufferReady := false
-		bufferedSamples := 0
-
-		var (
-			pendingIndex    uint16
-			pendingData     []byte
-			havePending     bool
-			plcStreak       int
-			lastGoodFrame   []int16
-			pcmScratch      = make([]int16, frameSamples)
-			lastPacketAt    time.Time
-			lossWindowStart = time.Now()
-			lossExpected    uint64
-			lossMissing     uint64
-		)
-
-		recordAudioLoss := func(delta int32) {
-			expected := (delta + audioFrameTicks/2) / audioFrameTicks
-			if expected < 1 {
-				expected = 1
-			}
-			lossExpected += uint64(expected)
-			lossMissing += uint64(expected - 1)
-			now := time.Now()
-			if now.Sub(lossWindowStart) >= time.Second {
-				loss := 0.0
-				if lossExpected > 0 {
-					loss = float64(lossMissing) / float64(lossExpected)
-				}
-				ui.UpdateRxAudioLoss(loss)
-				lossExpected, lossMissing = 0, 0
-				lossWindowStart = now
-			}
-		}
-
-		clearSpeakerQueue := func() {
-			for {
-				select {
-				case <-speakerOut:
-				default:
-					return
-				}
-			}
-		}
-
-		resetState := func() {
-			buffer = buffer[:0]
-			bufferReady = false
-			bufferedSamples = 0
-			clearSpeakerQueue()
-			pendingData = nil
-			havePending = false
-			plcStreak = 0
-			lastGoodFrame = nil
-		}
-
-		enqueueFrame := func(pcm []int16, index uint16) {
-			if len(buffer) >= audioBufferMaxFrames {
-				bufferedSamples -= len(buffer[0].Samples)
-				buffer = buffer[1:]
-				logs.LogV("[voice/udp] drop rx audio frame (buffer overflow)")
-			}
-			buffer = append(buffer, device.PlaybackFrame{Samples: pcm, MediaIndex: index})
-			bufferedSamples += len(pcm)
-			if !bufferReady && bufferedSamples >= frameSamples*audioBufferLeadFrames {
-				bufferReady = true
-			}
-		}
-
-		popFrame := func() (device.PlaybackFrame, bool) {
-			if len(buffer) == 0 {
-				return device.PlaybackFrame{}, false
-			}
-			frame := buffer[0]
-			buffer = buffer[1:]
-			bufferedSamples -= len(frame.Samples)
-			return frame, true
-		}
-
-		generatePLC := func(sampleCount int) []int16 {
-			if sampleCount <= 0 || sampleCount%frameSamples != 0 || plcStreak >= audioMaxConsecutivePLCs {
-				return nil
-			}
-			frames := sampleCount / frameSamples
-			if frames > audioMaxConsecutivePLCs-plcStreak {
-				frames = audioMaxConsecutivePLCs - plcStreak
-			}
-			frame := make([]int16, frames*frameSamples)
-			for i := 0; i < frames; i++ {
-				out := pcmScratch[:frameSamples]
-				written, err := dec.Conceal(out)
-				if err == nil && written > 0 {
-					if written > frameSamples {
-						written = frameSamples
-					}
-					copy(frame[i*frameSamples:i*frameSamples+written], out[:written])
-				} else if lastGoodFrame != nil {
-					copy(frame[i*frameSamples:(i+1)*frameSamples], lastGoodFrame)
-				}
-			}
-			plcStreak += frames
-			return frame
-		}
-
-		decodeAndEnqueue := func(data []byte, index uint16) bool {
-			if len(data) == 0 {
-				return false
-			}
-			if len(pcmScratch) < frameSamples {
-				pcmScratch = make([]int16, frameSamples)
-			}
-			written, err := dec.DecodeFrame(data, pcmScratch[:frameSamples])
-			if err != nil || written <= 0 {
-				logs.LogV("[voice/udp] %s decode error: produced %d samples (len=%d): %v", audioCodec, written, len(data), err)
-				return false
-			}
-			plcStreak = 0
-			frame := make([]int16, frameSamples)
-			toCopy := written
-			if toCopy > frameSamples {
-				toCopy = frameSamples
-			}
-			copy(frame, pcmScratch[:toCopy])
-			if toCopy < frameSamples {
-				for i := toCopy; i < frameSamples; i++ {
-					frame[i] = 0
-				}
-			}
-			if lastGoodFrame == nil {
-				lastGoodFrame = make([]int16, frameSamples)
-			}
-			copy(lastGoodFrame, frame)
-			enqueueFrame(frame, index)
-			return true
-		}
-
-		flushPending := func() {
-			if !havePending {
-				return
-			}
-			if !decodeAndEnqueue(pendingData, pendingIndex) {
-				if frame := generatePLC(frameSamples); frame != nil {
-					enqueueFrame(frame, pendingIndex)
-				}
-			}
-			havePending = false
-			pendingData = nil
-		}
-
-		feedSpeaker := func(frame device.PlaybackFrame) {
-			if frame.Samples == nil {
-				return
-			}
-			select {
-			case speakerOut <- frame:
-				// normal path
-			default:
-				select {
-				case <-speakerOut:
-					logs.LogV("[voice/udp] drop local audio frame (speakerOut full, dropped oldest)")
-				default:
-				}
-
-				select {
-				case speakerOut <- frame:
-				default:
-					logs.LogV("[voice/udp] drop local audio frame (speakerOut full, dropped newest)")
-				}
-			}
-		}
-		feedBuffered := func() {
-			if !bufferReady {
-				return
-			}
-			for len(buffer) > 0 {
-				frame, ok := popFrame()
-				if !ok {
-					return
-				}
-				feedSpeaker(frame)
-			}
-		}
+		playout := newAudioPlayout(dec, frameSamples, speakerOut)
+		// Well below one 20 ms frame, so a slot is concealed before the
+		// speaker's queue empties.
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
 
 		for {
 			select {
 			case <-stopCh:
-				flushPending()
 				return
+			case <-tick.C:
+				if mediactrl.PlaybackEnabled() {
+					playout.onTick()
+				}
 			case pkt, ok := <-netAudioIn:
 				if !ok {
-					flushPending()
 					return
 				}
-				if pkt == nil {
-					continue
-				}
 				if !mediactrl.PlaybackEnabled() {
-					resetState()
+					playout.reset()
 					ui.UpdateRxAudioLoss(0)
 					continue
 				}
 				if len(pkt) <= mediaIndexBytes {
 					continue
 				}
-
 				index := uint16(pkt[0])<<8 | uint16(pkt[1])
-				payload := pkt[mediaIndexBytes:]
-				if len(payload) == 0 {
-					continue
-				}
-
-				if !havePending {
-					pendingIndex = index
-					pendingData = payload
-					havePending = true
-					lastPacketAt = time.Now()
-					continue
-				}
-				if time.Since(lastPacketAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
-					// The 15-bit index is ambiguous after half a cycle without media.
-					resetState()
-					pendingIndex = index
-					pendingData = payload
-					havePending = true
-					lastPacketAt = time.Now()
-					continue
-				}
-
-				delta := mediaIndexDelta(index, pendingIndex)
-				if delta == 0 {
-					// Duplicate or reordered packet. Keep waiting for a frame after
-					// the current one before advancing the decoder.
-					continue
-				}
-				if delta < 0 {
-					continue
-				}
-				// AMR DTX intentionally omits NO_DATA frames and marks its
-				// periodic comfort-noise update with an SID frame. Those timestamp
-				// gaps are silence suppression, not network packet loss.
-				if !dec.IsDTXFrame(payload) {
-					recordAudioLoss(delta)
-				}
-
-				if !decodeAndEnqueue(pendingData, pendingIndex) {
-					if frame := generatePLC(frameSamples); frame != nil {
-						enqueueFrame(frame, pendingIndex)
-					}
-				}
-
-				missingTicks := delta - audioFrameTicks
-				if missingTicks > audioMaxConsecutivePLCs*audioFrameTicks {
-					// A long loss burst is better handled by jumping to the live edge
-					// than by playing stale audio after a long PLC run.
-					buffer = buffer[:0]
-					bufferReady = false
-					bufferedSamples = 0
-					clearSpeakerQueue()
-					pendingIndex = index
-					pendingData = payload
-					lastPacketAt = time.Now()
-					continue
-				}
-				if missingTicks > 0 {
-					if frame := generatePLC(int(missingTicks) * mediaTickSamples); frame != nil {
-						enqueueFrame(frame, advanceMediaIndex(pendingIndex, audioFrameTicks))
-					}
-				}
-
-				pendingIndex = index
-				pendingData = payload
-				havePending = true
-				lastPacketAt = time.Now()
-				feedBuffered()
+				playout.onPacket(index, pkt[mediaIndexBytes:], time.Now())
 			}
 		}
 	}()
