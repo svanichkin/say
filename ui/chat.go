@@ -88,19 +88,13 @@ func chatKey(r rune) {
 		line := strings.TrimSpace(chatState.input)
 		chatState.input = ""
 		if line != "" {
-			if info, err := filepath.Abs(strings.Trim(line, "\"'")); err == nil {
-				if st, statErr := os.Stat(info); statErr == nil && st.Mode().IsRegular() {
-					if onFile := chatState.onFile; onFile != nil {
-						if chatState.transfer != "" {
-							chatState.Unlock()
-							return
-						}
-						chatState.transfer = filepath.Base(info)
-						chatState.Unlock()
-						go onFile(info)
-						RequestRedraw()
-						return
-					}
+			if info, ok := droppedFile(line); ok {
+				if onFile := chatState.onFile; onFile != nil {
+					chatState.transfer = filepath.Base(info)
+					chatState.Unlock()
+					go onFile(info)
+					RequestRedraw()
+					return
 				}
 			}
 			if onText := chatState.onText; onText != nil {
@@ -137,30 +131,19 @@ func chatPaste(s string) {
 	if busy {
 		return
 	}
-	// Terminal file managers commonly paste file:// URIs or quoted absolute paths.
-	path := strings.Trim(s, "\"'\r\n")
-	if strings.HasPrefix(path, "file://") {
-		if parsed, err := url.Parse(path); err == nil {
-			if decoded, err := url.PathUnescape(parsed.Path); err == nil {
-				path = decoded
-			}
+	if abs, ok := droppedFile(s); ok {
+		chatState.Lock()
+		onFile := chatState.onFile
+		if onFile != nil && chatState.transfer == "" {
+			chatState.transfer = filepath.Base(abs)
+		} else {
+			onFile = nil
 		}
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		if st, statErr := os.Stat(abs); statErr == nil && st.Mode().IsRegular() {
-			chatState.Lock()
-			onFile := chatState.onFile
-			if onFile != nil && chatState.transfer == "" {
-				chatState.transfer = filepath.Base(abs)
-			} else {
-				onFile = nil
-			}
-			chatState.Unlock()
-			if onFile != nil {
-				go onFile(abs)
-				RequestRedraw()
-				return
-			}
+		chatState.Unlock()
+		if onFile != nil {
+			go onFile(abs)
+			RequestRedraw()
+			return
 		}
 	}
 	chatState.Lock()
@@ -192,4 +175,51 @@ func SetTransferStatus(text string) {
 	chatState.transfer = text
 	chatState.Unlock()
 	RequestRedraw()
+}
+
+// droppedFile resolves text that a terminal inserts when a file is dragged
+// onto it, or that is typed or pasted as a path, to an existing regular file.
+// Terminals differ: macOS Terminal and iTerm2 escape spaces and special
+// characters with backslashes ("My\ File.txt") and append a space, others
+// quote the path or paste a file:// URI.
+func droppedFile(text string) (string, bool) {
+	path := strings.TrimSpace(text)
+	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
+		path = path[1 : len(path)-1]
+	} else if strings.Contains(path, "\\") {
+		var b strings.Builder
+		escaped := false
+		for _, r := range path {
+			if r == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			escaped = false
+			b.WriteRune(r)
+		}
+		path = b.String()
+	}
+	if strings.HasPrefix(path, "file://") {
+		if parsed, err := url.Parse(path); err == nil {
+			if decoded, err := url.PathUnescape(parsed.Path); err == nil {
+				path = decoded
+			}
+		}
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	if path == "" {
+		return "", false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	if st, err := os.Stat(abs); err != nil || !st.Mode().IsRegular() {
+		return "", false
+	}
+	return abs, true
 }
