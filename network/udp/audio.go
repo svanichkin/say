@@ -17,10 +17,6 @@ const (
 	audioFrameMillis = 20
 	maxAudioPacket   = 1275
 	audioEchoTailMs  = 200
-	// audioEchoMaxDelaySamples bounds the reference delay (1 s at 8 kHz).
-	audioEchoMaxDelaySamples = audioSampleRate
-	// audioEchoDelayMarginMs keeps the reference this much ahead of its echo.
-	audioEchoDelayMarginMs = 40
 )
 
 type audioEncoder interface {
@@ -153,13 +149,6 @@ type audioEcho struct {
 	refMu   sync.Mutex
 	refRing []int16
 
-	// delaySamples holds the reference back by about the speaker's device
-	// latency: rendered audio reaches the microphone only after the device
-	// buffer has played it, and the filter models echo up to audioEchoTailMs
-	// after the reference. primed is false until that much is queued.
-	delaySamples int
-	primed       bool
-
 	mu             sync.Mutex // canceller state, used by the sender goroutine
 	canceller      *echo.Canceller
 	frameSamples   int
@@ -180,7 +169,7 @@ func newAudioEcho(frameSamples int) (*audioEcho, error) {
 	return &audioEcho{
 		canceller:    canceller,
 		frameSamples: frameSamples,
-		refRing:      make([]int16, 0, frameSamples*(audioEchoRefMaxFrames+2)+audioEchoMaxDelaySamples),
+		refRing:      make([]int16, 0, frameSamples*(audioEchoRefMaxFrames+2)),
 		ref:          make([]int16, frameSamples),
 	}, nil
 }
@@ -193,8 +182,8 @@ func (a *audioEcho) playback(samples []int16) {
 	}
 	a.refMu.Lock()
 	a.refRing = append(a.refRing, samples...)
-	if len(a.refRing) > a.delaySamples+a.frameSamples*audioEchoRefMaxFrames {
-		drop := len(a.refRing) - (a.delaySamples + a.frameSamples*audioEchoRefTargetFrames)
+	if len(a.refRing) > a.frameSamples*audioEchoRefMaxFrames {
+		drop := len(a.refRing) - a.frameSamples*audioEchoRefTargetFrames
 		a.refRing = append(a.refRing[:0], a.refRing[drop:]...)
 	}
 	a.refMu.Unlock()
@@ -204,28 +193,12 @@ func (a *audioEcho) playback(samples []int16) {
 // silence if the speaker has not produced one (nothing to cancel then).
 func (a *audioEcho) nextReference() {
 	a.refMu.Lock()
-	if !a.primed && len(a.refRing) >= a.delaySamples+a.frameSamples {
-		a.primed = true
-	}
-	if a.primed && len(a.refRing) >= a.frameSamples {
+	if len(a.refRing) >= a.frameSamples {
 		copy(a.ref, a.refRing[:a.frameSamples])
 		a.refRing = append(a.refRing[:0], a.refRing[a.frameSamples:]...)
 	} else {
-		// Not primed yet, or the speaker stalled: hold the delay again.
-		a.primed = false
 		clear(a.ref)
 	}
-	a.refMu.Unlock()
-}
-
-// setReferenceDelay holds the reference back by samples (see delaySamples).
-func (a *audioEcho) setReferenceDelay(samples int) {
-	if a == nil {
-		return
-	}
-	a.refMu.Lock()
-	a.delaySamples = max(0, samples)
-	a.primed = false
 	a.refMu.Unlock()
 }
 
@@ -239,7 +212,6 @@ func (a *audioEcho) setCaptureEnabled(enabled bool) {
 		a.canceller.Reset()
 		a.refMu.Lock()
 		a.refRing = a.refRing[:0]
-		a.primed = false
 		a.refMu.Unlock()
 		a.captureEnabled = enabled
 		a.captureKnown = true
@@ -272,9 +244,7 @@ func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
 		enc, err := amrnb.NewEncoder(amrnb.EncoderConfig{
 			Mode:         amrnb.Mode0475,
 			OctetAligned: true,
-			// No DTX: during silence the playout buffer otherwise drains to one
-			// device period, and the next words start late and crackle.
-			DTX: false,
+			DTX:          true,
 		})
 		if err != nil {
 			return nil, nil, 0, err
@@ -304,7 +274,7 @@ func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
 	}
 	enc.SetVBR(true)
 	enc.SetVBRConstraint(true)
-	enc.SetDTX(false) // see the AMR-NB note: DTX drained the buffer in pauses
+	enc.SetDTX(true)
 	enc.SetFEC(false)
 
 	dec, err := gopus.NewDecoder(gopus.DefaultDecoderConfig(audioSampleRate, audioChannels))

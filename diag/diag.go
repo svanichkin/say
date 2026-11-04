@@ -103,9 +103,6 @@ var (
 	RxQueueMinMs   Min
 	RxQueueMaxMs   Max
 	RxPendingMax   Max // reorder buffer depth
-	RxLeadMs       Max // adaptive jitter buffer lead
-	RxExpanded     Counter
-	RxShrunk       Counter
 )
 
 // Start logs the counters once per second until stop is closed.
@@ -135,7 +132,7 @@ func Start(stop <-chan struct{}) {
 				"SPK cb=%d frames=%d idle=%d under=%d/%dsmp gaps=%d cbMax=%dus ivl=%d..%dus fc=%d | "+
 				"MIC cb=%d smp=%d drop=%d clip=%d peak=%d ivl=%d..%dus blk=%d..%d | "+
 				"TX fr=%d pkt=%d dtx=%d resync=%d sendErr=%d encMax=%dus lagMax=%dms tsDeltaMax=%dus | "+
-				"RX pkt=%d dec=%d concGap=%d concTick=%d late=%d reord=%d dup=%d reset=%d rebuf=%d trim=%d decErr=%d budget=%d q=%d..%dms pend=%d lead=%dms exp=%d shrink=%d | "+
+				"RX pkt=%d dec=%d concGap=%d concTick=%d late=%d reord=%d dup=%d reset=%d rebuf=%d trim=%d decErr=%d budget=%d q=%d..%dms pend=%d | "+
 				"GC n=%d pause=%s max=%s",
 				pid,
 				SpkCallbacks.take(), SpkFrames.take(), SpkIdle.take(), SpkUnderruns.take(), SpkUnderrunSamples.take(), SpkGaps.take(),
@@ -147,7 +144,6 @@ func Start(stop <-chan struct{}) {
 				RxPackets.take(), RxDecoded.take(), RxConcealGap.take(), RxConcealTick.take(), RxLate.take(),
 				RxReordered.take(), RxDuplicates.take(), RxResets.take(), RxRebuffers.take(), RxTrimmed.take(),
 				RxDecodeErrors.take(), RxBudgetOut.take(), RxQueueMinMs.take(), RxQueueMaxMs.take(), RxPendingMax.take(),
-				RxLeadMs.take(), RxExpanded.take(), RxShrunk.take(),
 				gcN, gcPause, maxPause)
 		}
 	}()
@@ -155,3 +151,4 @@ func Start(stop <-chan struct{}) {
 
 // Abs16 returns |v| as int64 without overflowing on -32768.
 func Abs16(v int16) int64 { return int64(math.Abs(float64(v))) }
+

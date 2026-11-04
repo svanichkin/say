@@ -13,15 +13,10 @@ import (
 // bursts, as two independent devices do. It returns the echo suppression in
 // dB over the last two seconds.
 func echoScenario(t *testing.T, playback func([]int16), capture func(mic, out []int16)) float64 {
-	return echoScenarioDelay(t, 240, playback, capture) // 30 ms echo path
-}
-
-// echoScenarioDelay is echoScenario with the echo arriving delay samples
-// after the far frame was handed to the speaker.
-func echoScenarioDelay(t *testing.T, delay int, playback func([]int16), capture func(mic, out []int16)) float64 {
 	t.Helper()
 	const fs = 160
 	const frames = 500 // 10 s
+	const delay = 240  // 30 ms echo path
 	rng := rand.New(rand.NewSource(1))
 	far := make([]int16, (frames+2)*fs)
 	for i := range far {
@@ -111,28 +106,5 @@ func TestEchoReferencePreservesSpeakerPeriodOverlap(t *testing.T) {
 				t.Fatalf("reference jumped to %d, want frame %d", sample, want)
 			}
 		}
-	}
-}
-
-// With the v0.1.3 speaker buffer (80 ms x 4) the echo reaches the mic about
-// 320 ms after the reference was rendered, beyond the 200 ms filter. The
-// reference must be delayed by the device latency to be cancellable.
-func TestEchoReferenceDelayCoversDeviceLatency(t *testing.T) {
-	const deviceLatency = 4 * 4 * 160 // 320 ms
-	const echoDelay = deviceLatency + 240
-	run := func(refDelay int) float64 {
-		a, err := newAudioEcho(160)
-		if err != nil {
-			t.Fatal(err)
-		}
-		a.setCaptureEnabled(true)
-		a.setReferenceDelay(refDelay)
-		return echoScenarioDelay(t, echoDelay, a.playback, func(m, o []int16) { _ = a.capture(m, o) })
-	}
-	delayed := run(deviceLatency - audioSampleRate*audioEchoDelayMarginMs/1000)
-	undelayed := run(0)
-	t.Logf("echo through a 320 ms device buffer: %.1f dB with reference delay, %.1f dB without", delayed, undelayed)
-	if delayed < 15 {
-		t.Fatalf("delayed reference suppresses only %.1f dB", delayed)
 	}
 }
