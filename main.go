@@ -56,6 +56,7 @@ func run() (err error) {
 	}
 
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
+	udptransport.SetEchoCancellation(opts.EchoCancel)
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
 		return err
 	}

@@ -270,6 +270,7 @@ type AppOptions struct {
 	ColorFilter string
 	MaxVideoFPS int
 	AudioCodec  string
+	EchoCancel  bool
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -299,6 +300,7 @@ func ParseCLI() (*AppOptions, error) {
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 25,
 		AudioCodec:  "amrnb",
+		EchoCancel:  true,
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
@@ -757,6 +759,16 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("unsupported audio codec %q (choose opus or amrnb)", value)
 			}
 			opts.AudioCodec = codec
+		case "aec":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -aec: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.EchoCancel = boolVal
 		case "version":
 			boolVal := true
 			if hasValue && value != "" {

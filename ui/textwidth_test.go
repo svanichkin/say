@@ -7,12 +7,12 @@ import (
 
 func TestDisplayWidthCountsCells(t *testing.T) {
 	cases := map[string]int{
-		"hello":   5,
-		"привет":  6,
-		"你好":      4, // wide CJK
-		"👍":       2,
-		"👨‍👩‍👧": 2, // ZWJ family is one cluster
-		"é":       1, // e + combining acute
+		"hello":  5,
+		"привет": 6,
+		"你好":     4, // wide CJK
+		"👍":      2,
+		"👨‍👩‍👧":  2, // ZWJ family is one cluster
+		"é":      1, // e + combining acute
 	}
 	for s, want := range cases {
 		if got := displayWidth(s); got != want {
