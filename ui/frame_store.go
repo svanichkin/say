@@ -12,18 +12,13 @@ type frameRecord struct {
 	updatedAt time.Time
 }
 
-const (
-	defaultViewportFPS = 25
-	maxViewportFPS     = 30
-)
-
 var (
 	localFrameMu    sync.RWMutex
 	remoteFrameMu   sync.RWMutex
 	localFrame      frameRecord
 	remoteFrame     frameRecord
 	frameLimitMu    sync.Mutex
-	frameInterval   = time.Second / defaultViewportFPS
+	frameInterval   time.Duration // 0: no limit (set by SetVideoFPSLimit)
 	frameLastUpdate = make(map[string]time.Time)
 	frameTokens     = make(map[string]float64)
 )
@@ -106,9 +101,6 @@ func SetVideoFPSLimit(fps int) {
 	if fps <= 0 {
 		frameInterval = 0
 		return
-	}
-	if fps > maxViewportFPS {
-		fps = maxViewportFPS
 	}
 	frameInterval = time.Second / time.Duration(fps)
 }

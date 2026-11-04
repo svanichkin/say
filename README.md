@@ -233,7 +233,7 @@ of the current media protocol. Relevant CLI switches:
 - Without `-log`, Say writes logs only to stderr. With `-log`, it also writes a log file next to the running executable using the config name, for example `-config client` -> `client.log`. The resolved path is printed on startup. Use `-log debug` for the most detailed file logging.
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP). With `ygg`, nodes in the same local network discover each other by multicast and connect directly, bypassing internet peers.
-- `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
+- `-fps` – optional cap on the video frame rate. Without it every camera frame is sent and the rate adapts to the peer's frame loss (down to 5 fps).
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-novideo` – audio and chat only: the camera is not opened and no video is encoded or drawn.
 - `-aec=true` – enable acoustic echo cancellation (off by default; it can colour the voice).

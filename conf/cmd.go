@@ -32,10 +32,7 @@ type Friend struct {
 	Address string `json:"address"` // Ygg IPv6 like: 200:...:....:....
 }
 
-const (
-	minAllowedFPS = 5
-	maxAllowedFPS = 30
-)
+const ()
 
 // resolveConfigPath normalizes the config file path, expanding "~", converting it
 // to an absolute path, and ensuring the parent directory exists. When cfg is empty,
@@ -300,7 +297,7 @@ func ParseCLI() (*AppOptions, error) {
 	opts := &AppOptions{
 		Transport:   network.TransportYggdrasil,
 		ListenPort:  network.DefaultListenPort,
-		MaxVideoFPS: 25,
+		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
 		EchoCancel:  false,
 	}
@@ -748,8 +745,8 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 			if err != nil {
 				return fmt.Errorf("invalid fps %q", value)
 			}
-			if fps < minAllowedFPS || fps > maxAllowedFPS {
-				return fmt.Errorf("fps must be between %d and %d", minAllowedFPS, maxAllowedFPS)
+			if fps < 1 {
+				return fmt.Errorf("fps must be a positive number")
 			}
 			opts.MaxVideoFPS = fps
 		case "audio-codec":

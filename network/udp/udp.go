@@ -20,16 +20,15 @@ import (
 var (
 	useVoice    = true
 	useVideo    bool
-	maxVideoFPS = defaultVideoFPS
+	maxVideoFPS = 0 // optional -fps cap; 0: no cap, the rate adapts to loss
 	audioCodec  = "amrnb"
 	echoCancel  = false
 	micEnabled  = true
 )
 
 const (
-	defaultVideoFPS       = 25
 	minVideoFPS           = 5
-	maxVideoFPSLimit      = 30
+	videoFPSUncapped      = 60 // limiter rate without -fps; cameras deliver at most ~30
 	mediaKindAudio   byte = 0
 	mediaKindVideo   byte = 1
 
@@ -94,13 +93,17 @@ func SetAudioCodec(name string) error {
 
 // SetMaxVideoFPS clamps and sets the desired max FPS for video capture/encoding.
 func SetMaxVideoFPS(fps int) {
-	if fps < minVideoFPS {
-		fps = minVideoFPS
+	maxVideoFPS = max(fps, 0)
+}
+
+// videoFPSCeiling returns the highest rate the sender may use: the -fps cap
+// if set, otherwise videoFPSUncapped (above any camera, so the camera's own
+// rate is what goes out).
+func videoFPSCeiling() int {
+	if maxVideoFPS > 0 {
+		return maxVideoFPS
 	}
-	if fps > maxVideoFPSLimit {
-		fps = maxVideoFPSLimit
-	}
-	maxVideoFPS = fps
+	return videoFPSUncapped
 }
 
 // maxMediaDatagram is the largest media datagram we send. Every frame within
@@ -623,19 +626,14 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 		var fpsLimiter *time.Ticker
 		var (
-			curFPS         = maxVideoFPS // adapted to the peer's video loss
+			ceiling        = videoFPSCeiling()
+			curFPS         = ceiling // adapted to the peer's video loss
 			cleanReports   int
 			lastLossReport time.Time
 			videoSeq       byte
 		)
-		if maxVideoFPS > 0 {
-			interval := time.Second / time.Duration(maxVideoFPS)
-			if interval <= 0 {
-				interval = time.Second / 30
-			}
-			fpsLimiter = time.NewTicker(interval)
-			defer fpsLimiter.Stop()
-		}
+		fpsLimiter = time.NewTicker(time.Second / time.Duration(curFPS))
+		defer fpsLimiter.Stop()
 
 		for {
 			select {
@@ -662,6 +660,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					)
 				}
 
+				sentFPS := int(frames) // what actually went out in the last second
 				sentPkts, sentBytes = 0, 0
 				frames = 0
 				tEncodeLocal, tEncodeNet = 0, 0
@@ -670,7 +669,13 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				// Adapt the frame rate to the peer's latest loss report.
 				if loss, at := ui.PeerVideoLossSnapshot(); fpsLimiter != nil && at.After(lastLossReport) {
 					lastLossReport = at
-					if next := nextVideoFPS(curFPS, maxVideoFPS, loss, &cleanReports); next != curFPS {
+					// Adapt from the rate actually sent: without a cap the
+					// limiter sits above the camera's own rate.
+					base := curFPS
+					if sentFPS > 0 && sentFPS < base {
+						base = sentFPS
+					}
+					if next := nextVideoFPS(base, ceiling, loss, &cleanReports); next != curFPS {
 						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, curFPS, next)
 						curFPS = next
 						fpsLimiter.Reset(time.Second / time.Duration(curFPS))
