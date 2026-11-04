@@ -908,8 +908,19 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 		tick := time.NewTicker(50 * time.Millisecond) // periodic poll to react quickly to terminal resizes
 		defer tick.Stop()
 
+		// Frames of both panes arrive independently; a request shortly after
+		// a render waits for the rest of renderMinInterval, so one render
+		// shows both panes' news instead of each pane triggering its own.
+		var lastRender time.Time
+		var deferred <-chan time.Time
+		render := func() {
+			deferred = nil
+			renderTermFrames()
+			lastRender = time.Now()
+		}
+
 		// Initial draw so the UI is not blank until the first event arrives.
-		renderTermFrames()
+		render()
 
 		for {
 			select {
@@ -927,7 +938,17 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 					}
 					break
 				}
-				renderTermFrames()
+				if deferred != nil {
+					continue // a render is already scheduled
+				}
+				if wait := renderMinInterval - time.Since(lastRender); wait > 0 {
+					deferred = time.After(wait)
+					continue
+				}
+				render()
+
+			case <-deferred:
+				render()
 
 			case <-tick.C:
 				cols, rows, err := device.GetTermSize()
@@ -938,7 +959,7 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 				blink := ChatConnected() && inputCursorVisible(time.Now())
 				if cols != lastCols || rows != lastRows || blink != lastBlink {
 					lastCols, lastRows, lastBlink = cols, rows, blink
-					renderTermFrames()
+					render()
 				}
 			}
 		}
@@ -946,6 +967,10 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 
 	return cancel, done
 }
+
+// renderMinInterval is the shortest time between two renders of the call
+// screen (at most 40 per second).
+const renderMinInterval = 25 * time.Millisecond
 
 func renderTermFrames() {
 	cols, rows, err := device.GetTermSize()
@@ -1027,23 +1052,45 @@ func renderChatScreen(cols, rows int) string {
 		paneCache.reset()
 	}
 	writeFramePrefix(&out, fullClear)
-	appendBorderClear(&out, cols, rows)
+
+	// Borders, separators, captions, chat and input: collected per row and
+	// sent only when a row changed (see screenLines).
+	lines := newScreenLines(rows)
+	blankCols := strings.Repeat(" ", cols)
+	lineAt := func(row, col int) *strings.Builder {
+		b := lines.at(row)
+		writeCursorTo(b, row, col)
+		return b
+	}
+	lineAt(1, 1).WriteString(blankCols)
+	lineAt(rows, 1).WriteString(blankCols)
+	for r := 2; r < rows; r++ {
+		lineAt(r, 1).WriteByte(' ')
+		lineAt(r, cols).WriteByte(' ')
+	}
 
 	// Margins left and right of the centered video group (panes + captions).
 	videoRight := videoLeft + videoGroupCols
 	for r := canvasTop; r <= videoCaptionRow; r++ {
 		if videoLeft > canvasLeft {
-			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", r, canvasLeft, strings.Repeat(" ", videoLeft-canvasLeft)))
+			lineAt(r, canvasLeft).WriteString(strings.Repeat(" ", videoLeft-canvasLeft))
 		}
 		if end := canvasLeft + canvasCols; videoRight < end {
-			out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", r, videoRight, strings.Repeat(" ", end-videoRight)))
+			lineAt(r, videoRight).WriteString(strings.Repeat(" ", end-videoRight))
 		}
 	}
 
 	sepCol := videoLeft + vs.selfSlot.cols
 	peerLeft := sepCol + termSeparator
-	appendVerticalSeparator(&out, canvasTop, vs.selfSlot.rows+1, sepCol)
-	appendHorizontalSeparator(&out, canvasLeft, canvasCols, chatTop-1)
+	for r := canvasTop; r <= canvasTop+vs.selfSlot.rows; r++ {
+		lineAt(r, sepCol).WriteString(strings.Repeat(" ", termSeparator))
+	}
+	canvasBlank := strings.Repeat(" ", canvasCols)
+	for i := 0; i < termSeparator; i++ {
+		lineAt(chatTop-1+i, canvasLeft).WriteString(canvasBlank)
+		lineAt(inputRow-1+i, canvasLeft).WriteString(canvasBlank)
+	}
+
 	now := time.Now()
 	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
 	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel+" NET", now, canvasTop, peerLeft, vs.peerSlot)
@@ -1063,8 +1110,8 @@ func renderChatScreen(cols, rows int) string {
 	if !mediactrl.PlaybackEnabled() {
 		remoteCaption = "PAUSED"
 	}
-	writeVideoCaption(&out, videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
-	writeVideoCaption(&out, videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption)
+	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
+	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption)
 
 	chatState.RLock()
 	messages := append([]ChatMessage(nil), chatState.messages...)
@@ -1075,34 +1122,35 @@ func renderChatScreen(cols, rows int) string {
 		text  string
 		local bool
 	}
-	var lines []chatLine
-	for i := len(messages) - 1; i >= 0 && len(lines) < chatRows; i-- {
+	var chat []chatLine
+	for i := len(messages) - 1; i >= 0 && len(chat) < chatRows; i-- {
 		wrapped := wrapWidth(sanitizeLine(messages[i].Text), canvasCols)
 		block := make([]chatLine, 0, len(wrapped))
 		for _, l := range wrapped {
 			block = append(block, chatLine{text: l, local: messages[i].Local})
 		}
-		lines = append(block, lines...)
+		chat = append(block, chat...)
 	}
-	if len(lines) > chatRows {
-		lines = lines[len(lines)-chatRows:]
+	if len(chat) > chatRows {
+		chat = chat[len(chat)-chatRows:]
 	}
 	for i := 0; i < chatRows; i++ {
 		row := chatTop + i
-		out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K", row))
-		if i >= len(lines) {
+		b := lineAt(row, 1)
+		b.WriteString("\x1b[2K")
+		if i >= len(chat) {
 			continue
 		}
-		l := lines[i]
+		l := chat[i]
 		// Default terminal colours: fixed light colours were unreadable on a
 		// light terminal background. Sides tell the speakers apart.
 		col := canvasLeft
 		if !l.local {
 			col += max(0, canvasCols-displayWidth(l.text))
 		}
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[0m%s", row, col, l.text))
+		writeCursorTo(b, row, col)
+		b.WriteString(l.text)
 	}
-	appendHorizontalSeparator(&out, canvasLeft, canvasCols, inputRow-1)
 
 	var line string
 	if transfer != "" {
@@ -1115,7 +1163,12 @@ func renderChatScreen(cols, rows int) string {
 		// Keep the end of a long input visible, with room for the cursor.
 		line = tailWidth(sanitizeLine(input), canvasCols-1) + cursor
 	}
-	out.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[0m\x1b[2K\x1b[%d;%dH%s", inputRow, inputRow, canvasLeft, line))
+	b := lineAt(inputRow, 1)
+	b.WriteString("\x1b[2K")
+	writeCursorTo(b, inputRow, canvasLeft)
+	b.WriteString(line)
+
+	lines.flush(&out, &paneCache)
 	return out.String()
 }
 
@@ -1182,9 +1235,9 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 		}
 	}
 	if idle {
-		// The label covers pane cells; redraw them under it next time.
+		// The label covers a row of pane cells; redraw it under the label next time.
 		writeCenterLabel(out, label, top, left, slot.cols, slot.rows)
-		paneCache.invalidate(top, left, slot.cols, slot.rows)
+		paneCache.invalidate(top+slot.rows/2, left, slot.cols, 1)
 	}
 	return idle
 }
@@ -1826,52 +1879,125 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 	visRows = min(visRows, rows-offRow)
 
 	// Colours set by this call persist across cursor moves; nothing else
-	// writes in between, so they are tracked for the whole region.
+	// writes in between, so they are tracked for the whole region, as is
+	// the cursor.
 	var lastFg, lastBg [3]int
-	colored, wrote := false, false
+	fgSet, bgSet, wrote := false, false, false
+	curRow, curCol := -1, -1 // cursor position, if known
 	for vr := 0; vr < visRows; vr++ {
 		r := offRow + vr
 		row := startRow + vr
-		move := true // the cursor is not at the next cell to draw
 		for c := offCol; c < offCol+visCols; c++ {
 			idx := r*cols + c
 			col := startCol + c - offCol
 			fg := frame.FgYCbCr[idx*3 : idx*3+3]
 			bg := frame.BgYCbCr[idx*3 : idx*3+3]
-			fr, fgCol, fb := ycbcrToRGB(fg[0], fg[1], fg[2])
-			fr, fgCol, fb = applyColorFilter(fr, fgCol, fb)
 			br, bgCol, bb := ycbcrToRGB(bg[0], bg[1], bg[2])
 			br, bgCol, bb = applyColorFilter(br, bgCol, bb)
+			cell := screenCell{bg: [3]int{br, bgCol, bb}, set: true}
 
 			glyphIndex := int(frame.Glyphs[idx])
-			rn := ' '
+			cell.r = ' '
 			if glyphIndex >= 0 && glyphIndex < len(glyphCodepoints) {
-				rn = rune(glyphCodepoints[glyphIndex])
+				cell.r = rune(glyphCodepoints[glyphIndex])
 			}
-			cell := screenCell{r: rn, fg: [3]int{fr, fgCol, fb}, bg: [3]int{br, bgCol, bb}, set: true}
+			blank := isBlankGlyph(cell.r)
+			if blank {
+				cell.fg = cell.bg // the foreground of an empty glyph is invisible
+			} else {
+				fr, fgCol, fb := ycbcrToRGB(fg[0], fg[1], fg[2])
+				fr, fgCol, fb = applyColorFilter(fr, fgCol, fb)
+				cell.fg = [3]int{fr, fgCol, fb}
+			}
 			if cache != nil && !cache.update(row, col, cell) {
-				move = true
 				continue
 			}
-			if move {
-				writeCursorTo(sb, row, col)
-				move = false
+			if curRow != row || curCol != col {
+				moveCursor(sb, cache, row, col, curRow, curCol, lastFg, lastBg, fgSet && bgSet)
 			}
-			if !colored || cell.fg != lastFg {
-				writeRGB(sb, "\x1b[38;2;", cell.fg)
-				lastFg = cell.fg
+			needFg := !blank && (!fgSet || cell.fg != lastFg)
+			needBg := !bgSet || cell.bg != lastBg
+			writeCellColors(sb, cell, needFg, needBg)
+			if needFg {
+				lastFg, fgSet = cell.fg, true
 			}
-			if !colored || cell.bg != lastBg {
-				writeRGB(sb, "\x1b[48;2;", cell.bg)
-				lastBg = cell.bg
+			if needBg {
+				lastBg, bgSet = cell.bg, true
 			}
-			colored, wrote = true, true
-			sb.WriteRune(rn)
+			wrote = true
+			sb.WriteRune(cell.r)
+			curRow, curCol = row, col+1
 		}
 	}
 	if wrote {
 		sb.WriteString("\x1b[0m")
 	}
+}
+
+// isBlankGlyph reports whether a glyph shows only its background.
+func isBlankGlyph(r rune) bool {
+	return r == ' ' || r == '\u00a0'
+}
+
+// moveCursor moves the cursor from (curRow, curCol) to (row, col) with the
+// shortest output: across a gap of one or two cells that the screen already
+// shows in the current colours it reprints them, within a row it moves
+// forward relatively, otherwise it positions absolutely.
+func moveCursor(sb *strings.Builder, cache *screenCache, row, col, curRow, curCol int, fg, bg [3]int, colored bool) {
+	if curRow == row && col > curCol {
+		gap := col - curCol
+		if gap <= 2 && colored && cache != nil {
+			var cells [2]screenCell
+			ok := true
+			for i := 0; i < gap && ok; i++ {
+				cell, known := cache.cell(row, curCol+i)
+				ok = known && cell.bg == bg && (isBlankGlyph(cell.r) || cell.fg == fg)
+				cells[i] = cell
+			}
+			if ok {
+				for i := 0; i < gap; i++ {
+					sb.WriteRune(cells[i].r)
+				}
+				return
+			}
+		}
+		var buf [16]byte
+		b := append(buf[:0], "\x1b["...)
+		if gap > 1 {
+			b = strconv.AppendInt(b, int64(gap), 10)
+		}
+		sb.Write(append(b, 'C'))
+		return
+	}
+	writeCursorTo(sb, row, col)
+}
+
+// writeCellColors sets the colours a cell needs, in one escape sequence
+// when both change.
+func writeCellColors(sb *strings.Builder, cell screenCell, fg, bg bool) {
+	if !fg && !bg {
+		return
+	}
+	var buf [48]byte
+	b := append(buf[:0], "\x1b["...)
+	if fg {
+		b = appendRGBParams(append(b, "38;2;"...), cell.fg)
+	}
+	if bg {
+		if fg {
+			b = append(b, ';')
+		}
+		b = appendRGBParams(append(b, "48;2;"...), cell.bg)
+	}
+	sb.Write(append(b, 'm'))
+}
+
+func appendRGBParams(b []byte, c [3]int) []byte {
+	b = strconv.AppendInt(b, int64(c[0]), 10)
+	b = append(b, ';')
+	b = strconv.AppendInt(b, int64(c[1]), 10)
+	b = append(b, ';')
+	return strconv.AppendInt(b, int64(c[2]), 10)
 }
 
 // writeCursorTo moves the cursor to (row, col) without fmt: the escape codes
@@ -1883,20 +2009,6 @@ func writeCursorTo(sb *strings.Builder, row, col int) {
 	b = append(b, ';')
 	b = strconv.AppendInt(b, int64(col), 10)
 	b = append(b, 'H')
-	sb.Write(b)
-}
-
-// writeRGB writes a 24-bit colour code: prefix ("\x1b[38;2;" or
-// "\x1b[48;2;") followed by "r;g;bm".
-func writeRGB(sb *strings.Builder, prefix string, c [3]int) {
-	var buf [32]byte
-	b := append(buf[:0], prefix...)
-	b = strconv.AppendInt(b, int64(c[0]), 10)
-	b = append(b, ';')
-	b = strconv.AppendInt(b, int64(c[1]), 10)
-	b = append(b, ';')
-	b = strconv.AppendInt(b, int64(c[2]), 10)
-	b = append(b, 'm')
 	sb.Write(b)
 }
 

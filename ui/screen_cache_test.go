@@ -37,14 +37,33 @@ func (t *vterm) apply(s string) {
 				if params[0] != "" {
 					row, col = n(0), n(1)
 				}
+			case 'C':
+				if params[0] == "" {
+					col++
+				} else {
+					col += n(0)
+				}
+			case 'K':
+				for c := 1; c <= t.cols; c++ {
+					if row >= 1 && row <= t.rows {
+						t.cells[(row-1)*t.cols+c-1] = screenCell{}
+					}
+				}
 			case 'm':
-				switch {
-				case params[0] == "0":
-					fg, bg = [3]int{}, [3]int{}
-				case len(params) == 5 && params[0] == "38":
-					fg = [3]int{n(2), n(3), n(4)}
-				case len(params) == 5 && params[0] == "48":
-					bg = [3]int{n(2), n(3), n(4)}
+				for k := 0; k < len(params); {
+					switch {
+					case params[k] == "0":
+						fg, bg = [3]int{}, [3]int{}
+						k++
+					case params[k] == "38" && k+4 < len(params):
+						fg = [3]int{n(k + 2), n(k + 3), n(k + 4)}
+						k += 5
+					case params[k] == "48" && k+4 < len(params):
+						bg = [3]int{n(k + 2), n(k + 3), n(k + 4)}
+						k += 5
+					default:
+						k++
+					}
 				}
 			}
 			i = j + 1
@@ -52,7 +71,11 @@ func (t *vterm) apply(s string) {
 		}
 		r, size := []rune(s[i:])[0], len(string([]rune(s[i:])[0]))
 		if row >= 1 && row <= t.rows && col >= 1 && col <= t.cols {
-			t.cells[(row-1)*t.cols+col-1] = screenCell{r: r, fg: fg, bg: bg, set: true}
+			cell := screenCell{r: r, fg: fg, bg: bg, set: true}
+			if isBlankGlyph(r) {
+				cell.fg = cell.bg // invisible
+			}
+			t.cells[(row-1)*t.cols+col-1] = cell
 		}
 		col++
 		i += size
@@ -138,5 +161,92 @@ func TestPaneCacheRepaintsAfterADroppedFrame(t *testing.T) {
 	writeTextFrameRegion(&periodic, frame, 1, 1, 0, 0, 10, 5, &cache)
 	if periodic.Len() != first.Len() {
 		t.Fatalf("periodic repaint: %d bytes, want the full %d", periodic.Len(), first.Len())
+	}
+}
+
+// flatTextFrame is a frame of large single-colour areas with a few
+// details: the cells around a change share colours, so short gaps are
+// reprinted instead of skipped with cursor moves.
+func flatTextFrame(cols, rows int) *codec.TextFrame {
+	f := &codec.TextFrame{Cols: cols, Rows: rows, Glyphs: make([]byte, cols*rows),
+		FgYCbCr: make([]byte, cols*rows*3), BgYCbCr: make([]byte, cols*rows*3)}
+	for i := range f.Glyphs {
+		f.Glyphs[i] = byte(i % 3) // includes the empty glyph
+		copy(f.FgYCbCr[i*3:], []byte{200, 128, 128})
+		copy(f.BgYCbCr[i*3:], []byte{40, 128, 128})
+	}
+	return f
+}
+
+func TestPaneDiffWithFlatAreasMatchesFullFrames(t *testing.T) {
+	const cols, rows = 30, 10
+	rng := rand.New(rand.NewSource(3))
+	var cache screenCache
+	cache.prepare(40, 15, time.Now())
+	diffTerm := newVterm(40, 15)
+	frame := flatTextFrame(cols, rows)
+	for step := 0; step < 40; step++ {
+		var diff, full strings.Builder
+		writeTextFrameRegion(&diff, frame, 2, 3, 0, 0, cols, rows, &cache)
+		writeTextFrameRegion(&full, frame, 2, 3, 0, 0, cols, rows, nil)
+		diffTerm.apply(diff.String())
+		fullTerm := newVterm(40, 15)
+		fullTerm.apply(full.String())
+		for i := range fullTerm.cells {
+			if fullTerm.cells[i].set && diffTerm.cells[i] != fullTerm.cells[i] {
+				t.Fatalf("step %d: cell %d: diff %+v, full %+v", step, i, diffTerm.cells[i], fullTerm.cells[i])
+			}
+		}
+		// Change a few cells: glyph only, so colours around stay the same.
+		g := *frame
+		g.Glyphs = append([]byte(nil), frame.Glyphs...)
+		for k := 0; k < 4; k++ {
+			g.Glyphs[rng.Intn(len(g.Glyphs))] = byte(rng.Intn(len(glyphCodepoints)))
+		}
+		frame = &g
+	}
+}
+
+// The whole call screen drawn incrementally over several frames looks
+// exactly like the same screen drawn from scratch.
+func TestChatScreenIncrementalMatchesFullRedraw(t *testing.T) {
+	const cols, rows = 120, 40
+	vs, ok := calcViewportSlots(cols, rows)
+	if !ok {
+		t.Fatal("no layout")
+	}
+	SetVideoFPSLimit(0)
+	rng := rand.New(rand.NewSource(4))
+	local := randomTextFrame(rng, vs.selfSlot.cols, vs.selfSlot.rows)
+	remote := randomTextFrame(rng, vs.peerSlot.cols, vs.peerSlot.rows)
+	AddChatMessage("hello", true)
+	AddChatMessage("привет, это ответ", false)
+
+	paneCache = screenCache{}
+	incremental := newVterm(cols, rows)
+	for step := 0; step < 8; step++ {
+		SetLocalFrame(local)
+		SetRemoteFrame(remote)
+		if step == 4 {
+			AddChatMessage("new message", true)
+		}
+		incremental.apply(renderChatScreen(cols, rows))
+		local, remote = changeCells(rng, local, 30), changeCells(rng, remote, 30)
+	}
+	SetLocalFrame(local)
+	SetRemoteFrame(remote)
+	incremental.apply(renderChatScreen(cols, rows))
+
+	paneCache.reset()
+	full := newVterm(cols, rows)
+	full.apply(renderChatScreen(cols, rows))
+	for i := range full.cells {
+		row := i/cols + 1
+		if row >= rows-1 { // the input line's cursor blinks with time
+			continue
+		}
+		if full.cells[i].set && incremental.cells[i] != full.cells[i] {
+			t.Fatalf("row %d col %d: incremental %+v, full redraw %+v", row, i%cols+1, incremental.cells[i], full.cells[i])
+		}
 	}
 }
