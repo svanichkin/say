@@ -83,11 +83,11 @@ func SetEchoCancellation(enabled bool) {
 // SetAudioCodec selects the codec used by future voice sessions.
 func SetAudioCodec(name string) error {
 	switch name {
-	case "opus", "amrnb":
+	case "opus", "amrnb", "g722":
 		audioCodec = name
 		return nil
 	default:
-		return fmt.Errorf("unsupported audio codec %q (choose opus or amrnb)", name)
+		return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", name)
 	}
 }
 

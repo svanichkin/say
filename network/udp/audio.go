@@ -6,6 +6,7 @@ import (
 
 	amrnb "github.com/VoiceBlender/goamr-nb"
 	"github.com/danieldonoghue/govoip-dsp/echo"
+	g722 "github.com/gotranspile/g722"
 	"github.com/thesyncim/gopus"
 )
 
@@ -69,6 +70,53 @@ func (d amrAudioDecoder) Conceal(dst []int16) (int, error) {
 	noData := [...]byte{0xf0, byte(amrnb.FTNoData<<3 | 0x04)}
 	return d.DecodeFrame(noData[:], dst)
 }
+
+// G.722 as in v0.1.3: 8 kHz PCM, 48 kbit/s mode, packed codewords.
+const (
+	g722Rate    = g722.Rate48000
+	g722Options = g722.FlagSampleRate8000 | g722.FlagPacked
+)
+
+type g722AudioEncoder struct{ encoder *g722.Encoder }
+
+func (e g722AudioEncoder) EncodeFrame(samples []int16, dst []byte) (int, error) {
+	n := e.encoder.Encode(dst, samples)
+	if n <= 0 {
+		return 0, fmt.Errorf("G.722 encoded %d bytes from %d samples", n, len(samples))
+	}
+	return n, nil
+}
+
+// g722AudioDecoder has no built-in loss concealment. Like v0.1.3 it repeats
+// the last decoded frame, but fades each repetition so a long loss turns
+// into silence instead of a buzz.
+type g722AudioDecoder struct {
+	decoder *g722.Decoder
+	last    []int16
+	fade    float64
+}
+
+func (d *g722AudioDecoder) DecodeFrame(payload []byte, dst []int16) (int, error) {
+	n := d.decoder.Decode(dst, payload)
+	if n <= 0 {
+		return 0, fmt.Errorf("G.722 decoded %d samples from %d bytes", n, len(payload))
+	}
+	d.last = append(d.last[:0], dst[:n]...)
+	d.fade = 1
+	return n, nil
+}
+
+func (d *g722AudioDecoder) Conceal(dst []int16) (int, error) {
+	d.fade *= 0.5
+	n := min(len(d.last), len(dst))
+	for i := 0; i < n; i++ {
+		dst[i] = int16(float64(d.last[i]) * d.fade)
+	}
+	clear(dst[n:])
+	return len(dst), nil
+}
+
+func (*g722AudioDecoder) IsDTXFrame([]byte) bool { return false }
 
 func (amrAudioDecoder) IsDTXFrame(payload []byte) bool {
 	return len(payload) >= 2 && int(payload[1]>>3)&0x0f == amrnb.FTSID
@@ -184,6 +232,11 @@ func (a *audioEcho) capture(mic, out []int16) error {
 // initAudioCodec creates a mono 8 kHz speech codec. AMR-NB is fixed at its
 // lowest 4.75 kbit/s mode with DTX; Opus retains the current low-bandwidth setup.
 func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
+	if name == "g722" {
+		frameSamples := audioSampleRate * audioFrameMillis / 1000
+		return g722AudioEncoder{encoder: g722.NewEncoder(g722Rate, g722Options)},
+			&g722AudioDecoder{decoder: g722.NewDecoder(g722Rate, g722Options)}, frameSamples, nil
+	}
 	if name == "amrnb" {
 		enc, err := amrnb.NewEncoder(amrnb.EncoderConfig{
 			Mode:         amrnb.Mode0475,

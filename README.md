@@ -235,7 +235,7 @@ of the current media protocol. Relevant CLI switches:
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP).
 - `-fps` – cap video capture/rendering to N FPS (5–30, defaults to `25`).
 - `-aec=false` – disable acoustic echo cancellation (enabled by default), e.g. with headphones or to compare voice quality.
-- `-audio-codec` – choose `amrnb` (default) or `opus`. AMR-NB uses 4.75 kbit/s; select `opus` on both peers to compare voice quality and traffic.
+- `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
 - `-contacts` – override the contacts directory defined in the config.

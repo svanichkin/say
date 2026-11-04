@@ -752,11 +752,11 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 			opts.MaxVideoFPS = fps
 		case "audio-codec":
 			if !hasValue || value == "" {
-				return fmt.Errorf("-audio-codec requires a value (opus or amrnb)")
+				return fmt.Errorf("-audio-codec requires a value (opus, amrnb or g722)")
 			}
 			codec := strings.ToLower(strings.TrimSpace(value))
-			if codec != "opus" && codec != "amrnb" {
-				return fmt.Errorf("unsupported audio codec %q (choose opus or amrnb)", value)
+			if codec != "opus" && codec != "amrnb" && codec != "g722" {
+				return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", value)
 			}
 			opts.AudioCodec = codec
 		case "aec":
