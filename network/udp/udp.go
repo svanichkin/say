@@ -23,7 +23,7 @@ var (
 	useVideo    bool
 	maxVideoFPS = defaultVideoFPS
 	audioCodec  = "amrnb"
-	echoCancel  = true
+	echoCancel  = false
 )
 
 const (
@@ -305,7 +305,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		}
 		videoSelfScreenOut = make(chan *codec.TextFrame, 1)
 		videoPeerScreenOut = make(chan *codec.TextFrame, 1)
-		videoNetIn = make(chan []byte, 1)
+		videoNetIn = make(chan []byte, 16) // Yggdrasil delivers bursts; keep them for the decoder
 		ui.EnsureRenderer(context.Background())
 	}
 

@@ -1,6 +1,7 @@
 package udp
 
 import (
+	amrnb "github.com/VoiceBlender/goamr-nb"
 	"math"
 	"testing"
 	"time"
@@ -154,10 +155,14 @@ func TestPlayoutDoesNotReanchorOnLateDuplicates(t *testing.T) {
 }
 
 func TestAMRPlayoutWithSilenceAnd80msSpeaker(t *testing.T) {
-	enc, dec, frameSamples, err := initAudioCodec("amrnb")
+	// DTX is off in initAudioCodec; this test exercises a DTX peer explicitly.
+	amrEnc, err := amrnb.NewEncoder(amrnb.EncoderConfig{Mode: amrnb.Mode0475, OctetAligned: true, DTX: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	var enc audioEncoder = amrAudioEncoder{encoder: amrEnc}
+	var dec audioDecoder = amrAudioDecoder{decoder: amrnb.NewDecoder(amrnb.DecoderConfig{OctetAligned: true})}
+	frameSamples := amrnb.FrameSamples
 	q := device.NewPlaybackQueue(audioBufferMaxFrames)
 	p := newAudioPlayout(dec, frameSamples, q)
 	pcm := make([]int16, frameSamples)

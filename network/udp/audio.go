@@ -272,7 +272,9 @@ func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
 		enc, err := amrnb.NewEncoder(amrnb.EncoderConfig{
 			Mode:         amrnb.Mode0475,
 			OctetAligned: true,
-			DTX:          true,
+			// No DTX: during silence the playout buffer otherwise drains to one
+			// device period, and the next words start late and crackle.
+			DTX: false,
 		})
 		if err != nil {
 			return nil, nil, 0, err
@@ -302,7 +304,7 @@ func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {
 	}
 	enc.SetVBR(true)
 	enc.SetVBRConstraint(true)
-	enc.SetDTX(true)
+	enc.SetDTX(false) // see the AMR-NB note: DTX drained the buffer in pauses
 	enc.SetFEC(false)
 
 	dec, err := gopus.NewDecoder(gopus.DefaultDecoderConfig(audioSampleRate, audioChannels))

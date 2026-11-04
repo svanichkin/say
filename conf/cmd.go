@@ -301,7 +301,7 @@ func ParseCLI() (*AppOptions, error) {
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 25,
 		AudioCodec:  "amrnb",
-		EchoCancel:  true,
+		EchoCancel:  false,
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
