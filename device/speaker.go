@@ -40,9 +40,7 @@ func StartSpeaker(sampleRate, channels, periodSamples, samplesPerMediaTick int, 
 	deviceConfig.Playback.Format = malgo.FormatS16
 	deviceConfig.Playback.Channels = uint32(channels)
 	deviceConfig.SampleRate = uint32(sampleRate)
-	// periodSamples is the device period. A small period leaves little slack
-	// for the Go callback on the real-time audio thread; underruns are heard
-	// as crackling.
+	// periodSamples is the device period; the caller passes one codec frame.
 	deviceConfig.PeriodSizeInFrames = uint32(periodSamples)
 	if deviceConfig.Periods < 2 {
 		deviceConfig.Periods = 2

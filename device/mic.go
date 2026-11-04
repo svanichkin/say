@@ -43,11 +43,8 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			if len(pInput) == 0 {
 				return
 			}
+			capturedAt := time.Now()
 			samples := bytesToInt16Mic(pInput)
-			// The callback runs once the block is complete; its first sample was
-			// captured one block duration earlier.
-			blockFrames := len(samples) / max(channels, 1)
-			capturedAt := time.Now().Add(-time.Duration(blockFrames) * time.Second / time.Duration(sampleRate))
 			frame := AudioCaptureFrame{Samples: samples, CapturedAt: capturedAt}
 			select {
 			case out <- frame:
