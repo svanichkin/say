@@ -269,7 +269,7 @@ type AppOptions struct {
 	AudioCodec  string
 	NoLAN       bool
 	NoMic       bool
-	VideoHold   int // glyph shape hold in pixels (of 32); -video-hold
+	VideoHold   int // cell hold threshold (mean colour difference per pixel); -video-hold
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -299,7 +299,7 @@ func ParseCLI() (*AppOptions, error) {
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
-		VideoHold:   8,
+		VideoHold:   10,
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
@@ -760,11 +760,11 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 			opts.AudioCodec = codec
 		case "video-hold":
 			if !hasValue || value == "" {
-				return fmt.Errorf("-video-hold requires a value (pixels of 32, 0 disables)")
+				return fmt.Errorf("-video-hold requires a value (0 disables)")
 			}
 			n, err := strconv.Atoi(value)
-			if err != nil || n < 0 || n > 32 {
-				return fmt.Errorf("invalid -video-hold %q: want 0..32", value)
+			if err != nil || n < 0 || n > 255 {
+				return fmt.Errorf("invalid -video-hold %q: want 0..255", value)
 			}
 			opts.VideoHold = n
 		case "nomic":

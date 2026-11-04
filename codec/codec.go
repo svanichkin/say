@@ -535,11 +535,11 @@ type Encoder struct {
 	reuseFgIdx          []byte
 	reuseBgIdx          []byte
 
-	// Shape hold: a cell keeps its previous glyph when the new glyph's 4x8
-	// shape differs by at most holdBits pixels, so noise does not make a
-	// static picture flip between similar glyphs. Colours always update.
+	// Cell hold (see holdShapes): holdBits is the per-pixel threshold.
 	holdBits   int
 	prevGlyphs []byte
+	prevFg     []paletteColor
+	prevBg     []paletteColor
 	prevCells  int
 
 	framesSinceLastKey int
@@ -1292,38 +1292,61 @@ func clampByte(v int) int {
 	return v
 }
 
-// SetShapeHold sets how many of a glyph's 32 pixels may differ before a
-// cell takes the new glyph (0 disables the hold).
-func (e *Encoder) SetShapeHold(bits int) {
-	e.holdBits = max(0, min(bits, 32))
+// SetShapeHold sets the cell hold threshold: the mean per-pixel colour
+// difference (sum over the three channels) below which a cell keeps its
+// previous glyph and colours. 0 disables the hold.
+func (e *Encoder) SetShapeHold(threshold int) {
+	e.holdBits = max(0, threshold)
 	e.prevCells = 0
 }
 
-// holdShapes keeps each cell's previous glyph when the new one has nearly
-// the same shape. A glyph close to the inverse of the previous one is the
-// same picture with foreground and background swapped, so the previous
-// glyph is kept and the new colours are swapped.
+// holdShapes keeps a cell exactly as it was (glyph and both colours) while
+// its new appearance differs only a little from the previous one. Camera
+// noise makes low-contrast cells jump between glyphs whose pixels look
+// almost the same; a real change, even an edge moving by one pixel, changes
+// the cell's pixels a lot and passes at once.
 func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
 	if e.holdBits <= 0 {
 		return
 	}
 	n := len(glyphs)
-	if e.prevCells == n && len(e.prevGlyphs) >= n {
+	if e.prevCells == n && len(e.prevGlyphs) >= n && len(e.prevFg) >= n && len(e.prevBg) >= n {
+		limit := e.holdBits * 32 // threshold is per pixel; a cell has 32
 		for i, g := range glyphs {
 			p := e.prevGlyphs[i]
-			if g == p || int(g) >= len(glyphPatterns) || int(p) >= len(glyphPatterns) {
+			if int(g) >= len(glyphPatterns) || int(p) >= len(glyphPatterns) {
 				continue
 			}
-			gn, gp := glyphPatterns[g], glyphPatterns[p]
-			switch {
-			case bits.OnesCount32(gn^gp) <= e.holdBits:
-				glyphs[i] = p
-			case bits.OnesCount32(gn^^gp) <= e.holdBits:
-				glyphs[i] = p
-				fg[i], bg[i] = bg[i], fg[i]
+			if cellDifference(glyphPatterns[p], e.prevFg[i], e.prevBg[i], glyphPatterns[g], fg[i], bg[i]) <= limit {
+				glyphs[i], fg[i], bg[i] = p, e.prevFg[i], e.prevBg[i]
 			}
 		}
 	}
 	e.prevGlyphs = append(e.prevGlyphs[:0], glyphs...)
+	e.prevFg = append(e.prevFg[:0], fg...)
+	e.prevBg = append(e.prevBg[:0], bg...)
 	e.prevCells = n
+}
+
+// cellDifference is the summed colour difference over the 32 pixels of two
+// cells, each drawn as fg on its pattern's set bits and bg elsewhere.
+func cellDifference(pa uint32, fa, ba paletteColor, pb uint32, fb, bb paletteColor) int {
+	both := bits.OnesCount32(pa & pb)
+	onlyA := bits.OnesCount32(pa &^ pb)
+	onlyB := bits.OnesCount32(pb &^ pa)
+	neither := 32 - both - onlyA - onlyB
+	return both*cellColorDistance(fa, fb) + onlyA*cellColorDistance(fa, bb) +
+		onlyB*cellColorDistance(ba, fb) + neither*cellColorDistance(ba, bb)
+}
+
+func cellColorDistance(a, b paletteColor) int {
+	d := 0
+	for c := 0; c < 3; c++ {
+		v := int(a[c]) - int(b[c])
+		if v < 0 {
+			v = -v
+		}
+		d += v
+	}
+	return d
 }

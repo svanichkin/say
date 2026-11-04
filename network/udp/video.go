@@ -10,14 +10,14 @@ import "github.com/svanichkin/say/codec"
 // picture changed enough to trigger one (the palette costs at most 512 bytes).
 const videoKeyframeInterval = 10
 
-// videoShapeHold is how many of a glyph's 32 pixels may change before a cell
-// takes a new glyph (-video-hold; 0 disables). It stops a static picture from
-// shimmering between similar glyphs because of camera noise.
-var videoShapeHold = 8
+// videoShapeHold is the mean per-pixel colour difference (sum of three
+// channels) below which a cell keeps its previous glyph and colours
+// (-video-hold; 0 disables). It stops a still picture from shimmering.
+var videoShapeHold = 10
 
-// SetVideoShapeHold sets the shape hold threshold for future sessions.
-func SetVideoShapeHold(bits int) {
-	videoShapeHold = max(0, min(bits, 32))
+// SetVideoShapeHold sets the cell hold threshold for future sessions.
+func SetVideoShapeHold(threshold int) {
+	videoShapeHold = max(0, threshold)
 }
 
 func initVideoCodec() (previewEncoder, netEncoder *codec.Encoder, previewDecoder *codec.Decoder) {

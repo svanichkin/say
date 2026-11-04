@@ -264,7 +264,7 @@ of the current media protocol. Relevant CLI switches:
 - `-port` – listening TCP/UDP port (defaults to `7777`).
 - `-transport` – network backend: `ygg` (default, embedded Yggdrasil) or `plain` (ordinary TCP/UDP over regular IP). With `ygg`, nodes in the same local network discover each other by multicast and connect directly, bypassing internet peers.
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is sent and the rate adapts to the peer's frame loss (down to 5 fps).
-- `-video-hold=N` – stops a still picture from shimmering: a cell keeps its glyph while the new glyph differs by at most N of its 32 pixels (default `8`, `0` disables; higher is calmer but small edge moves start to lag).
+- `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `10`, `0` disables; higher is calmer, but low-contrast details start to lag).
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
 - `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
