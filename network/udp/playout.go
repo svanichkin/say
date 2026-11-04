@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/svanichkin/say/device"
-	"github.com/svanichkin/say/diag"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/ui"
 )
@@ -99,7 +98,6 @@ func (p *audioPlayout) rebuffer() {
 }
 
 func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
-	diag.RxPackets.Inc()
 	if p.started && now.Sub(p.lastAt) >= time.Duration(mediaIndexHalf)*mediaTickDuration {
 		// The 15-bit index is ambiguous after half a cycle without media.
 		p.reset()
@@ -118,11 +116,9 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		}
 		p.lateIndex = index
 		if !p.ready && p.out.QueuedSamples() == 0 && p.lateCount >= 3 && now.Sub(p.lateSince) >= 80*time.Millisecond {
-			diag.RxResets.Inc()
 			logs.LogV("[voice/udp] reanchor idle playback from index %d to %d after %d advancing late packets", p.nextIndex, index, p.lateCount)
 			p.reset()
 		} else {
-			diag.RxLate.Inc()
 			p.growLead(now)
 			return
 		}
@@ -153,7 +149,6 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		// A long silence or outage: restart at the live edge.
 		// Compare received packets too: during DTX, nextIndex can lag behind
 		// perfectly regular SID updates while their playout slots are not due.
-		diag.RxResets.Inc()
 		p.pending = p.pending[:0]
 		p.out.Clear()
 		p.rebuffer()
@@ -174,7 +169,6 @@ func (p *audioPlayout) insert(pkt queuedPacket) {
 	for i > 0 {
 		prev := mediaIndexDelta(p.pending[i-1].index, p.nextIndex)
 		if prev == rel {
-			diag.RxDuplicates.Inc()
 			return // duplicate
 		}
 		if prev < rel {
@@ -183,12 +177,10 @@ func (p *audioPlayout) insert(pkt queuedPacket) {
 		i--
 	}
 	if i < len(p.pending) {
-		diag.RxReordered.Inc()
 	}
 	p.pending = append(p.pending, queuedPacket{})
 	copy(p.pending[i+1:], p.pending[i:])
 	p.pending[i] = pkt
-	diag.RxPendingMax.Observe(int64(len(p.pending)))
 }
 
 // pump hands slots to the speaker in order: decoded packets as soon as they
@@ -208,9 +200,7 @@ func (p *audioPlayout) pump(now time.Time) {
 			if !p.slotDue(now) {
 				return
 			}
-			diag.RxConcealGap.Inc()
 			if !p.conceal() {
-				diag.RxBudgetOut.Inc()
 				// Concealment budget spent: continue at the waiting packet.
 				p.nextIndex = head.index
 			}
@@ -241,15 +231,11 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 	if !p.started {
 		return
 	}
-	q := int64(p.out.QueuedSamples() / 8) // ms at 8 kHz
-	diag.RxQueueMinMs.Observe(q)
-	diag.RxQueueMaxMs.Observe(q)
 	p.pump(now)
 	// DTX deliberately sends no packets for most 20 ms slots. Prime by
 	// elapsed time, not by waiting for a full buffer of later packets.
 	if !p.ready && !p.primeDeadline.IsZero() && !now.Before(p.primeDeadline) {
 		for !p.ready && p.conceal() {
-			diag.RxConcealTick.Inc()
 		}
 	}
 	p.adaptLead(now)
@@ -257,9 +243,7 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 		return
 	}
 	// Nothing received for the next slot (jitter, or DTX silence).
-	diag.RxConcealTick.Inc()
 	if !p.conceal() && p.out.QueuedSamples() == 0 {
-		diag.RxRebuffers.Inc()
 		// The peer stopped sending (muted, paused or gone). Prime the buffer
 		// again before resuming so speech does not start with an underrun.
 		p.rebuffer()
@@ -269,13 +253,11 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 func (p *audioPlayout) decode(payload []byte) {
 	written, err := p.dec.DecodeFrame(payload, p.scratch)
 	if err != nil || written <= 0 {
-		diag.RxDecodeErrors.Inc()
 		logs.LogV("[voice/udp] %s decode error: produced %d samples (len=%d): %v", audioCodec, written, len(payload), err)
 		p.conceal()
 		return
 	}
 	p.concealed = 0
-	diag.RxDecoded.Inc()
 	p.push(p.scratch[:min(written, p.frameSamples)])
 }
 
@@ -305,7 +287,6 @@ func (p *audioPlayout) push(pcm []int16) {
 		// Skip a frame of near-silence to shorten the buffer inaudibly; the
 		// media timeline still advances, so video sync stays correct.
 		p.shrink = false
-		diag.RxShrunk.Inc()
 		return
 	}
 
@@ -327,7 +308,6 @@ func (p *audioPlayout) push(pcm []int16) {
 	// burst would otherwise stay queued and delay all further speech. The
 	// speaker crossfades over the resulting discontinuity.
 	if dropped := p.out.TrimLatency(p.maxQueued, p.frameSamples*p.lead); dropped > 0 {
-		diag.RxTrimmed.Add(int64(dropped))
 		logs.LogV("[voice/udp] drop %d stale audio frames (playback latency over %d ms)",
 			dropped, audioQueueMaxFrames*audioFrameMillis)
 	}
@@ -351,7 +331,6 @@ func (p *audioPlayout) growLead(now time.Time) {
 // adaptLead inserts the frames a grown lead still needs, and shrinks the
 // lead again after a quiet period.
 func (p *audioPlayout) adaptLead(now time.Time) {
-	diag.RxLeadMs.Observe(int64(p.lead * audioFrameMillis))
 	if !p.ready {
 		p.expand = 0
 		return
@@ -363,7 +342,6 @@ func (p *audioPlayout) adaptLead(now time.Time) {
 		next := p.nextIndex
 		if p.conceal() {
 			p.nextIndex = next
-			diag.RxExpanded.Inc()
 		}
 		return
 	}

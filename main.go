@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -82,11 +81,6 @@ func run() (err error) {
 	} else if logErr != nil {
 		fmt.Fprintf(os.Stderr, "[say] log file disabled (%v)\n", logErr)
 	}
-	// Temporary diagnostics: record exactly how this instance was started.
-	log.Printf("[diag] start pid=%d role=%s version=%s go=%s os=%s/%s", os.Getpid(), role, version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	log.Printf("[diag] args %q", os.Args[1:])
-	log.Printf("[diag] options %+v", *opts)
-	udptransport.LogAudioConfig()
 
 	appCtx, appCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer appCancel()
