@@ -31,6 +31,7 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 	out := make(chan CameraFrame, 1)
 	go func() {
 		defer close(out)
+		var denoise temporalDenoiser
 		for {
 			select {
 			case <-ctx.Done():
@@ -52,6 +53,7 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 					continue
 				}
 				rf.CapturedAt = capturedAt
+				denoise.apply(rf.Data, rf.Width, rf.Height)
 				select {
 				case out <- rf:
 				default:
