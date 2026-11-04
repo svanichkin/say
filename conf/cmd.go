@@ -270,6 +270,7 @@ type AppOptions struct {
 	NoLAN       bool
 	NoMic       bool
 	VideoHold   int // cell hold threshold (mean colour difference per pixel); -video-hold
+	HoldDebug   bool
 	ShowVersion bool
 	ShowDonate  bool
 	Support     bool
@@ -758,6 +759,16 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", value)
 			}
 			opts.AudioCodec = codec
+		case "video-hold-debug":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -video-hold-debug: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.HoldDebug = boolVal
 		case "video-hold":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-video-hold requires a value (0 disables)")

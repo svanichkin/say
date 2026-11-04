@@ -128,3 +128,44 @@ func TestShapeHoldFollowsMovingEdge(t *testing.T) {
 		prev = cur
 	}
 }
+
+// The debug tint marks held cells but must not change which cells are held.
+func TestHoldDebugTintsOnlyHeldCells(t *testing.T) {
+	const w, h = 64, 64
+	still := make([]byte, w*h*3)
+	for i := range still {
+		still[i] = byte(90 + i%7)
+	}
+	run := func(debug bool) (heldCount int, out []byte) {
+		enc := NewEncoder(false, 0, 0, false)
+		enc.SetShapeHold(10)
+		enc.SetHoldDebug(debug)
+		var last []byte
+		for f := 0; f < 3; f++ {
+			data, err := enc.Encode(Frame{Data: still, Width: w, Height: h}, 16, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last = data
+		}
+		for _, hld := range enc.held {
+			if hld {
+				heldCount++
+			}
+		}
+		return heldCount, last
+	}
+	plain, _ := run(false)
+	tinted, out := run(true)
+	if plain != tinted || plain == 0 {
+		t.Fatalf("held cells: %d without tint, %d with tint (want equal, > 0)", plain, tinted)
+	}
+	tf, err := NewDecoder().Decode(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A still grey picture: held cells must now carry the lilac tint (Cb > 128).
+	if tf.BgYCbCr[1] <= 132 {
+		t.Fatalf("held cell not tinted: Cb=%d", tf.BgYCbCr[1])
+	}
+}

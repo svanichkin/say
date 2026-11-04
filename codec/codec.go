@@ -537,6 +537,8 @@ type Encoder struct {
 
 	// Cell hold (see holdShapes): holdBits is the per-pixel threshold.
 	holdBits   int
+	holdDebug  bool // tint held cells lilac (-video-hold-debug)
+	held       []bool
 	prevGlyphs []byte
 	prevFg     []paletteColor
 	prevBg     []paletteColor
@@ -1310,6 +1312,11 @@ func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
 		return
 	}
 	n := len(glyphs)
+	if cap(e.held) < n {
+		e.held = make([]bool, n)
+	}
+	held := e.held[:n]
+	clear(held)
 	if e.prevCells == n && len(e.prevGlyphs) >= n && len(e.prevFg) >= n && len(e.prevBg) >= n {
 		limit := e.holdBits * 32 // threshold is per pixel; a cell has 32
 		for i, g := range glyphs {
@@ -1319,6 +1326,7 @@ func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
 			}
 			if cellDifference(glyphPatterns[p], e.prevFg[i], e.prevBg[i], glyphPatterns[g], fg[i], bg[i]) <= limit {
 				glyphs[i], fg[i], bg[i] = p, e.prevFg[i], e.prevBg[i]
+				held[i] = true
 			}
 		}
 	}
@@ -1326,6 +1334,30 @@ func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
 	e.prevFg = append(e.prevFg[:0], fg...)
 	e.prevBg = append(e.prevBg[:0], bg...)
 	e.prevCells = n
+	if e.holdDebug {
+		// Tint after storing the real colours, so the hold itself is unchanged.
+		for i, h := range held {
+			if h {
+				fg[i], bg[i] = tintLilac(fg[i]), tintLilac(bg[i])
+			}
+		}
+	}
+}
+
+// holdDebugLilac is lilac (RGB 200,160,230) in the codec's YCbCr.
+var holdDebugLilac = paletteColor{180, 156, 142}
+
+// tintLilac mixes a cell colour halfway towards lilac.
+func tintLilac(c paletteColor) paletteColor {
+	for k := 0; k < 3; k++ {
+		c[k] = byte((int(c[k]) + int(holdDebugLilac[k])) / 2)
+	}
+	return c
+}
+
+// SetHoldDebug tints cells kept by the hold lilac, to see how many there are.
+func (e *Encoder) SetHoldDebug(on bool) {
+	e.holdDebug = on
 }
 
 // cellDifference is the summed colour difference over the 32 pixels of two

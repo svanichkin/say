@@ -15,6 +15,14 @@ const videoKeyframeInterval = 10
 // (-video-hold; 0 disables). It stops a still picture from shimmering.
 var videoShapeHold = 10
 
+// videoHoldDebug tints held cells lilac (-video-hold-debug).
+var videoHoldDebug bool
+
+// SetVideoHoldDebug turns the held-cell tint on or off for future sessions.
+func SetVideoHoldDebug(on bool) {
+	videoHoldDebug = on
+}
+
 // SetVideoShapeHold sets the cell hold threshold for future sessions.
 func SetVideoShapeHold(threshold int) {
 	videoShapeHold = max(0, threshold)
@@ -25,6 +33,8 @@ func initVideoCodec() (previewEncoder, netEncoder *codec.Encoder, previewDecoder
 	netEncoder = codec.NewEncoder(false, videoKeyframeInterval, maxVideoFPS, false)
 	previewEncoder.SetShapeHold(videoShapeHold)
 	netEncoder.SetShapeHold(videoShapeHold)
+	previewEncoder.SetHoldDebug(videoHoldDebug)
+	netEncoder.SetHoldDebug(videoHoldDebug)
 	previewDecoder = codec.NewDecoder()
 	return
 }
