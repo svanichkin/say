@@ -2,24 +2,30 @@ package tcp
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
+
+	"github.com/svanichkin/say/logs"
+	"github.com/svanichkin/say/ui"
 )
 
 // Frame type identifiers for the simple binary framing protocol used on top of the TCP connection.
 // Each frame starts with a 1-byte type followed by a 2-byte big-endian payload length and the payload itself.
 const (
-	frameAudio     byte = 0x01
-	frameVideo     byte = 0x02
-	framePing      byte = 0x03
-	framePong      byte = 0x04
-	frameTermSize  byte = 0x05
-	frameChat      byte = 0x06
-	frameFileStart byte = 0x07
-	frameFileChunk byte = 0x08
-	frameFileEnd   byte = 0x09
+	frameAudio      byte = 0x01
+	frameVideo      byte = 0x02
+	framePing       byte = 0x03
+	framePong       byte = 0x04
+	frameTermSize   byte = 0x05
+	frameChat       byte = 0x06
+	frameFileStart  byte = 0x07
+	frameFileChunk  byte = 0x08
+	frameFileEnd    byte = 0x09
+	frameFileResult byte = 0x0a // receiver → sender: file saved or failed
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -82,12 +88,14 @@ func writeFrameSafe(conn net.Conn, t byte, payload []byte) error {
 
 // readFrame reads a single framed message from the buffered reader according to the
 // [type][length][payload] format. It returns the frame type, payload bytes, or an error.
+//
+// The reader must stay blocking (no read deadlines): a timeout between the header
+// and the end of the payload would drop the partial frame and desynchronize the stream.
 func readFrame(r *bufio.Reader) (byte, []byte, error) {
-	h, err := r.Peek(3)
-	if err != nil {
+	var h [3]byte
+	if _, err := io.ReadFull(r, h[:]); err != nil {
 		return 0, nil, err
 	}
-	_, _ = r.Discard(3)
 	t := h[0]
 	ln := int(h[1])<<8 | int(h[2])
 	buf := make([]byte, ln)
@@ -95,4 +103,60 @@ func readFrame(r *bufio.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	return t, buf, nil
+}
+
+// controlSession is the state shared by both sides of a control connection.
+type controlSession struct {
+	conn      net.Conn
+	keepalive *tcpKeepalive
+	termSync  *TermSizeSync
+	pacer     *adaptiveFilePacer
+	incoming  **incomingFile
+	peerLabel string
+}
+
+// serveControlFrames parses the control stream until the connection closes.
+// br must be the same reader that consumed the handshake line, because it may
+// already hold the first frames the peer sent right after the handshake.
+// Reads block without deadlines; the session ends when the connection is
+// closed (by stop, a keepalive timeout or the peer).
+func serveControlFrames(br *bufio.Reader, s controlSession) {
+	for {
+		t, payload, err := readFrame(br)
+		if err != nil {
+			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
+				log.Printf("[p2p] readFrame error from %s: %v", s.peerLabel, err)
+			}
+			return
+		}
+		switch t {
+		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
+			handleChatFrame(s.conn, t, payload, s.incoming)
+		case frameTermSize:
+			if cols, rows, ok := decodeTermSizeFrame(payload); ok && s.termSync != nil {
+				s.termSync.notifyPeer(cols, rows)
+			}
+		case framePing:
+			if s.keepalive == nil {
+				continue
+			}
+			if pong := s.keepalive.pongPayload(payload); pong != nil {
+				if err := writeFrameSafe(s.conn, framePong, pong); err != nil {
+					log.Printf("[keepalive] pong send failed: %v", err)
+					return
+				}
+			}
+		case framePong:
+			if s.keepalive == nil {
+				continue
+			}
+			if rtt, loss, ok := s.keepalive.acceptPong(payload); ok {
+				ui.UpdatePeerLatency(rtt)
+				s.pacer.observe(rtt, loss)
+				logs.LogV("[keepalive] pong received: RTT=%s peer audio loss=%.1f%%", rtt, loss*100)
+			}
+		default:
+			// Audio and video travel over UDP; ignore unknown frame types.
+		}
+	}
 }

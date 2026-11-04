@@ -411,8 +411,13 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			}
 		}
 
-		log.Printf("[p2p] dial failed: %v", err)
-		ui.SetStatusMessage(fmt.Sprintf("Dial failed: %v\nRetrying in %ds…", err, int(delay.Seconds())))
+		if errors.Is(err, tcpsignal.ErrPeerBusy) {
+			log.Printf("[p2p] %s is busy with another call", target)
+			ui.SetStatusMessage(fmt.Sprintf("%s is busy with another call\nRetrying in %ds…", target, int(delay.Seconds())))
+		} else {
+			log.Printf("[p2p] dial failed: %v", err)
+			ui.SetStatusMessage(fmt.Sprintf("Dial failed: %v\nRetrying in %ds…", err, int(delay.Seconds())))
+		}
 
 		timer := time.NewTimer(delay)
 		select {

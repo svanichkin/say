@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -130,6 +131,36 @@ type incomingFile struct {
 	file     *os.File
 }
 
+// File transfer outcome reported by the receiver in a frameFileResult:
+// [id:4][status:1][utf-8 error message].
+const (
+	fileResultSaved  byte = 0
+	fileResultFailed byte = 1
+)
+
+// fileResultTimeout bounds how long the sender waits for the receiver to
+// confirm a file after the last chunk was written.
+const fileResultTimeout = 60 * time.Second
+
+type fileResult struct {
+	saved bool
+	msg   string
+}
+
+// pendingFileResults routes receiver confirmations to the sending goroutine.
+var pendingFileResults sync.Map // uint32 transfer id → chan fileResult
+
+func encodeFileResult(id uint32, status byte, msg string) []byte {
+	if len(msg) > 512 {
+		msg = msg[:512]
+	}
+	out := make([]byte, 5+len(msg))
+	binary.BigEndian.PutUint32(out[:4], id)
+	out[4] = status
+	copy(out[5:], msg)
+	return out
+}
+
 func installChatActions(conn net.Conn, pacer *adaptiveFilePacer) {
 	ui.SetChatActions(func(text string) {
 		if err := writeFrameSafe(conn, frameChat, []byte(text)); err != nil {
@@ -139,10 +170,35 @@ func installChatActions(conn net.Conn, pacer *adaptiveFilePacer) {
 	}, func(path string) { sendFile(conn, path, pacer) })
 }
 
-func handleChatFrame(t byte, payload []byte, incoming **incomingFile) {
+// handleChatFrame processes chat and file frames. conn is used to report the
+// outcome of an incoming file back to its sender.
+func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingFile) {
+	reply := func(id uint32, status byte, msg string) {
+		if conn == nil {
+			return
+		}
+		if err := writeFrameSafe(conn, frameFileResult, encodeFileResult(id, status, msg)); err != nil {
+			log.Printf("[file] result send failed: %v", err)
+		}
+	}
+	fail := func(id uint32, name, msg string) {
+		ui.AddChatMessage("File receive failed: "+name+": "+msg, false)
+		reply(id, fileResultFailed, msg)
+	}
 	switch t {
 	case frameChat:
 		ui.AddChatMessage(string(payload), false)
+	case frameFileResult:
+		if len(payload) < 5 {
+			return
+		}
+		id := binary.BigEndian.Uint32(payload[:4])
+		if ch, ok := pendingFileResults.Load(id); ok {
+			select {
+			case ch.(chan fileResult) <- fileResult{saved: payload[4] == fileResultSaved, msg: string(payload[5:])}:
+			default:
+			}
+		}
 	case frameFileStart:
 		if len(payload) < 14 {
 			return
@@ -151,29 +207,27 @@ func handleChatFrame(t byte, payload []byte, incoming **incomingFile) {
 		total := int64(binary.BigEndian.Uint64(payload[4:12]))
 		nameLen := int(binary.BigEndian.Uint16(payload[12:14]))
 		if total < 0 || nameLen == 0 || nameLen > 255 || len(payload) != 14+nameLen {
+			reply(id, fileResultFailed, "invalid file header")
 			return
 		}
 		name := filepath.Base(strings.TrimSpace(string(payload[14:])))
 		if name == "." || name == ".." || name == string(filepath.Separator) || name == "" {
+			reply(id, fileResultFailed, "invalid file name")
 			return
 		}
 		dir, err := downloadsDir()
 		if err != nil {
-			ui.AddChatMessage("File receive failed: "+err.Error(), false)
+			fail(id, name, err.Error())
 			return
 		}
 		tmp := filepath.Join(dir, fmt.Sprintf(".%s.%d.part", name, id))
 		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
-			ui.AddChatMessage("File receive failed: "+err.Error(), false)
+			fail(id, name, err.Error())
 			return
 		}
-		if *incoming != nil && (*incoming).file != nil {
-			(*incoming).file.Close()
-			os.Remove((*incoming).tmp)
-		}
+		abortIncoming(incoming)
 		*incoming = &incomingFile{id: id, name: name, total: total, tmp: tmp, file: f}
-		ui.AddChatMessage("Receiving "+name, false)
 	case frameFileChunk:
 		f := *incoming
 		if f == nil || f.file == nil || len(payload) < 12 || binary.BigEndian.Uint32(payload[:4]) != f.id {
@@ -186,35 +240,37 @@ func handleChatFrame(t byte, payload []byte, incoming **incomingFile) {
 		}
 		n, err := f.file.Write(chunk)
 		f.received += int64(n)
-		if err != nil || n != len(chunk) {
+		if err == nil && n != len(chunk) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
 			abortIncoming(incoming)
-			ui.AddChatMessage("File receive failed while writing", false)
+			fail(f.id, f.name, err.Error())
 		}
 	case frameFileEnd:
 		f := *incoming
 		if f == nil || len(payload) != 4 || binary.BigEndian.Uint32(payload) != f.id {
 			return
 		}
+		*incoming = nil
 		if err := f.file.Close(); err != nil {
 			os.Remove(f.tmp)
-			*incoming = nil
-			ui.AddChatMessage("File receive failed: "+err.Error(), false)
+			fail(f.id, f.name, err.Error())
 			return
 		}
 		if f.received != f.total {
 			os.Remove(f.tmp)
-			*incoming = nil
-			ui.AddChatMessage("File transfer incomplete", false)
+			fail(f.id, f.name, fmt.Sprintf("incomplete (%d of %d bytes)", f.received, f.total))
 			return
 		}
 		dest := uniqueDownloadPath(filepath.Join(filepath.Dir(f.tmp), f.name))
 		if err := os.Rename(f.tmp, dest); err != nil {
 			os.Remove(f.tmp)
-			ui.AddChatMessage("File receive failed: "+err.Error(), false)
-		} else {
-			ui.AddChatMessage("Saved "+filepath.Base(dest)+" to Downloads", false)
+			fail(f.id, f.name, err.Error())
+			return
 		}
-		*incoming = nil
+		ui.AddChatMessage("Received "+filepath.Base(dest)+" (saved to Downloads)", false)
+		reply(f.id, fileResultSaved, "")
 	}
 }
 
@@ -227,45 +283,63 @@ func abortIncoming(incoming **incomingFile) {
 	*incoming = nil
 }
 
+// sendFile streams path to the peer and reports a single chat entry once the
+// receiver confirms the file was saved (or reports why it was not).
 func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 	pacer.beginFile()
 	defer pacer.endFile()
 
+	name := filepath.Base(path)
+	var size int64
+	finish := func(sent int64, msg string) {
+		ui.SetTransferProgress(name, sent, size, true)
+		ui.AddChatMessage(msg, true)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
-		ui.SetTransferProgress(filepath.Base(path), 0, 1, true)
-		ui.AddChatMessage("File send failed: "+err.Error(), false)
+		finish(0, "File send failed: "+name+": "+err.Error())
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		ui.SetTransferProgress(filepath.Base(path), 0, 1, true)
-		ui.AddChatMessage("Only regular files can be sent", false)
+		finish(0, "File send failed: "+name+": only regular files can be sent")
 		return
 	}
-	name := filepath.Base(path)
+	size = info.Size()
 	if len(name) > 255 {
 		name = name[len(name)-255:]
 	}
-	if info.Size() < 0 {
-		return
-	}
+
 	id := nextTransferID.Add(1)
+	results := make(chan fileResult, 1)
+	pendingFileResults.Store(id, results)
+	defer pendingFileResults.Delete(id)
+
 	start := make([]byte, 14+len(name))
 	binary.BigEndian.PutUint32(start[:4], id)
-	binary.BigEndian.PutUint64(start[4:12], uint64(info.Size()))
+	binary.BigEndian.PutUint64(start[4:12], uint64(size))
 	binary.BigEndian.PutUint16(start[12:14], uint16(len(name)))
 	copy(start[14:], name)
 	if err := writeFrameSafe(conn, frameFileStart, start); err != nil {
-		ui.SetTransferProgress(name, 0, info.Size(), true)
-		ui.AddChatMessage("File send failed: "+err.Error(), false)
+		finish(0, "File send failed: "+name+": "+err.Error())
 		return
 	}
-	ui.AddChatMessage("Sending "+name, true)
+	ui.SetTransferProgress(name, 0, size, false)
+
 	buf := make([]byte, fileChunkBytes)
 	var sent int64
 	for {
+		// The receiver reports failures (e.g. a full disk) as soon as they happen.
+		select {
+		case res := <-results:
+			if !res.saved {
+				finish(sent, "File send failed: "+name+": peer: "+res.msg)
+				return
+			}
+		default:
+		}
 		n, readErr := f.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, 12+n)
@@ -273,31 +347,39 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 			binary.BigEndian.PutUint64(chunk[4:12], uint64(sent))
 			copy(chunk[12:], buf[:n])
 			if err := writeFrameSafe(conn, frameFileChunk, chunk); err != nil {
-				ui.SetTransferProgress(name, sent, info.Size(), true)
-				ui.AddChatMessage("File send failed: "+err.Error(), false)
+				finish(sent, "File send failed: "+name+": "+err.Error())
 				return
 			}
 			sent += int64(n)
-			ui.SetTransferProgress(name, sent, info.Size(), false)
+			ui.SetTransferProgress(name, sent, size, false)
 			pacer.waitAfterChunk(n)
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			ui.SetTransferProgress(name, sent, info.Size(), true)
-			ui.AddChatMessage("File read failed: "+readErr.Error(), false)
+			finish(sent, "File send failed: "+name+": "+readErr.Error())
 			return
 		}
 	}
 	end := make([]byte, 4)
 	binary.BigEndian.PutUint32(end, id)
 	if err := writeFrameSafe(conn, frameFileEnd, end); err != nil {
-		ui.AddChatMessage("File send failed: "+err.Error(), false)
-	} else {
-		ui.AddChatMessage("Sent "+name, true)
+		finish(sent, "File send failed: "+name+": "+err.Error())
+		return
 	}
-	ui.SetTransferProgress(name, info.Size(), info.Size(), true)
+
+	ui.SetTransferStatus("Waiting for " + name + " confirmation…")
+	select {
+	case res := <-results:
+		if res.saved {
+			finish(sent, "Sent "+name)
+		} else {
+			finish(sent, "File send failed: "+name+": peer: "+res.msg)
+		}
+	case <-time.After(fileResultTimeout):
+		finish(sent, "Sent "+name+", but the peer did not confirm saving it")
+	}
 }
 
 func downloadsDir() (string, error) {

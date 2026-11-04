@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"strconv"
@@ -40,14 +39,20 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 	logs.LogV("[p2p] sent HELLO %q", localName)
 	// Expect OK
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	br := bufio.NewReader(conn) // use default buffer size for handshake
+	// This reader serves the connection from the handshake until it closes:
+	// frames sent right after OK may already be buffered in it.
+	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		conn.Close()
 		return nil, nil, fmt.Errorf("handshake: %w", err)
 	}
-	logs.LogV("[p2p] handshake OK: %s", strings.TrimSpace(line))
+	logs.LogV("[p2p] handshake reply: %s", strings.TrimSpace(line))
+	if strings.HasPrefix(line, busyReply) {
+		conn.Close()
+		return nil, nil, ErrPeerBusy
+	}
 	if !strings.HasPrefix(line, "OK ") {
 		conn.Close()
 		return nil, nil, fmt.Errorf("unexpected reply: %q", strings.TrimSpace(line))
@@ -61,7 +66,7 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		clientHandleIncoming(fc, peerAddr, port, termSync, mediaFactory)
+		clientHandleIncoming(fc, br, peerAddr, port, termSync, mediaFactory)
 	}()
 
 	stop := func() error {
@@ -78,9 +83,9 @@ func prettyAddr(host string, port int) string {
 }
 
 // clientHandleIncoming drives a single outgoing P2P session over an established control connection.
-// It sets up optional video and voice streams, starts terminal size propagation, and then
-// either enters the video receive loop or waits for the control connection to close.
-func clientHandleIncoming(conn net.Conn, host string, port int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
+// It sets up optional video and voice streams, starts terminal size propagation,
+// then parses control frames from br until the connection closes.
+func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer conn.Close()
@@ -114,95 +119,12 @@ func clientHandleIncoming(conn net.Conn, host string, port int, termSync *TermSi
 		}
 	}
 
-	buf := make([]byte, 4096)
-	var deadlineConn interface {
-		SetReadDeadline(time.Time) error
-	}
-	if dc, ok := conn.(interface {
-		SetReadDeadline(time.Time) error
-	}); ok {
-		deadlineConn = dc
-	}
-
-	// When keepalive is enabled, read framed messages so we can respond to ping/pong and handle control frames.
-	if tcpKA != nil {
-		br := bufio.NewReader(conn)
-		for {
-			if deadlineConn != nil {
-				if err := deadlineConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
-					log.Printf("[p2p] set deadline error: %v", err)
-				}
-			}
-
-			t, payload, err := readFrame(br)
-			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					if sessionCtx != nil {
-						select {
-						case <-sessionCtx.Done():
-							return
-						default:
-						}
-					}
-					continue
-				}
-				if err != io.EOF {
-					log.Printf("[p2p] connection error: %v", err)
-				}
-				return
-			}
-			if deadlineConn != nil {
-				_ = deadlineConn.SetReadDeadline(time.Time{})
-			}
-			switch t {
-			case frameChat, frameFileStart, frameFileChunk, frameFileEnd:
-				handleChatFrame(t, payload, &incoming)
-			case framePing:
-				pong := tcpKA.pongPayload(payload)
-				if pong != nil {
-					if err := writeFrameSafe(conn, framePong, pong); err != nil {
-						log.Printf("[keepalive] pong send failed: %v", err)
-						return
-					}
-				}
-			case framePong:
-				if rtt, loss, ok := tcpKA.acceptPong(payload); ok {
-					ui.UpdatePeerLatency(rtt)
-					pacer.observe(rtt, loss)
-					logs.LogV("[keepalive] pong received: RTT=%s peer audio loss=%.1f%%", rtt, loss*100)
-				}
-			case frameTermSize:
-				if cols, rows, ok := decodeTermSizeFrame(payload); ok && termSync != nil {
-					termSync.notifyPeer(cols, rows)
-				}
-			default:
-				// ignore other frames on control channel
-			}
-		}
-	}
-
-	for {
-		if deadlineConn != nil {
-			if err := deadlineConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
-				log.Printf("[p2p] set deadline error: %v", err)
-			}
-		}
-
-		if _, err := conn.Read(buf); err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				if sessionCtx != nil {
-					select {
-					case <-sessionCtx.Done():
-						return
-					default:
-					}
-				}
-				continue
-			}
-			if err != io.EOF {
-				log.Printf("[p2p] connection error: %v", err)
-			}
-			return
-		}
-	}
+	serveControlFrames(br, controlSession{
+		conn:      conn,
+		keepalive: tcpKA,
+		termSync:  termSync,
+		pacer:     pacer,
+		incoming:  &incoming,
+		peerLabel: prettyAddr(host, port),
+	})
 }

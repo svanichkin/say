@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"strings"
@@ -21,6 +20,7 @@ import (
 // shuts down the listener and stops accepting new connections.
 func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) (func() error, error) {
 	stop := make(chan struct{})
+	owner := &callOwner{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -45,7 +45,7 @@ func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, 
 			} else {
 				logs.LogV("[p2p] accepted; waiting first packet to learn peer")
 			}
-			go serverHandleIncoming(conn, known, termSync, mediaFactory)
+			go serverHandleIncoming(conn, owner, known, termSync, mediaFactory)
 		}
 	}()
 
@@ -55,7 +55,7 @@ func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, 
 // serverHandleIncoming processes a single accepted P2P control connection.
 // It performs the HELLO/OK handshake, starts optional video and UDP voice sessions,
 // wires up keepalive and terminal size exchange, and then enters the frame receive loop.
-func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
+func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -70,7 +70,8 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 
 	// Simple line-based handshake: we expect HELLO <name>\n
 
-	br := bufio.NewReader(conn) // use default buffer size
+	// This reader serves the connection from the handshake until it closes.
+	br := bufio.NewReader(conn)
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	line, err := br.ReadString('\n')
 	rem := "unknown"
@@ -103,6 +104,17 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 	}
 	logs.LogV("[p2p] call from %s (%s)", friendLabel, hostOnly)
 
+	// Only one call may own the shared UDP socket, devices and UI at a time.
+	release, ok := owner.acquire(strings.Trim(hostOnly, "[]"), conn)
+	if !ok {
+		log.Printf("[p2p] rejected call from %s (%s): busy", friendLabel, hostOnly)
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		fmt.Fprintf(conn, "%s %s\n", busyReply, conf.HostnameOr("me"))
+		return
+	}
+	// Deferred before the media session, so it runs after the session stops.
+	defer release()
+
 	// Reply OK and keep the socket open (this is our P2P channel for future audio)
 	fmt.Fprintf(conn, "OK %s\n", conf.HostnameOr("me"))
 	pacer := newAdaptiveFilePacer()
@@ -133,42 +145,12 @@ func serverHandleIncoming(conn net.Conn, known []conf.Friend, termSync *TermSize
 		defer stopTermSize()
 	}
 
-	brFrames := bufio.NewReader(conn)
-	for {
-		t, payload, err := readFrame(brFrames)
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("[p2p] readFrame error from %s: %v", friendLabel, err)
-			}
-			return
-		}
-		switch t {
-		case frameChat, frameFileStart, frameFileChunk, frameFileEnd:
-			handleChatFrame(t, payload, &incoming)
-		case frameVideo:
-			// ignore here; video handled via UDP
-		case frameAudio:
-			// ignore here; audio handled via UDP
-		case frameTermSize:
-			if cols, rows, ok := decodeTermSizeFrame(payload); ok && termSync != nil {
-				termSync.notifyPeer(cols, rows)
-			}
-		case framePing:
-			pong := tcpKA.pongPayload(payload)
-			if pong != nil {
-				if err := writeFrameSafe(conn, framePong, pong); err != nil {
-					log.Printf("[keepalive] pong send failed: %v", err)
-					return
-				}
-			}
-		case framePong:
-			if rtt, loss, ok := tcpKA.acceptPong(payload); ok {
-				ui.UpdatePeerLatency(rtt)
-				pacer.observe(rtt, loss)
-				logs.LogV("[keepalive] pong received: RTT=%s peer audio loss=%.1f%%", rtt, loss*100)
-			}
-		default:
-			// unknown frame type; ignore
-		}
-	}
+	serveControlFrames(br, controlSession{
+		conn:      conn,
+		keepalive: tcpKA,
+		termSync:  termSync,
+		pacer:     pacer,
+		incoming:  &incoming,
+		peerLabel: friendLabel,
+	})
 }
