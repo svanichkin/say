@@ -39,17 +39,23 @@ const (
 	mediaIndexMask           uint16 = 0x7fff
 	mediaIndexHalf           uint16 = 0x4000
 	mediaTickDuration               = 4 * time.Millisecond
-	mediaTickSamples                = 32                       // 4 ms at the 8 kHz audio clock
-	audioFrameTicks                 = 5                        // 20 ms audio frame on a 4 ms common media timeline
-	audioBufferLeadFrames           = 32                       // 640 ms jitter buffer, as in v0.1.3 (hypothesis test)
-	audioBufferMaxFrames            = 128                      // queue capacity: 2.56 s
-	audioMaxConsecutivePLCs         = 32                       // tolerate up to 640 ms of missing media before resync
-	audioSpeakerPeriodFrames        = 4                        // 80 ms device period, matching the clean v0.1.3 playback configuration
-	audioPlayoutLowFrames           = audioSpeakerPeriodFrames // conceal once less than one device period is queued
-	audioCaptureResync              = 60 * time.Millisecond    // capture timeline gap that means lost samples
-	audioDTXUpdateFrames            = 8                        // AMR-NB sends a SID update at least every 8 frames in DTX
-	audioQueueMaxFrames             = 64                       // 1.28 s of queued playback triggers a trim…
-	audioQueueTargetFrames          = audioBufferLeadFrames    // …down to the jitter buffer lead
+	mediaTickSamples                = 32                        // 4 ms at the 8 kHz audio clock
+	audioFrameTicks                 = 5                         // 20 ms audio frame on a 4 ms common media timeline
+	audioBufferLeadFrames           = 12                        // initial jitter buffer lead: 240 ms; adapts between the two limits below
+	audioLeadMinFrames              = audioPlayoutLowFrames + 2 // 120 ms above nothing: one device period plus 40 ms
+	audioLeadMaxFrames              = 32                        // 640 ms, the fixed lead of v0.1.3
+	audioLeadGrowFrames             = 2                         // per packet that arrived after its slot
+	audioLeadShrinkQuiet            = 10 * time.Second          // no late packets for this long…
+	audioLeadShrinkEvery            = 5 * time.Second           // …shrinks the lead by one frame this often
+	audioQuietRMS                   = 300                       // frames below this RMS count as silence when shrinking the lead
+	audioBufferMaxFrames            = 128                       // queue capacity: 2.56 s
+	audioMaxConsecutivePLCs         = 32                        // tolerate up to 640 ms of missing media before resync
+	audioSpeakerPeriodFrames        = 4                         // 80 ms device period, matching the clean v0.1.3 playback configuration
+	audioPlayoutLowFrames           = audioSpeakerPeriodFrames  // conceal once less than one device period is queued
+	audioCaptureResync              = 60 * time.Millisecond     // capture timeline gap that means lost samples
+	audioDTXUpdateFrames            = 8                         // AMR-NB sends a SID update at least every 8 frames in DTX
+	audioQueueMaxFrames             = 64                        // 1.28 s of queued playback triggers a trim…
+	audioQueueTargetFrames          = audioBufferLeadFrames     // …down to the jitter buffer lead
 	videoBaseStaleThreshold         = 250 * time.Millisecond
 	videoMaxStaleThreshold          = 3 * time.Second
 	videoMaxQueuedFrames            = 96                     // ~3 s at 30 fps
@@ -66,9 +72,9 @@ func Configure(enableVoice, enableVideo bool) {
 // LogAudioConfig logs the audio pipeline settings (temporary diagnostics).
 func LogAudioConfig() {
 	log.Printf("[diag] audio codec=%s aec=%v rate=%dHz channels=%d frame=%dms opusBitrate=%d amrMode=4.75kbps(DTX) "+
-		"speakerPeriod=%dms jitterLead=%dms concealBelow=%dms queueTrim=%d->%dms maxPLC=%dms captureResync=%v tick=%v",
+		"speakerPeriod=%dms(x4) jitterLead=%dms(adaptive %d..%dms) concealBelow=%dms queueTrim=%d->%dms maxPLC=%dms captureResync=%v tick=%v",
 		audioCodec, echoCancel, audioSampleRate, audioChannels, audioFrameMillis, audioBitrate,
-		audioSpeakerPeriodFrames*audioFrameMillis, audioBufferLeadFrames*audioFrameMillis, audioPlayoutLowFrames*audioFrameMillis,
+		audioSpeakerPeriodFrames*audioFrameMillis, audioBufferLeadFrames*audioFrameMillis, audioLeadMinFrames*audioFrameMillis, audioLeadMaxFrames*audioFrameMillis, audioPlayoutLowFrames*audioFrameMillis,
 		audioQueueMaxFrames*audioFrameMillis, audioQueueTargetFrames*audioFrameMillis, audioMaxConsecutivePLCs*audioFrameMillis,
 		audioCaptureResync, mediaTickDuration)
 	log.Printf("[diag] video maxFPS=%d datagramLimit=%d", maxVideoFPS, maxMediaDatagram)
