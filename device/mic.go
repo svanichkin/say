@@ -92,6 +92,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 	dev, err := malgo.InitDevice(mCtx.Context, cfg, callbacks)
 	if err != nil {
 		mCtx.Uninit()
+		mCtx.Free()
 		close(out)
 		return nil, err
 	}
@@ -99,6 +100,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 	if err := dev.Start(); err != nil {
 		dev.Uninit()
 		mCtx.Uninit()
+		mCtx.Free()
 		close(out)
 		return nil, err
 	}
@@ -111,6 +113,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			_ = dev.Stop()
 			dev.Uninit()
 			mCtx.Uninit()
+			mCtx.Free()
 			close(out)
 		}
 		mu.Unlock()

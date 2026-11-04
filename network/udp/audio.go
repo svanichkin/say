@@ -135,8 +135,11 @@ func (amrAudioDecoder) IsDTXFrame(payload []byte) bool {
 // immediately before Capture, so the canceller's queue never over- or
 // underflows. Alignment follows sample counts, not callback timing.
 const (
-	audioEchoRefMaxFrames    = 5 // more queued reference than this means clock drift…
-	audioEchoRefTargetFrames = 2 // …and is trimmed back to this depth
+	// Allow overlap between whole speaker periods and batched microphone
+	// callbacks. The old 100 -> 40 ms trim discarded live reference with an
+	// 80 ms speaker period, depending on the phase of the two devices.
+	audioEchoRefMaxFrames    = 3 * audioSpeakerPeriodFrames
+	audioEchoRefTargetFrames = 2 * audioSpeakerPeriodFrames
 )
 
 // audioEcho pairs the rendered far-end audio with microphone frames.

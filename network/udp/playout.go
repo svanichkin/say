@@ -14,8 +14,9 @@ import (
 // Packets wait in a small reorder buffer, sorted by media index, and are
 // decoded strictly in order. A missing slot is concealed only when it falls
 // due: when the speaker's queue drops below one device period (or, while the
-// jitter buffer is still priming, once a full lead of later audio has
-// arrived). Until then a reordered packet can still fill it. Concealment is
+// jitter buffer is still priming, once the initial wait expires or a full
+// lead of later audio has arrived). Until then a reordered packet can still
+// fill it. Concealment is
 // packet loss concealment during speech and comfort noise after a SID frame,
 // so the speaker does not run dry in the middle of a call. A packet that
 // arrives after its slot was concealed is dropped.
@@ -25,14 +26,19 @@ type audioPlayout struct {
 	out          *device.PlaybackQueue
 	scratch      []int16
 
-	started   bool   // nextIndex is valid
-	nextIndex uint16 // media index of the next slot handed to the speaker
-	pending   []queuedPacket
-	ready     bool // jitter buffer primed; frames go straight to the speaker
-	pre       []device.PlaybackFrame
-	preSample int
-	concealed int // consecutive concealed slots
-	lastAt    time.Time
+	started       bool   // nextIndex is valid
+	nextIndex     uint16 // media index of the next slot handed to the speaker
+	pending       []queuedPacket
+	ready         bool // jitter buffer primed; frames go straight to the speaker
+	pre           []device.PlaybackFrame
+	preSample     int
+	concealed     int // consecutive concealed slots
+	lastAt        time.Time
+	primeDeadline time.Time
+
+	lateIndex uint16
+	lateCount int
+	lateSince time.Time
 
 	// Loss statistics, based on received packet timestamps.
 	haveLast     bool
@@ -70,6 +76,7 @@ func (p *audioPlayout) reset() {
 	p.started, p.haveLast = false, false
 	p.pending = p.pending[:0]
 	p.concealed = 0
+	p.lateCount = 0
 	p.out.Clear()
 	p.rebuffer()
 }
@@ -78,6 +85,7 @@ func (p *audioPlayout) reset() {
 func (p *audioPlayout) rebuffer() {
 	p.ready = false
 	p.pre, p.preSample = p.pre[:0], 0
+	p.primeDeadline = time.Time{}
 }
 
 func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
@@ -87,10 +95,34 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		p.reset()
 	}
 	p.lastAt = now
+	if p.started && mediaIndexDelta(index, p.nextIndex) < -audioFrameTicks/2 {
+		// A delayed packet from the preceding call can establish the wrong
+		// initial timeline. Recover only while not playing, after observing a
+		// sustained, advancing sequence; ordinary duplicates/reordering must
+		// not move the playback clock backwards.
+		d := mediaIndexDelta(index, p.lateIndex)
+		if p.lateCount == 0 || d <= 0 || d > audioMaxConsecutivePLCs*audioFrameTicks {
+			p.lateCount, p.lateSince = 1, now
+		} else {
+			p.lateCount++
+		}
+		p.lateIndex = index
+		if !p.ready && p.out.QueuedSamples() == 0 && p.lateCount >= 3 && now.Sub(p.lateSince) >= 80*time.Millisecond {
+			diag.RxResets.Inc()
+			logs.LogV("[voice/udp] reanchor idle playback from index %d to %d after %d advancing late packets", p.nextIndex, index, p.lateCount)
+			p.reset()
+		} else {
+			diag.RxLate.Inc()
+			return
+		}
+	}
+	p.lateCount = 0
 
 	isSID := p.dec.IsDTXFrame(payload)
+	var receivedGap int32
 	if p.haveLast {
-		switch d := mediaIndexDelta(index, p.lastIndex); {
+		receivedGap = mediaIndexDelta(index, p.lastIndex)
+		switch d := receivedGap; {
 		case d > 0:
 			p.recordLoss(d, p.lastSID, now)
 			p.lastIndex, p.lastSID = index, isSID
@@ -105,23 +137,22 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		p.started, p.nextIndex = true, index
 	}
 	rel := mediaIndexDelta(index, p.nextIndex)
-	if rel < -audioFrameTicks/2 {
-		diag.RxLate.Inc()
-		logs.LogV("[voice/udp] drop late audio packet (%d ms after its slot was concealed)", int(-rel)*int(mediaTickDuration/time.Millisecond))
-		return
-	}
-	if rel > audioMaxConsecutivePLCs*audioFrameTicks {
+	if rel > audioMaxConsecutivePLCs*audioFrameTicks && receivedGap > audioMaxConsecutivePLCs*audioFrameTicks {
 		// A long silence or outage: restart at the live edge.
+		// Compare received packets too: during DTX, nextIndex can lag behind
+		// perfectly regular SID updates while their playout slots are not due.
 		diag.RxResets.Inc()
 		p.pending = p.pending[:0]
 		p.out.Clear()
 		p.rebuffer()
 		p.concealed = 0
 		p.nextIndex = index
-		rel = 0
+	}
+	if !p.ready && p.primeDeadline.IsZero() {
+		p.primeDeadline = now.Add(time.Duration(audioBufferLeadFrames*audioFrameMillis) * time.Millisecond)
 	}
 	p.insert(queuedPacket{index: index, payload: append([]byte(nil), payload...)})
-	p.pump()
+	p.pump(now)
 }
 
 // insert adds a packet to the reorder buffer, keeping it sorted by index.
@@ -150,7 +181,7 @@ func (p *audioPlayout) insert(pkt queuedPacket) {
 
 // pump hands slots to the speaker in order: decoded packets as soon as they
 // are next, concealment for a missing slot only once it is due.
-func (p *audioPlayout) pump() {
+func (p *audioPlayout) pump(now time.Time) {
 	for len(p.pending) > 0 {
 		head := p.pending[0]
 		rel := mediaIndexDelta(head.index, p.nextIndex)
@@ -162,7 +193,7 @@ func (p *audioPlayout) pump() {
 			p.nextIndex = head.index // absorb timestamp rounding
 			p.decode(head.payload)
 		default:
-			if !p.slotDue() {
+			if !p.slotDue(now) {
 				return
 			}
 			diag.RxConcealGap.Inc()
@@ -176,9 +207,12 @@ func (p *audioPlayout) pump() {
 }
 
 // slotDue reports whether a missing slot must be concealed now.
-func (p *audioPlayout) slotDue() bool {
+func (p *audioPlayout) slotDue(now time.Time) bool {
 	if p.ready {
 		return p.out.QueuedSamples() < p.lowWater
+	}
+	if !p.primeDeadline.IsZero() && !now.Before(p.primeDeadline) {
+		return true
 	}
 	// While priming nothing plays yet; give reordered packets a full lead
 	// of later audio to arrive before declaring the slot lost.
@@ -188,13 +222,24 @@ func (p *audioPlayout) slotDue() bool {
 
 // onTick conceals the next slot when the speaker is about to run dry.
 func (p *audioPlayout) onTick() {
+	p.onTickAt(time.Now())
+}
+
+func (p *audioPlayout) onTickAt(now time.Time) {
 	if !p.started {
 		return
 	}
 	q := int64(p.out.QueuedSamples() / 8) // ms at 8 kHz
 	diag.RxQueueMinMs.Observe(q)
 	diag.RxQueueMaxMs.Observe(q)
-	p.pump()
+	p.pump(now)
+	// DTX deliberately sends no packets for most 20 ms slots. Prime by
+	// elapsed time, not by waiting for a full buffer of later packets.
+	if !p.ready && !p.primeDeadline.IsZero() && !now.Before(p.primeDeadline) {
+		for !p.ready && p.conceal() {
+			diag.RxConcealTick.Inc()
+		}
+	}
 	if !p.ready || len(p.pending) > 0 || p.out.QueuedSamples() >= p.lowWater {
 		return
 	}

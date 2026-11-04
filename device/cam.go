@@ -23,13 +23,21 @@ func StartCameraStream(ctx context.Context) (<-chan CameraFrame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("camera start: %w", err)
 	}
+	return cameraFrames(ctx, src), nil
+}
 
+// cameraFrames closes its output only after the native source closes.
+func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFrame {
 	out := make(chan CameraFrame, 1)
 	go func() {
 		defer close(out)
 		for {
 			select {
 			case <-ctx.Done():
+				// gocam closes src only after stopping the native capture session.
+				// Keep our channel open until that completes, so reconnect can join it.
+				for range src {
+				}
 				return
 			case f, ok := <-src:
 				if !ok {
@@ -57,7 +65,7 @@ func StartCameraStream(ctx context.Context) (<-chan CameraFrame, error) {
 			}
 		}
 	}()
-	return out, nil
+	return out
 }
 
 // centerCropToAspect crops the input RGB24 frame to match the target aspect ratio (targetW/targetH).

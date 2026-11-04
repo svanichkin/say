@@ -1,6 +1,7 @@
 package udp
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func simulate(t *testing.T, steps int, arrivals map[int][]uint16, sid map[uint16
 			}
 			p.onPacket(idx, payload, now)
 		}
-		p.onTick()
+		p.onTickAt(now)
 		if f, ok := q.TakeFrame(); ok {
 			played = append(played, f.Samples[0])
 		} else {
@@ -80,9 +81,6 @@ func TestPlayoutConcealsLatePacketsInsteadOfUnderrun(t *testing.T) {
 }
 
 func TestPlayoutFillsDTXSilenceWithComfortNoise(t *testing.T) {
-	if audioBufferLeadFrames > 6 {
-		t.Skip("scenario sized for a 120 ms lead; temporary 640 ms hypothesis build")
-	}
 	arrivals := map[int][]uint16{}
 	sid := map[uint16]bool{}
 	for i := 0; i < 10; i++ { // speech
@@ -96,7 +94,7 @@ func TestPlayoutFillsDTXSilenceWithComfortNoise(t *testing.T) {
 	for i := 90; i < 100; i++ { // speech again
 		arrivals[i] = append(arrivals[i], uint16(i*audioFrameTicks))
 	}
-	played := simulate(t, 105, arrivals, sid)
+	played := simulate(t, 100+audioBufferLeadFrames+5, arrivals, sid)
 	if n := underruns(played[:100], audioBufferLeadFrames+1); n != 0 {
 		t.Fatalf("speaker underran %d times across DTX silence: %v", n, played)
 	}
@@ -109,6 +107,127 @@ func TestPlayoutFillsDTXSilenceWithComfortNoise(t *testing.T) {
 	if sids != 10 {
 		t.Fatalf("played %d of 10 SID frames; SIDs must not be dropped as late: %v", sids, played)
 	}
+}
+
+func TestPlayoutStartsDuringDTX(t *testing.T) {
+	arrivals := map[int][]uint16{}
+	sid := map[uint16]bool{}
+	for i := 0; i < 120; i += audioDTXUpdateFrames {
+		idx := uint16(i * audioFrameTicks)
+		arrivals[i] = []uint16{idx}
+		sid[idx] = true
+	}
+	played := simulate(t, 120, arrivals, sid)
+	if n := underruns(played, audioBufferLeadFrames+1); n != 0 {
+		t.Fatalf("%d empty output frames during continuously received DTX", n)
+	}
+}
+
+func TestPlayoutRecoversFromPreviousCallTimestamp(t *testing.T) {
+	arrivals := map[int][]uint16{0: {5000}} // last delayed packet from a previous call
+	for i := 1; i < 150; i++ {
+		arrivals[i] = []uint16{uint16(i * audioFrameTicks)}
+	}
+	played := simulate(t, 150, arrivals, nil)
+	// Recovery must be bounded; a single old packet must not silence this call.
+	if n := underruns(played, audioBufferLeadFrames+12); n != 0 {
+		t.Fatalf("%d empty output frames after the timestamp restarted", n)
+	}
+	for _, sample := range played[audioBufferLeadFrames+12:] {
+		if sample < 1000 {
+			t.Fatal("recovery must play received speech, not substitute concealment")
+		}
+	}
+}
+
+func TestPlayoutDoesNotReanchorOnLateDuplicates(t *testing.T) {
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: 160}, 160, q)
+	now := time.Now()
+	p.onPacket(5000, []byte{1}, now)
+	for i := 1; i <= 10; i++ {
+		p.onPacket(100, []byte{2}, now.Add(time.Duration(i)*20*time.Millisecond))
+	}
+	if p.nextIndex != 5000+audioFrameTicks {
+		t.Fatalf("duplicate packets moved the timeline to %d", p.nextIndex)
+	}
+}
+
+func TestAMRPlayoutWithSilenceAnd80msSpeaker(t *testing.T) {
+	enc, dec, frameSamples, err := initAudioCodec("amrnb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(dec, frameSamples, q)
+	pcm := make([]int16, frameSamples)
+	packet := make([]byte, maxAudioPacket)
+	epoch := time.Now()
+	const sourceFrames = 300
+	played, omitted, sidPackets, speechPeak := 0, 0, 0, 0
+	playing := false
+	for step := 0; step < sourceFrames+audioBufferLeadFrames+8; step++ {
+		now := epoch.Add(time.Duration(step*audioFrameMillis) * time.Millisecond)
+		if step < sourceFrames {
+			clear(pcm)
+			if (step >= 80 && step < 120) || step >= 240 {
+				for i := range pcm {
+					pcm[i] = int16(10000 * math.Sin(2*math.Pi*337*float64(step*frameSamples+i)/audioSampleRate))
+				}
+			}
+			n, err := enc.EncodeFrame(pcm, packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n == 0 {
+				omitted++
+			} else {
+				if dec.IsDTXFrame(packet[:n]) {
+					sidPackets++
+				}
+				p.onPacket(uint16(step*audioFrameTicks), packet[:n], now)
+			}
+		}
+		p.onTickAt(now)
+		if (step+1)%audioSpeakerPeriodFrames != 0 {
+			continue
+		}
+		if !playing {
+			playing = q.QueuedSamples() >= audioSpeakerPeriodFrames*frameSamples
+			if !playing {
+				if step > audioBufferLeadFrames+audioSpeakerPeriodFrames {
+					t.Fatalf("speaker never started during DTX by frame %d", step)
+				}
+				continue
+			}
+		}
+		for i := 0; i < audioSpeakerPeriodFrames && played < sourceFrames; i++ {
+			f, ok := q.TakeFrame()
+			if !ok {
+				t.Fatalf("speaker ran dry at frame %d, played %d", step, played)
+			}
+			if f.MediaIndex != uint16(played*audioFrameTicks) {
+				t.Fatalf("audio timeline jumped: index=%d, want %d", f.MediaIndex, played*audioFrameTicks)
+			}
+			if played >= 90 && played < 120 {
+				for _, sample := range f.Samples {
+					x := int(sample)
+					speechPeak = max(speechPeak, x, -x)
+				}
+			}
+			played++
+		}
+		if played == sourceFrames {
+			break
+		}
+	}
+	if played != sourceFrames || omitted == 0 || sidPackets < 2 {
+		t.Fatalf("played=%d/%d, omitted DTX frames=%d, SID packets=%d", played, sourceFrames, omitted, sidPackets)
+	}
+	if speechPeak < 1000 {
+		t.Fatalf("speech did not reach playback: peak=%d", speechPeak)
+	}
+	t.Logf("played all %d frames continuously; %d silent frames omitted, %d SID packets", played, omitted, sidPackets)
 }
 
 // playedCounts drains the queue and counts decoded (>= 1000) and concealed (-1) frames.
@@ -158,9 +277,6 @@ func TestPlayoutToleratesTimestampJitter(t *testing.T) {
 }
 
 func TestPlayoutReordersPacketsBeforeTheirSlotIsDue(t *testing.T) {
-	if audioBufferLeadFrames > 6 {
-		t.Skip("scenario sized for a 120 ms lead; temporary 640 ms hypothesis build")
-	}
 	const frame = 160
 	q := device.NewPlaybackQueue(64)
 	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
@@ -168,9 +284,13 @@ func TestPlayoutReordersPacketsBeforeTheirSlotIsDue(t *testing.T) {
 	for _, i := range []int{0, 2, 1, 3, 4, 6, 5, 7, 8, 9} {
 		p.onPacket(uint16(i*audioFrameTicks), []byte{byte(i), 0}, now)
 	}
+	total := max(10, audioBufferLeadFrames+2)
+	for i := 10; i < total; i++ {
+		p.onPacket(uint16(i*audioFrameTicks), []byte{byte(i), 0}, now)
+	}
 	decoded, concealed, order := playedCounts(q)
-	if decoded != 10 || concealed != 0 {
-		t.Fatalf("decoded %d, concealed %d of 10 reordered packets: %v", decoded, concealed, order)
+	if decoded != total || concealed != 0 {
+		t.Fatalf("decoded %d, concealed %d of %d reordered packets: %v", decoded, concealed, total, order)
 	}
 	for i, v := range order {
 		if v != int16(1000+i) {

@@ -75,3 +75,36 @@ func TestEchoReferenceSurvivesCallbackJitter(t *testing.T) {
 		t.Fatalf("buffered reference suppresses only %.1f dB of echo", buffered)
 	}
 }
+
+// An 80 ms speaker callback can arrive with 40 ms of reference still queued
+// while a 60 ms microphone callback is being scheduled. None is stale.
+func TestEchoReferencePreservesSpeakerPeriodOverlap(t *testing.T) {
+	a, err := newAudioEcho(160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.setCaptureEnabled(true)
+	for batch := 0; batch < 2; batch++ {
+		pcm := make([]int16, 4*160)
+		for i := range pcm {
+			pcm[i] = int16(batch*4 + i/160 + 1)
+		}
+		a.playback(pcm)
+		if batch == 0 {
+			for want := int16(1); want <= 2; want++ {
+				a.nextReference()
+				if a.ref[0] != want {
+					t.Fatalf("reference=%d, want %d", a.ref[0], want)
+				}
+			}
+		}
+	}
+	for want := int16(3); want <= 8; want++ {
+		a.nextReference()
+		for _, sample := range a.ref {
+			if sample != want {
+				t.Fatalf("reference jumped to %d, want frame %d", sample, want)
+			}
+		}
+	}
+}
