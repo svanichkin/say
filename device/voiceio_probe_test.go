@@ -1,6 +1,7 @@
 package device
 
 import (
+	"context"
 	"math"
 	"sync/atomic"
 	"testing"
@@ -43,5 +44,33 @@ func TestVoiceIOProbe(t *testing.T) {
 		inFrames.Load(), inCalls.Load(), maxIn.Load(), outFrames.Load(), outCalls.Load(), maxOut.Load(), inPeak.Load())
 	if inFrames.Load() < 8000 || outFrames.Load() < 8000 {
 		t.Fatalf("too few frames: input %d, output %d (want ~16000 each)", inFrames.Load(), outFrames.Load())
+	}
+}
+
+// TestDefaultDeviceLatencyProbe opens Say's own speaker and microphone
+// (20 ms x 2, as the profiles do) and logs what the system reports.
+func TestDefaultDeviceLatencyProbe(t *testing.T) {
+	if !VoiceIOSupported {
+		t.Skip("not reported on this platform")
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	sp, err := StartSpeaker(8000, 1, 160, 2, 32, NewPlaybackQueue(8), stop, nil, nil)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer sp.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := StartMicrophoneStream(ctx, 8000, 1); err != nil {
+		t.Skip(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	out, ok := DefaultDeviceLatency(false)
+	in, _ := DefaultDeviceLatency(true)
+	t.Logf("speaker 20 ms x 2 (assumed %d ms): output %v", sp.LatencySamples()/8, out)
+	t.Logf("microphone: input %v", in)
+	if !ok || out.Total() <= 0 {
+		t.Fatalf("no output latency reported: %+v", out)
 	}
 }

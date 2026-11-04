@@ -127,38 +127,59 @@ static UInt32 sayGetU32(AudioObjectID obj, AudioObjectPropertySelector sel, Audi
 	return v;
 }
 
+// sayDefaultDevice returns the system default output (input == 0) or
+// input device, or 0.
+static AudioDeviceID sayDefaultDevice(int input) {
+	AudioObjectPropertyAddress a = {input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice,
+		kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+	AudioDeviceID dev = 0;
+	UInt32 size = sizeof(dev);
+	if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, &dev) != noErr) {
+		return 0;
+	}
+	return dev;
+}
+
+// sayDeviceLatency fills out the latency of dev in one direction. The IO
+// buffer size is the one this process uses.
+static void sayDeviceLatency(AudioDeviceID dev, int input, sayVoiceLatency *out) {
+	AudioObjectPropertyScope scope = input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput;
+	out->device = dev;
+	if (dev == 0) {
+		return;
+	}
+	AudioObjectPropertyAddress ra = {kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+	UInt32 size = sizeof(out->rate);
+	AudioObjectGetPropertyData(dev, &ra, 0, NULL, &size, &out->rate);
+	out->bufferFrames = sayGetU32(dev, kAudioDevicePropertyBufferFrameSize, scope);
+	out->deviceLatency = sayGetU32(dev, kAudioDevicePropertyLatency, scope);
+	out->safetyOffset = sayGetU32(dev, kAudioDevicePropertySafetyOffset, scope);
+	AudioObjectPropertyAddress sa = {kAudioDevicePropertyStreams, scope, kAudioObjectPropertyElementMain};
+	AudioStreamID streams[8];
+	size = sizeof(streams);
+	if (AudioObjectGetPropertyData(dev, &sa, 0, NULL, &size, streams) == noErr && size >= sizeof(AudioStreamID)) {
+		out->streamLatency = sayGetU32(streams[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal);
+	}
+}
+
+// sayDefaultLatency fills out the latency of the default device.
+static void sayDefaultLatency(int input, sayVoiceLatency *out) {
+	memset(out, 0, sizeof(*out));
+	sayDeviceLatency(sayDefaultDevice(input), input, out);
+}
+
 // sayVoiceQuery fills out the latency of the output (input == 0) or the
 // input device of the running unit.
 static void sayVoiceQuery(sayVoiceIO *v, int input, sayVoiceLatency *out) {
 	memset(out, 0, sizeof(*out));
-	AudioObjectPropertyScope scope = input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput;
 	AudioDeviceID dev = 0;
 	UInt32 size = sizeof(dev);
 	if (AudioUnitGetProperty(v->unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, input ? 1 : 0, &dev, &size) == noErr && dev != 0) {
 		out->fromUnit = 1;
 	} else {
-		AudioObjectPropertyAddress a = {input ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice,
-			kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-		size = sizeof(dev);
-		if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, &dev) != noErr) {
-			dev = 0;
-		}
+		dev = sayDefaultDevice(input);
 	}
-	out->device = dev;
-	if (dev != 0) {
-		AudioObjectPropertyAddress ra = {kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-		size = sizeof(out->rate);
-		AudioObjectGetPropertyData(dev, &ra, 0, NULL, &size, &out->rate);
-		out->bufferFrames = sayGetU32(dev, kAudioDevicePropertyBufferFrameSize, scope);
-		out->deviceLatency = sayGetU32(dev, kAudioDevicePropertyLatency, scope);
-		out->safetyOffset = sayGetU32(dev, kAudioDevicePropertySafetyOffset, scope);
-		AudioObjectPropertyAddress sa = {kAudioDevicePropertyStreams, scope, kAudioObjectPropertyElementMain};
-		AudioStreamID streams[8];
-		size = sizeof(streams);
-		if (AudioObjectGetPropertyData(dev, &sa, 0, NULL, &size, streams) == noErr && size >= sizeof(AudioStreamID)) {
-			out->streamLatency = sayGetU32(streams[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal);
-		}
-	}
+	sayDeviceLatency(dev, input, out);
 	size = sizeof(out->unitLatency);
 	AudioUnitGetProperty(v->unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0, &out->unitLatency, &size);
 }
@@ -219,6 +240,7 @@ func StartVoiceIO(sampleRate int, onInput func(samples []int16), onOutput func(o
 // CoreAudio reports it.
 type VoiceLatency struct {
 	FromUnit      bool    // the device came from the unit (else: the system default)
+	Default       bool    // queried as the system default device (Say's own audio)
 	Rate          float64 // device sample rate, Hz
 	BufferFrames  int     // IO buffer (callback) size, frames
 	DeviceLatency int     // frames
@@ -243,19 +265,43 @@ func (l VoiceLatency) String() string {
 	if !l.FromUnit {
 		src = "default device"
 	}
-	return fmt.Sprintf("%.1f ms (%s %.0f Hz: buffer %d + latency %d + safety %d + stream %d frames, unit %.1f ms)",
-		float64(l.Total())/float64(time.Millisecond), src, l.Rate, l.BufferFrames, l.DeviceLatency, l.SafetyOffset, l.StreamLatency,
-		float64(l.UnitLatency)/float64(time.Millisecond))
+	if l.Default {
+		src = "device"
+	}
+	text := fmt.Sprintf("%.1f ms (%s %.0f Hz: buffer %d + latency %d + safety %d + stream %d frames",
+		float64(l.Total())/float64(time.Millisecond), src, l.Rate, l.BufferFrames, l.DeviceLatency, l.SafetyOffset, l.StreamLatency)
+	if !l.Default {
+		text += fmt.Sprintf(", unit %.1f ms", float64(l.UnitLatency)/float64(time.Millisecond))
+	}
+	return text + ")"
 }
 
 // Latency reports the running unit's output (input false) or input latency.
 func (vio *VoiceIO) Latency(input bool) VoiceLatency {
 	var c C.sayVoiceLatency
-	in := C.int(0)
-	if input {
-		in = 1
+	C.sayVoiceQuery(vio.v, cBool(input), &c)
+	return voiceLatencyFromC(&c)
+}
+
+// DefaultDeviceLatency reports the latency of the system default output
+// (input false) or input device, which Say's own audio (malgo) uses. The IO
+// buffer size is this process's: the period the device was opened with.
+func DefaultDeviceLatency(input bool) (VoiceLatency, bool) {
+	var c C.sayVoiceLatency
+	C.sayDefaultLatency(cBool(input), &c)
+	l := voiceLatencyFromC(&c)
+	l.Default = true
+	return l, c.device != 0
+}
+
+func cBool(b bool) C.int {
+	if b {
+		return 1
 	}
-	C.sayVoiceQuery(vio.v, in, &c)
+	return 0
+}
+
+func voiceLatencyFromC(c *C.sayVoiceLatency) VoiceLatency {
 	return VoiceLatency{
 		FromUnit:      c.fromUnit != 0,
 		Rate:          float64(c.rate),
