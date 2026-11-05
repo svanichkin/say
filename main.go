@@ -59,6 +59,8 @@ func run() (err error) {
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
 		return err
 	}
+	// The handshake tells the peer our version and the codec we send.
+	tcpsignal.SetLocalInfo(appVersion(), opts.AudioCodec)
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
 
 	role := "server"
@@ -177,7 +179,7 @@ func run() (err error) {
 
 	var mediaFactory tcpsignal.MediaSessionFactory
 	if udpConn != nil {
-		mediaFactory = func(peerHost string, remote *net.UDPAddr) (tcpsignal.MediaSession, error) {
+		mediaFactory = func(peerHost string, remote *net.UDPAddr, peer tcpsignal.PeerInfo) (tcpsignal.MediaSession, error) {
 			// Every call starts with the default audio buffers (-audio
 			// changes last one call). Where the peer is only matters for
 			// the log: a LAN peer means multicast found a direct link.
@@ -187,7 +189,9 @@ func run() (err error) {
 			} else {
 				log.Printf("[p2p] peer %s is reached over the internet", peerHost)
 			}
-			return udptransport.StartSession(udpConn, remote)
+			// We decode the peer's voice with the codec it announced (an
+			// older peer announces none and expects ours).
+			return udptransport.StartSession(udpConn, remote, peer.AudioCodec)
 		}
 	}
 
@@ -432,6 +436,13 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			}
 		}
 
+		var incompatible *tcpsignal.IncompatibleError
+		if errors.As(err, &incompatible) {
+			// Redialing cannot help until one side is updated.
+			log.Printf("[p2p] %s: %v", target, err)
+			ui.SetStatusMessage(err.Error())
+			return err
+		}
 		if errors.Is(err, tcpsignal.ErrPeerBusy) {
 			log.Printf("[p2p] %s is busy with another call", target)
 			ui.SetStatusMessage(fmt.Sprintf("%s is busy with another call\nRetrying in %ds…", target, int(delay.Seconds())))

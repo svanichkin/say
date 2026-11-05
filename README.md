@@ -3,9 +3,11 @@
 Say is a terminal‑first voice and video call utility that builds an embedded
 Yggdrasil node via [ygg](https://github.com/svanichkin/ygg) and speaks directly
 to other peers over the Ygg overlay network.
-Audio is captured and played with [malgo](https://github.com/gen2brain/malgo)
-(miniaudio), processed with acoustic echo cancellation, encoded as pure-Go AMR-NB,
-Opus or G.722, and sent via UDP for low latency. Video frames are sourced through
+Audio goes through the system's voice processing on macOS and Windows (echo
+cancellation, noise suppression) or is captured and played with
+[malgo](https://github.com/gen2brain/malgo) (miniaudio) with Say's own echo
+canceller, encoded as pure-Go AMR-NB, Opus or G.722, and sent via UDP for low
+latency. Video frames are sourced through
 [gocam](https://github.com/svanichkin/gocam), compressed, then rendered in the
 current terminal session using Unicode glyphs.
 
@@ -32,7 +34,20 @@ external Yggdrasil daemon or web stack.
   public keys.
 - **Lower voice traffic.** Pure-Go AMR-NB (default, 4.75 kbit/s) uses about
   **90 % less** bandwidth than the 48 kbit/s G.722 of v0.1.3; Opus (12 kbit/s)
-  about **75 % less**. G.722 is still available with `-audio-codec g722`.
+  about **75 % less**. Choose the codec with `-audio-codec` (see below).
+- **Each side picks its own voice codec.** The handshake tells the peer which
+  codec we send, and each side decodes the other's voice with the peer's
+  codec, so the two sides may use different `-audio-codec` settings. When
+  they differ, the chat says so at the start of the call ("Voice: you send
+  AMR-NB, the peer sends Opus.").
+- **System voice processing** (`-sysaudio`, on by default on macOS and
+  Windows): the system cancels echo, suppresses noise and controls gain.
+- **Protocol versions.** The handshake carries the protocol version and the
+  Say version of each side. A peer that cannot talk to ours is refused with a
+  message naming both versions ("Incompatible versions: … Update both sides
+  to the same version."). A peer from before versioned handshakes (v1.0.0)
+  is still accepted; the chat then notes that voice works only with the same
+  `-audio-codec` on both sides.
 - Acoustic echo cancellation with a reference delay estimated from the requested
   speaker buffer. The filter resets on reference discontinuities; actual device
   latency (especially Bluetooth) can differ from this estimate.
@@ -60,6 +75,14 @@ external Yggdrasil daemon or web stack.
 - **Local network calls.** Peers in the same LAN (or on the same machine) find
   each other by Yggdrasil multicast and connect directly instead of through
   internet peers. `-nolan` turns this off.
+- **Light on CPU.** The video encoder reuses the result of every cell whose
+  pixels did not change since the last frame (about three in four on a
+  camera), matches glyphs per colour instead of per pixel and needs no
+  per-frame allocations; your own picture is shown without compressing it.
+  Encoding a frame is 3.5–4.5 times faster than in v1.0.0, with the same
+  output. On a MacBook Air a call takes about 56 % of one core instead of
+  about 76 % with v1.0.0 and v0.1.3; Say's own code is about 4 % of it, the
+  rest is macOS camera effects, voice processing and capture.
 - **Chat and file transfer** during a call (see below).
 - One call at a time: other callers get a "busy" answer; a peer that
   reconnects after a drop replaces its stale call.
@@ -103,10 +126,18 @@ that voice and video stay smooth.
 
 ## Requirements
 
-- Go **1.27.3** (minimum) with cgo enabled for native audio I/O. Both audio codecs are pure Go.
+- Go **1.27.3** (minimum) with cgo enabled for native audio I/O. All three audio codecs are pure Go.
 - A working microphone for voice calls and, if you enable video, a webcam that
   is supported by your OS (V4L2 on Linux, AVFoundation on macOS, Media
   Foundation on Windows).
+- Linux cameras: every `/dev/video*` capture node is tried in turn (video
+  codecs and other nodes are skipped); `GOCAM_DEVICE=/dev/video2` picks one.
+  SoC cameras with a media controller (PinePhone and similar boards) are
+  linked and configured automatically, preferring the front camera;
+  `GOCAM_SENSOR=ov5640` picks a sensor by name. The user needs access to
+  `/dev/video*` (the `video` group), and for SoC cameras to `/dev/media*` and
+  `/dev/v4l-subdev*`. Sensors that only output raw Bayer (they need an ISP)
+  are not supported.
 - System libraries required by miniaudio / Gocam (on Linux ensure ALSA/ Pulse
   dev packages are available; on macOS you just need Xcode command line tools).
 - Permission to access camera and microphone for the terminal session.
@@ -294,8 +325,9 @@ either a dial target (`"200:abcd:..."`) or a friend name from contacts
 pass `-config`; bare tokens are no longer treated as profile names.
 
 Audio and video are always enabled when hardware is present; no extra flags are
-required. Use the same audio codec on both peers; codec negotiation is not part
-of the current media protocol. Relevant CLI switches:
+required. The two peers may use different audio codecs: each announces its own
+in the handshake (Say v1.0.0 and older announce none, so with them use the same
+codec on both sides). Relevant CLI switches:
 
 - Without `-log`, Say writes logs only to stderr. With `-log`, it also writes a log file next to the running executable using the config name, for example `-config client` -> `client.log`. The resolved path is printed on startup. Use `-log debug` for the most detailed file logging.
 - `-port` – listening TCP/UDP port (defaults to `7777`).
@@ -305,8 +337,18 @@ of the current media protocol. Relevant CLI switches:
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
-- `-sysaudio` – use the system's voice processing instead of Say's own echo canceller: the system cancels echo, suppresses noise and controls gain. macOS: VoiceProcessingIO (as used by FaceTime) plays and records. Windows: the Voice Capture DSP records the default microphone and takes the default speaker's output as the echo reference; Say plays through the default speaker. On by default on macOS and Windows; `-sysaudio=false` uses Say's own audio (miniaudio and its echo canceller) instead. The speaker buffer is then chosen by the system; the output latency it reports is used to sync video (and logged). Falls back to Say's own audio where unavailable (other platforms for now).
-- `-audio-codec` – choose `amrnb` (default), `opus` or `g722`. AMR-NB uses 4.75 kbit/s, G.722 (as in v0.1.3) about 48 kbit/s; select the same codec on both peers.
+- `-sysaudio on|off` – the system's voice processing instead of Say's own echo canceller. On by default on macOS and Windows; `-sysaudio off` (or `-sysaudio=false`) uses Say's own audio: miniaudio for the devices and Say's echo canceller.
+  - What it does: the system cancels echo, suppresses noise and controls the microphone gain.
+  - macOS: VoiceProcessingIO (as used by FaceTime) plays and records. The microphone mode chosen in Control Center (Standard, Voice Isolation, Wide Spectrum) applies.
+  - Windows: the Voice Capture DSP records the default microphone and takes the default speaker's output as the echo reference; Say plays through the default speaker.
+  - The speaker buffer is chosen by the system; the output latency it reports is used to sync video (and logged).
+  - Cost: the system's noise suppression is a neural network and takes some CPU (on a Mac roughly 7–17 % of one core during a call). Turn it off if the CPU matters more than echo and noise.
+  - Where it is unavailable (other platforms for now) Say falls back to its own audio.
+- `-audio-codec amrnb|opus|g722` – the codec your voice is sent with:
+  - `amrnb` (default) – AMR-NB at 4.75 kbit/s with silence suppression: the least traffic, phone-like sound.
+  - `opus` – Opus at 12 kbit/s: clearer voice for about 2.5 times the traffic.
+  - `g722` – G.722 at 48 kbit/s (the codec of v0.1.3): no packet loss concealment beyond fading, ten times the traffic of AMR-NB.
+  - All three take well under 1 % of one CPU core. The peer decodes whatever you send, so each side may choose its own codec; only with Say v1.0.0 and older (no codec in the handshake) both sides must use the same one.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
 - `-contacts` – override the contacts directory defined in the config.

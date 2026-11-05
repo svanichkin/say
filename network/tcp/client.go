@@ -34,8 +34,8 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(15 * time.Second)
 	}
-	// Send HELLO
-	fmt.Fprintf(conn, "HELLO %s\n", localName)
+	// Send HELLO with our protocol version and voice codec.
+	fmt.Fprint(conn, helloLine("HELLO", localName))
 	logs.LogV("[p2p] sent HELLO %q", localName)
 	// Expect OK
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -53,9 +53,19 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 		conn.Close()
 		return nil, nil, ErrPeerBusy
 	}
-	if !strings.HasPrefix(line, "OK ") {
+	if rest, ok := strings.CutPrefix(line, incompatibleReply+" "); ok {
+		conn.Close()
+		return nil, nil, &IncompatibleError{Peer: parseHello(rest)}
+	}
+	rest, ok := strings.CutPrefix(line, "OK ")
+	if !ok {
 		conn.Close()
 		return nil, nil, fmt.Errorf("unexpected reply: %q", strings.TrimSpace(line))
+	}
+	peer := parseHello(rest)
+	if !compatible(peer) {
+		_ = hangup(conn)
+		return nil, nil, &IncompatibleError{Peer: peer}
 	}
 	logs.LogV("[p2p] connected: %s", strings.TrimSpace(line))
 
@@ -66,7 +76,7 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		clientHandleIncoming(fc, br, peerAddr, port, termSync, mediaFactory)
+		clientHandleIncoming(fc, br, peerAddr, port, peer, termSync, mediaFactory)
 	}()
 
 	stop := func() error {
@@ -85,7 +95,7 @@ func prettyAddr(host string, port int) string {
 // clientHandleIncoming drives a single outgoing P2P session over an established control connection.
 // It sets up optional video and voice streams, starts terminal size propagation,
 // then parses control frames from br until the connection closes.
-func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
+func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int, peer PeerInfo, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer conn.Close()
@@ -94,6 +104,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 	defer ui.SetChatActions(nil, nil)
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
+	notePeer(peer)
 
 	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, keepaliveInterval, keepaliveTimeout, true, pacer.active)
 	defer stopKeepalive()
@@ -110,7 +121,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 		if err != nil {
 			log.Printf("[media] invalid remote address %q: %v", host, err)
 		} else {
-			if sess, err := mediaFactory(strings.Trim(host, "[]"), raddr); err != nil {
+			if sess, err := mediaFactory(strings.Trim(host, "[]"), raddr, peer); err != nil {
 				log.Printf("[media] failed to start: %v", err)
 			} else if sess != nil {
 				defer sess.Stop()

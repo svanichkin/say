@@ -287,6 +287,19 @@ func (a *audioEcho) capture(mic, out []int16) error {
 	return err
 }
 
+// audioCodecLabel is the codec's name for the user.
+func audioCodecLabel(name string) string {
+	switch name {
+	case "amrnb":
+		return "AMR-NB"
+	case "opus":
+		return "Opus"
+	case "g722":
+		return "G722"
+	}
+	return name
+}
+
 // initAudioCodec creates a mono 8 kHz speech codec. AMR-NB is fixed at its
 // lowest 4.75 kbit/s mode with DTX; Opus retains the current low-bandwidth setup.
 func initAudioCodec(name string) (audioEncoder, audioDecoder, int, error) {

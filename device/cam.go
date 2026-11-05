@@ -45,11 +45,14 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 				}
 				capturedAt := time.Now()
 				frame := CameraFrame{Data: f.Data, Width: f.Width, Height: f.Height, CapturedAt: capturedAt}
-				// 1) center-crop to CIF aspect, 2) resize to 352x288
-				cropped := centerCropToAspect(frame, 352, 288)
-				rf, err := resizeFrameRGB(cropped, 352, 288)
-				if err != nil {
-					continue
+				// Center-crop to CIF aspect and resize to 352x288; gocam
+				// usually delivers exactly that already (its own buffer).
+				rf := frame
+				if frame.Width != 352 || frame.Height != 288 {
+					var err error
+					if rf, err = cropResizeRGB(frame, 352, 288); err != nil {
+						continue
+					}
 				}
 				rf.CapturedAt = capturedAt
 				select {
@@ -68,13 +71,20 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 	return out
 }
 
-// centerCropToAspect crops the input RGB24 frame to match the target aspect ratio (targetW/targetH).
-func centerCropToAspect(f CameraFrame, targetW, targetH int) CameraFrame {
+// cropResizeRGB center-crops an RGB24 frame to the aspect of outW x outH
+// and scales it to that size by nearest-neighbour sampling, in one pass:
+// only the sampled pixels are read, without an intermediate cropped copy
+// (a 720p frame is 2.7 MB). The sampling positions are those of a crop
+// followed by a resize, computed once per row and column.
+func cropResizeRGB(f CameraFrame, outW, outH int) (CameraFrame, error) {
 	inW, inH := f.Width, f.Height
-	if inW <= 0 || inH <= 0 {
-		return f
+	if inW <= 0 || inH <= 0 || len(f.Data) < inW*inH*3 {
+		return CameraFrame{}, fmt.Errorf("bad frame")
 	}
-	ta := float64(targetW) / float64(targetH)
+	if outW <= 0 || outH <= 0 {
+		return CameraFrame{}, fmt.Errorf("bad out size")
+	}
+	ta := float64(outW) / float64(outH)
 	ia := float64(inW) / float64(inH)
 	cropW, cropH := inW, inH
 	if ia > ta {
@@ -82,39 +92,25 @@ func centerCropToAspect(f CameraFrame, targetW, targetH int) CameraFrame {
 	} else if ia < ta {
 		cropH = int(float64(inW) / ta)
 	}
-	x0 := (inW - cropW) / 2
-	y0 := (inH - cropH) / 2
-	out := CameraFrame{Width: cropW, Height: cropH, Data: make([]byte, cropW*cropH*3)}
-	for y := 0; y < cropH; y++ {
-		srcY := y0 + y
-		copy(out.Data[y*cropW*3:(y+1)*cropW*3], f.Data[(srcY*inW+x0)*3:(srcY*inW+x0+cropW)*3])
-	}
-	return out
-}
-
-// resizeFrameRGB rescales an RGB24 frame to the specified output dimensions using nearest-neighbor sampling.
-func resizeFrameRGB(f CameraFrame, outW, outH int) (CameraFrame, error) {
-	if f.Width <= 0 || f.Height <= 0 || len(f.Data) < f.Width*f.Height*3 {
+	if cropW <= 0 || cropH <= 0 {
 		return CameraFrame{}, fmt.Errorf("bad frame")
 	}
-	if outW <= 0 || outH <= 0 {
-		return CameraFrame{}, fmt.Errorf("bad out size")
+	x0 := (inW - cropW) / 2
+	y0 := (inH - cropH) / 2
+
+	colOff := make([]int, outW)
+	for x := range colOff {
+		sx := min(int(float64(x)*float64(cropW)/float64(outW)), cropW-1)
+		colOff[x] = (x0 + sx) * 3
 	}
 	out := CameraFrame{Width: outW, Height: outH, Data: make([]byte, outW*outH*3)}
-	wIn, hIn := float64(f.Width), float64(f.Height)
+	dst := out.Data
 	for y := 0; y < outH; y++ {
-		sy := int(float64(y) * hIn / float64(outH))
-		if sy >= f.Height {
-			sy = f.Height - 1
-		}
-		for x := 0; x < outW; x++ {
-			sx := int(float64(x) * wIn / float64(outW))
-			if sx >= f.Width {
-				sx = f.Width - 1
-			}
-			srcIdx := (sy*f.Width + sx) * 3
-			dstIdx := (y*outW + x) * 3
-			copy(out.Data[dstIdx:dstIdx+3], f.Data[srcIdx:srcIdx+3])
+		sy := min(int(float64(y)*float64(cropH)/float64(outH)), cropH-1)
+		row := f.Data[(y0+sy)*inW*3:]
+		d := dst[y*outW*3 : (y+1)*outW*3]
+		for x, o := range colOff {
+			d[x*3], d[x*3+1], d[x*3+2] = row[o], row[o+1], row[o+2]
 		}
 	}
 	return out, nil

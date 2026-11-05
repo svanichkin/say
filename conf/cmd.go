@@ -636,7 +636,15 @@ func collectDashPrefixedArgs(args []string) ([]string, map[int]struct{}) {
 		}
 		key := normalizeFlagKey(keyToken)
 		combined := token
-		if !strings.Contains(token, "=") && flagConsumesOptionalValue(key) && i+1 < len(args) {
+		if !strings.Contains(token, "=") && flagTakesOnOff(key) && i+1 < len(args) {
+			// "-sysaudio off": take the next word only if it is a switch
+			// value, so a dial target after the flag stays a target.
+			if _, ok := parseOnOff(args[i+1]); ok {
+				consumed[i+1] = struct{}{}
+				combined = fmt.Sprintf("%s=%s", token, args[i+1])
+				i++
+			}
+		} else if !strings.Contains(token, "=") && flagConsumesOptionalValue(key) && i+1 < len(args) {
 			next := args[i+1]
 			if next != "--" && !strings.HasPrefix(next, "-") {
 				consumed[i+1] = struct{}{}
@@ -797,9 +805,9 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 		case "sysaudio":
 			boolVal := true
 			if hasValue && value != "" {
-				parsed, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("invalid value for -sysaudio: %q", value)
+				parsed, ok := parseOnOff(value)
+				if !ok {
+					return fmt.Errorf("invalid value for -sysaudio: %q (use on or off)", value)
 				}
 				boolVal = parsed
 			}
@@ -884,6 +892,22 @@ func flagRequiresValue(key string) bool {
 	default:
 		return false
 	}
+}
+
+// flagTakesOnOff lists switches that also accept "on"/"off" as the next word.
+func flagTakesOnOff(key string) bool {
+	return key == "sysaudio"
+}
+
+// parseOnOff reads a switch value: on/off, true/false, yes/no, 1/0.
+func parseOnOff(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "true", "yes", "1", "t":
+		return true, true
+	case "off", "false", "no", "0", "f":
+		return false, true
+	}
+	return false, false
 }
 
 func flagConsumesOptionalValue(key string) bool {

@@ -264,7 +264,10 @@ func (vs *dataSession) Done() <-chan struct{} {
 // for audio and malgo for playback. If a camera stream is active and enableVideo is true,
 // TextFrame-encoded video frames are also sent over the same PacketConn, prefixed with a frame
 // type byte.
-func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) {
+//
+// peerCodec is the codec the peer encodes its voice with, as announced in
+// the handshake; "" (an older peer) means it uses ours.
+func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string) (*dataSession, error) {
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	stopCh := make(chan struct{})
 	pc = newMediaPacketConn(pc, stopCh)
@@ -370,6 +373,26 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr) (*dataSession, error) 
 		enc, dec, frameSamples, err = initAudioCodec(audioCodec)
 		if err != nil {
 			return nil, err
+		}
+		// Each side encodes with its own codec; decode the peer's voice
+		// with the one it announced, so -audio-codec may differ.
+		rxCodec := audioCodec
+		if peerCodec != "" && peerCodec != audioCodec {
+			_, peerDec, peerFrame, err := initAudioCodec(peerCodec)
+			switch {
+			case err != nil:
+				log.Printf("[audio] the peer sends %q, which this version cannot decode: %v", peerCodec, err)
+				rxCodec = peerCodec
+				ui.AddChatMessage(fmt.Sprintf("The peer sends voice as %s, which this Say version cannot decode. Update both sides to the same version.", peerCodec), false)
+			case peerFrame != frameSamples:
+				return nil, fmt.Errorf("peer codec %s uses %d-sample frames, ours %d", peerCodec, peerFrame, frameSamples)
+			default:
+				dec, rxCodec = peerDec, peerCodec
+			}
+		}
+		log.Printf("[audio] sending voice as %s, receiving %s", audioCodec, rxCodec)
+		if rxCodec != audioCodec {
+			ui.AddChatMessage(fmt.Sprintf("Voice: you send %s, the peer sends %s.", audioCodecLabel(audioCodec), audioCodecLabel(rxCodec)), false)
 		}
 		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
 		audioNetIn = make(chan []byte, audioBufferMaxFrames)
@@ -638,12 +661,13 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				// ----- local preview (self view) -----
 				if cols, rows, ok := ui.SelfSlot(); ok {
 					start := time.Now()
-					dataLocal, err := previewEncoder.Encode(rawFrame, cols, rows)
+					// The self view never leaves this process: no compression.
+					dataLocal, err := previewEncoder.EncodePlain(rawFrame, cols, rows)
 					tEncodeLocal += time.Since(start)
 
 					if err != nil {
 						log.Printf("[video/udp] Encode local: %v", err)
-					} else if tv, err := previewDecoder.Decode(dataLocal); err != nil {
+					} else if tv, err := previewDecoder.DecodePlain(dataLocal); err != nil {
 						log.Printf("[video/udp] Decode local: %v", err)
 					} else if videoSelfScreenOut != nil {
 						select {

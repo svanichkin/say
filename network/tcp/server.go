@@ -89,11 +89,11 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 		return
 	}
 	conn.SetDeadline(time.Time{})
-	line = strings.TrimSpace(line)
-	peerName := "unknown"
-	if strings.HasPrefix(line, "HELLO ") {
-		peerName = strings.TrimSpace(strings.TrimPrefix(line, "HELLO "))
+	peer := PeerInfo{Name: "unknown", Proto: 1, Min: 1, Legacy: true}
+	if rest, ok := strings.CutPrefix(line, "HELLO "); ok {
+		peer = parseHello(rest)
 	}
+	peerName := peer.Name
 	logs.LogV("[p2p] handshake: HELLO from=%q raw=%q", peerName, strings.TrimSpace(line))
 	// Identify friend by address (host part) if possible
 	hostOnly := rem
@@ -109,6 +109,13 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	}
 	logs.LogV("[p2p] call from %s (%s)", friendLabel, hostOnly)
 
+	if !compatible(peer) {
+		log.Printf("[p2p] rejected call from %s (%s): %s", friendLabel, hostOnly, IncompatibleText(peer))
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		fmt.Fprint(conn, helloLine(incompatibleReply, conf.HostnameOr("me")))
+		return
+	}
+
 	// Only one call may own the shared UDP socket, devices and UI at a time.
 	release, ok := owner.acquire(strings.Trim(hostOnly, "[]"), conn)
 	if !ok {
@@ -121,16 +128,17 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	defer release()
 
 	// Reply OK and keep the socket open (this is our P2P channel for future audio)
-	fmt.Fprintf(conn, "OK %s\n", conf.HostnameOr("me"))
+	fmt.Fprint(conn, helloLine("OK", conf.HostnameOr("me")))
 	pacer := newAdaptiveFilePacer()
 	installChatActions(conn, pacer)
 	defer ui.SetChatActions(nil, nil)
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
+	notePeer(peer)
 
 	// Start media session (audio/video) on incoming side, learning peer address from first packet.
 	if mediaFactory != nil {
-		if sess, err := mediaFactory(strings.Trim(hostOnly, "[]"), nil); err != nil {
+		if sess, err := mediaFactory(strings.Trim(hostOnly, "[]"), nil, peer); err != nil {
 			log.Printf("[media] start incoming failed: %v", err)
 		} else if sess != nil {
 			defer sess.Stop()

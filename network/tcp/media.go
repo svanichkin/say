@@ -9,4 +9,5 @@ type MediaSession interface {
 
 // MediaSessionFactory starts an optional media session for a given peer.
 // When remote is nil, the session should learn the peer from incoming traffic.
-type MediaSessionFactory func(peerHost string, remote *net.UDPAddr) (MediaSession, error)
+// peer is what the peer announced in the handshake (its voice codec).
+type MediaSessionFactory func(peerHost string, remote *net.UDPAddr, peer PeerInfo) (MediaSession, error)
