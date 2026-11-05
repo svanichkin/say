@@ -268,6 +268,7 @@ type AppOptions struct {
 	ColorFilter string
 	MaxVideoFPS int
 	AudioCodec  string
+	Camera      string // -camera: a camera device such as /dev/video2 (Linux)
 	NoLAN       bool
 	NoMic       bool
 	SysAudio    bool // the system voice processing (default on macOS and Windows)
@@ -773,6 +774,11 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("unsupported audio codec %q (choose opus, amrnb or g722)", value)
 			}
 			opts.AudioCodec = codec
+		case "camera":
+			if !hasValue || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("-camera requires a device, e.g. -camera /dev/video2")
+			}
+			opts.Camera = strings.TrimSpace(value)
 		case "video-hold-debug":
 			boolVal := true
 			if hasValue && value != "" {
@@ -887,7 +893,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera":
 		return true
 	default:
 		return false

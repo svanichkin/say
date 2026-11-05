@@ -29,12 +29,17 @@ jobs:
 
   build_linux:
     name: Build Linux
-    runs-on: ubuntu-latest
+    # Native runners: cgo (miniaudio) needs a C compiler for the target.
+    runs-on: ${{ matrix.os }}
     needs: build_check
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64]
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64 # PinePhone and other ARM boards
+            os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 

@@ -27,6 +27,11 @@ func TestSysAudioSwitch(t *testing.T) {
 			t.Fatalf("%v: last argument consumed = %v", tc.args, taken)
 		}
 	}
+	flags, _ := collectDashPrefixedArgs([]string{"-camera", "/dev/video2", "200:abcd::1"})
+	opts := &AppOptions{}
+	if err := applyFlagTokens(flags, opts, &flagParseState{}); err != nil || opts.Camera != "/dev/video2" {
+		t.Fatalf("-camera /dev/video2: %q, %v", opts.Camera, err)
+	}
 	if err := applyFlagTokens([]string{"-sysaudio=maybe"}, &AppOptions{}, &flagParseState{}); err == nil {
 		t.Fatal("-sysaudio=maybe must be rejected")
 	}

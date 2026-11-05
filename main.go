@@ -59,6 +59,10 @@ func run() (err error) {
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
 		return err
 	}
+	if opts.Camera != "" {
+		// gocam opens this device only (Linux; e.g. a v4l2loopback node).
+		os.Setenv("GOCAM_DEVICE", opts.Camera)
+	}
 	// The handshake tells the peer our version and the codec we send.
 	tcpsignal.SetLocalInfo(appVersion(), opts.AudioCodec)
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
