@@ -162,7 +162,10 @@ wget -qO- https://raw.githubusercontent.com/svanichkin/say/main/scripts/install-
 The script detects your platform, downloads the latest release artifact from
 GitHub, and installs `say` into a sensible default directory:
 
-- macOS/Linux/BSD: `$HOME/.local/bin` for non‑root users, `/usr/local/bin` otherwise.
+- macOS: `/usr/local/bin` (asks for `sudo` if needed). It comes before `/usr/bin`
+  in the default `PATH`, so `say` runs Say instead of the system text-to-speech
+  `/usr/bin/say` (still available by its full path).
+- Linux/BSD: `$HOME/.local/bin` for non‑root users, `/usr/local/bin` otherwise.
 - Windows (MSYS/mingw/git-bash environments): `%USERPROFILE%\AppData\Local\Programs\say`.
 
 Override the target via `INSTALL_DIR=/custom/path ./scripts/install-release.sh`.

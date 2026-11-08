@@ -36,12 +36,6 @@ get_latest_tag() {
 	printf '%s\n' "$latest_json" | awk -F'"' '/"tag_name"/ { print $4; exit }'
 }
 
-ensure_dir() {
-	if [ ! -d "$INSTALL_DIR" ]; then
-		mkdir -p "$INSTALL_DIR"
-	fi
-}
-
 main() {
 	read -r os arch <<<"$(detect_platform)"
 
@@ -55,8 +49,9 @@ main() {
 			fi
 			;;
 		darwin)
-			# Install into MacPorts-style path
-			default_dir="/opt/local/bin"
+			# /usr/local/bin is in the default macOS PATH (/etc/paths) and comes
+			# before /usr/bin, so it shadows the system text-to-speech /usr/bin/say.
+			default_dir="/usr/local/bin"
 			;;
 		*)
 			# Linux / BSD fallback logic unchanged
@@ -70,8 +65,11 @@ main() {
 	INSTALL_DIR="${INSTALL_DIR:-$default_dir}"
 
 	SUDO=""
-	if [ "$os" = "darwin" ] && [ "$INSTALL_DIR" = "/opt/local/bin" ] && [ "$(id -u)" -ne 0 ]; then
-		SUDO="sudo"
+	if [ "$(id -u)" -ne 0 ]; then
+		if { [ -d "$INSTALL_DIR" ] && [ ! -w "$INSTALL_DIR" ]; } ||
+			{ [ ! -d "$INSTALL_DIR" ] && [ ! -w "$(dirname "$INSTALL_DIR")" ]; }; then
+			SUDO="sudo"
+		fi
 	fi
 
 	local tag version
@@ -113,10 +111,20 @@ main() {
 		tar -xzf "${tmpdir}/${archive_name}" -C "$tmpdir"
 	fi
 
-	ensure_dir
+	${SUDO:-} mkdir -p "$INSTALL_DIR"
 	${SUDO:-} install -m 755 "${tmpdir}/${binary_name}" "${INSTALL_DIR}/${binary_name}"
 
 	echo "Binary installed to ${INSTALL_DIR}/${binary_name}"
+
+	# Warn when another "say" (e.g. macOS /usr/bin/say) comes first in PATH.
+	local found
+	found="$(command -v "$binary_name" 2>/dev/null || true)"
+	if [ "$found" != "${INSTALL_DIR}/${binary_name}" ]; then
+		echo
+		echo "Warning: '${binary_name}' in your PATH resolves to: ${found:-nothing}"
+		echo "Put ${INSTALL_DIR} before it in PATH, e.g. add to your shell profile:"
+		echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+	fi
 }
 
 main "$@"
