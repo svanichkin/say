@@ -1185,7 +1185,7 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 	caption = truncateWidth(sanitizeLine(caption), width)
 	pad := width - displayWidth(caption)
 	leftPad := pad / 2
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m", row, left))
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, left) + panelColors())
 	out.WriteString(strings.Repeat(" ", leftPad))
 	out.WriteString(caption)
 	out.WriteString(strings.Repeat(" ", pad-leftPad))
@@ -1904,6 +1904,10 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 				fr, fgCol, fb = applyColorFilter(fr, fgCol, fb)
 				cell.fg = [3]int{fr, fgCol, fb}
 			}
+			if ansiColors() {
+				quantizeCell(&cell, blank, r, c)
+				blank = isBlankGlyph(cell.r)
+			}
 			if cache != nil && !cache.update(row, col, cell) {
 				continue
 			}
@@ -1975,14 +1979,23 @@ func writeCellColors(sb *strings.Builder, cell screenCell, fg, bg bool) {
 	}
 	var buf [48]byte
 	b := append(buf[:0], "\x1b["...)
+	ansi := ansiColors()
 	if fg {
-		b = appendRGBParams(append(b, "38;2;"...), cell.fg)
+		if ansi {
+			b = appendANSIFg(b, cell.fg)
+		} else {
+			b = appendRGBParams(append(b, "38;2;"...), cell.fg)
+		}
 	}
 	if bg {
 		if fg {
 			b = append(b, ';')
 		}
-		b = appendRGBParams(append(b, "48;2;"...), cell.bg)
+		if ansi {
+			b = appendANSIBg(b, cell.bg)
+		} else {
+			b = appendRGBParams(append(b, "48;2;"...), cell.bg)
+		}
 	}
 	sb.Write(append(b, 'm'))
 }
@@ -2154,7 +2167,7 @@ func writeStatusOverlay(sb *strings.Builder, bottomRow, startCol, frameCols, fra
 	rightPad := pad - leftPad
 	row := bottomRow
 	col := startCol
-	sb.WriteString(fmt.Sprintf("\x1b[%d;%dH\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m", row, col))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, col) + panelColors())
 	if leftPad > 0 {
 		sb.WriteString(strings.Repeat(" ", leftPad))
 	}
@@ -2194,7 +2207,7 @@ func writeCenterLabel(sb *strings.Builder, label string, startRow, startCol, fra
 		col = startCol
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, col))
-	sb.WriteString("\x1b[48;2;20;20;24m\x1b[38;2;245;245;245m")
+	sb.WriteString(panelColors())
 	sb.WriteString(string(runes))
 	sb.WriteString("\x1b[0m")
 }

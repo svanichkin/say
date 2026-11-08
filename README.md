@@ -340,6 +340,7 @@ codec on both sides). Relevant CLI switches:
 - `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `10`, `0` disables; higher is calmer, but low-contrast details start to lag).
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
 - `-camera /dev/videoN` – use this camera device only (Linux). Without it every `/dev/video*` capture node is tried in turn. Use it when a phone or board exposes several nodes, for example a `v4l2loopback` device that another program (such as a PinePhone camera service) fills: `-camera /dev/video0`.
+- `-colors 16|truecolor` – colour output. `16` uses only the 16 ANSI colours (8 for backgrounds), with dithering, for terminals without 24-bit colour such as Plan 9's `vt`; it is the default on Plan 9, `truecolor` elsewhere.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
 - `-sysaudio on|off` – the system's voice processing instead of Say's own echo canceller. On by default on macOS and Windows; `-sysaudio off` (or `-sysaudio=false`) uses Say's own audio: miniaudio for the devices and Say's echo canceller.

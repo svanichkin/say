@@ -108,8 +108,7 @@ func exitAltScreen() {
 
 // GetTermSize queries the current terminal size in character cells using stdout.
 func GetTermSize() (cols, rows int, err error) {
-	cols, rows, err = term.GetSize(int(os.Stdout.Fd()))
-	return
+	return termSize()
 }
 
 const osc52MaxClipboardBytes = 4096
@@ -146,6 +145,8 @@ func copyViaPlatformClipboard(text string) error {
 		return runClipboardCommand(text, "pbcopy")
 	case "windows":
 		return runClipboardCommandWithArgs(text, "cmd", "/c", "clip")
+	case "plan9":
+		return os.WriteFile("/dev/snarf", []byte(text), 0)
 	default:
 		commands := [][]string{
 			{"wl-copy"},

@@ -58,11 +58,23 @@ func startMouseTracker(ctx context.Context) {
 }
 
 func mouseEventLoop() {
+	// The loop ends only when the terminal can no longer be read: it is
+	// gone. Where closing it sends no hangup (Plan 9: vt exits), Say would
+	// keep running unseen, holding its ports; stop it instead.
+	defer func() {
+		if exitOnInputLoss {
+			interruptSelf()
+		}
+	}()
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
 			return
+		}
+		if isInterruptKey(b) {
+			interruptSelf()
+			continue
 		}
 		if b != 0x1b { // ESC
 			if b < utf8.RuneSelf {
@@ -90,6 +102,10 @@ func mouseEventLoop() {
 		case '<':
 			if evt, ok := parseSGRMouseTail(reader); ok {
 				handleMouseEvent(evt)
+			}
+		case '3': // ESC[3~, the Delete key (vt(1) -x sends it for Del)
+			if c, e := reader.ReadByte(); e == nil && c == '~' && deleteKeyInterrupts {
+				interruptSelf()
 			}
 		case '2':
 			seq := []byte{kind}
@@ -276,4 +292,12 @@ func viewportForPoint(col, row int) viewportID {
 		}
 	}
 	return viewportNone
+}
+
+// interruptSelf stops Say as an interrupt from the terminal would: the raw
+// mode some systems need for keys also turns off the terminal's own interrupt.
+func interruptSelf() {
+	if p, err := os.FindProcess(os.Getpid()); err == nil {
+		_ = p.Signal(os.Interrupt)
+	}
 }

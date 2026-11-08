@@ -24,7 +24,10 @@ TARGETS := \
 	openbsd/amd64 \
 	openbsd/arm64 \
 	windows/amd64 \
-	windows/arm64
+	windows/arm64 \
+	plan9/amd64 \
+	plan9/386 \
+	plan9/arm
 
 .PHONY: build run test tidy fmt clean build-all $(TARGETS:%=build-%)
 
@@ -49,10 +52,10 @@ clean:
 
 build-all: $(TARGETS:%=build-%)
 
-$(TARGETS:%=build-%):
+$(TARGETS:%=build-%): build-%:
 	$(eval TARGET_OS := $(word 1,$(subst /, ,$*)))
 	$(eval TARGET_ARCH := $(word 2,$(subst /, ,$*)))
 	$(eval TARGET_DIR := $(BIN_DIR)/$(TARGET_OS)-$(TARGET_ARCH))
 	$(eval TARGET_BIN := $(TARGET_DIR)/$(APP_NAME)$(if $(filter windows,$(TARGET_OS)),.exe,))
 	@mkdir -p $(TARGET_DIR)
-	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -o $(TARGET_BIN) $(BUILD_PKG)
+	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) CGO_ENABLED=$(if $(filter plan9,$(TARGET_OS)),0,1) $(GO) build $(BUILD_FLAGS) -o $(TARGET_BIN) $(BUILD_PKG)

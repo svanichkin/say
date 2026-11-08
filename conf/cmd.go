@@ -266,6 +266,7 @@ type AppOptions struct {
 	ContactsDir string
 	Mode        AppMode
 	ColorFilter string
+	Colors      string // -colors: "16" or "truecolor"; empty for the platform default
 	MaxVideoFPS int
 	AudioCodec  string
 	Camera      string // -camera: a camera device such as /dev/video2 (Linux)
@@ -765,6 +766,13 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				return fmt.Errorf("fps must be a positive number")
 			}
 			opts.MaxVideoFPS = fps
+		case "colors":
+			switch v := strings.ToLower(strings.TrimSpace(value)); v {
+			case "16", "8", "ansi", "truecolor", "24bit", "24", "auto":
+				opts.Colors = v
+			default:
+				return fmt.Errorf("invalid -colors %q: want 16, truecolor or auto", value)
+			}
 		case "audio-codec":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-audio-codec requires a value (opus, amrnb or g722)")
@@ -893,7 +901,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera", "colors":
 		return true
 	default:
 		return false

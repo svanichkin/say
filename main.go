@@ -124,6 +124,7 @@ func run() (err error) {
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
+	ui.SetColorMode(opts.Colors)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {
 		log.SetOutput(logWriter)

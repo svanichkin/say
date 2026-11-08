@@ -33,3 +33,6 @@ go.work.sum
 
 # env file
 .env
+
+# 9front test VM (UTM bundle with disk image)
+vm/
