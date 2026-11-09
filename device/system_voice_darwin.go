@@ -20,14 +20,27 @@ type systemVoiceCapture struct {
 	firstSample uint64
 	epoch       time.Time
 	out         chan AudioCaptureFrame
+	// clock, if set, is checked against the sample count (see captureGap).
+	clock func() time.Time
 }
 
 func (c *systemVoiceCapture) write(samples []int16) {
 	if len(samples) == 0 {
 		return
 	}
+	now := time.Now
+	if c.clock != nil {
+		now = c.clock
+		next := c.firstSample + uint64(len(c.pending))
+		if gap := captureGap(c.epoch, next, len(samples), c.sampleRate, now()); gap > 0 {
+			// The unit delivered nothing for a while: the samples on hand
+			// end before the gap, start a new frame after it.
+			c.firstSample = next + gap
+			c.pending = c.pending[:0]
+		}
+	}
 	if c.epoch.IsZero() {
-		c.epoch = time.Now().Add(-time.Duration(len(samples)) * time.Second / time.Duration(c.sampleRate))
+		c.epoch = now().Add(-time.Duration(len(samples)) * time.Second / time.Duration(c.sampleRate))
 	}
 	for len(samples) > 0 {
 		if c.pending == nil {
@@ -82,6 +95,7 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick, periodSamples, periods in
 			sampleRate: sampleRate,
 			frameSize:  max(1, sampleRate/50),
 			out:        micOut,
+			clock:      time.Now,
 		}
 		onInput = capture.write
 	}

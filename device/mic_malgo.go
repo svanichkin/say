@@ -44,6 +44,8 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 			// The callback runs once the block is complete; its first sample was
 			// captured one block duration earlier.
 			blockFrames := len(samples) / max(channels, 1)
+			// A pause of the device counts as dropped samples (captureGap).
+			firstSample += captureGap(captureEpoch, firstSample, blockFrames, sampleRate, time.Now())
 			if captureEpoch.IsZero() {
 				captureEpoch = time.Now().Add(-time.Duration(blockFrames) * time.Second / time.Duration(sampleRate))
 			}

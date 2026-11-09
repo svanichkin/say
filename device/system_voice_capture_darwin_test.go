@@ -95,3 +95,40 @@ func TestSystemVoiceCaptureDropsOldestWithoutCompressingTime(t *testing.T) {
 		t.Fatal("missing completed partial frame")
 	}
 }
+
+// A pause of the voice unit must not leave the capture timeline behind real
+// time: the receiver shows video in sync with these stamps.
+func TestSystemVoiceCaptureSkipsAPause(t *testing.T) {
+	now := time.Unix(500, 0)
+	out := make(chan AudioCaptureFrame, 64)
+	c := systemVoiceCapture{sampleRate: 8000, frameSize: 160, out: out, clock: func() time.Time { return now }}
+	block := func() {
+		now = now.Add(10 * time.Millisecond)
+		c.write(make([]int16, 80))
+	}
+	for i := 0; i < 10; i++ { // 100 ms of 10 ms blocks: 5 frames
+		block()
+	}
+	block() // half a frame pending
+	now = now.Add(time.Second)
+	block() // after a 1 s pause
+	block()
+	var frames []AudioCaptureFrame
+	for len(out) > 0 {
+		frames = append(frames, <-out)
+	}
+	if len(frames) != 6 {
+		t.Fatalf("%d frames, want 6 (5 before the pause, 1 after)", len(frames))
+	}
+	last := frames[5]
+	if last.FirstSample < 5*160+7900 {
+		t.Fatalf("first sample after the pause %d: the gap was not skipped", last.FirstSample)
+	}
+	// Its first sample was captured two blocks (20 ms) before the last write.
+	if d := now.Add(-20 * time.Millisecond).Sub(last.CapturedAt); d < -15*time.Millisecond || d > 15*time.Millisecond {
+		t.Fatalf("frame after the pause stamped %v off real time", d)
+	}
+	if frames[4].FirstSample != 4*160 {
+		t.Fatalf("frames before the pause renumbered: %d", frames[4].FirstSample)
+	}
+}
