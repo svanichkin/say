@@ -18,8 +18,9 @@ import (
 //	1  v1.0.0: no version in the handshake (a peer without one is taken as 1)
 //	2  the handshake carries versions and the codec each side sends
 //	3  video change frames may replace palette entries (codec frame type 3)
+//	4  video frames may be range coded instead of zstd (codec frame types 4-7)
 const (
-	ProtocolVersion    = 3
+	ProtocolVersion    = 4
 	MinProtocolVersion = 1
 )
 

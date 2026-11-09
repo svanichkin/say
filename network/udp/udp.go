@@ -461,7 +461,11 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 	}
 
 	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut,
-		videoPeer{palettePatches: peerProto >= videoPalettePatchProtocol, mono: peerMono})
+		videoPeer{
+			palettePatches: peerProto >= videoPalettePatchProtocol,
+			rangeCoding:    peerProto >= videoRangeCodingProtocol,
+			mono:           peerMono,
+		})
 
 	// ======== Video screen layer: queues → local/remote slots ========
 	if useVideo && (videoSelfScreenOut != nil || videoPeerScreenOut != nil) {

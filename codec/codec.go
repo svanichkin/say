@@ -549,6 +549,15 @@ type Encoder struct {
 	paletteMissed    []int32
 	palettePatch     []byte
 
+	// Range-coded change frames (SetRangeCoding).
+	rangeCoding bool
+	rc          rcModel
+	rcEnc       rcEncoder
+	rcChanged   []bool
+	rcPrevFg    []byte // the colours sent before this frame (contexts)
+	rcPrevBg    []byte
+	rcFull      rcSpatial
+
 	// Cell hold (see holdShapes): holdBits is the per-pixel threshold.
 	holdBits   int
 	holdDebug  bool // tint held cells lilac (-video-hold-debug)
@@ -609,6 +618,12 @@ type Decoder struct {
 	baseGlyphs []byte
 	baseFg     []byte
 	baseBg     []byte
+
+	// Range-coded change frames: the models follow the encoder's.
+	rc        rcModel
+	rcDec     rcDecoder
+	rcChanged []bool
+	rcFull    rcSpatial
 }
 
 // Frame types (the byte after the magic).
@@ -620,19 +635,52 @@ const (
 	// entries (index, colour code). Sent only to peers that announced
 	// support (SetPalettePatches).
 	frameTypeDeltaPatch byte = 3
-	deltaMaxChangedNum       = 6 // a change frame is sent while at most 6/10…
-	deltaMaxChangedDen       = 10
+	// frameTypeDeltaRC and frameTypeDeltaPatchRC are change frames whose
+	// cells are range coded (rangecoder.go) instead of zstd: the payload is
+	// not wrapped in zstd. Sent only to peers that announced support
+	// (SetRangeCoding).
+	frameTypeDeltaRC      byte = 4
+	frameTypeDeltaPatchRC byte = 5
+	// frameTypeFullRC and frameTypeKeyRC are frameTypeFull and frameTypeKey
+	// with range-coded cells (rcSpatial), not wrapped in zstd.
+	frameTypeFullRC    byte = 6
+	frameTypeKeyRC     byte = 7
+	deltaMaxChangedNum      = 6 // a change frame is sent while at most 6/10…
+	deltaMaxChangedDen      = 10
 )
 
 // ErrNoBase reports a change-only frame whose previous frame is missing
 // (lost or not yet received); frames are shown again from the next keyframe.
 var ErrNoBase = errors.New("change frame without its previous frame")
 
+// applyPatchLocked applies a palette patch (index, colour code lo, hi) in
+// order, on the palette of the frame before: a frame lost before this one
+// invalidated the base. It reports false for an index past the palette.
+func (d *Decoder) applyPatchLocked(patch []byte) bool {
+	for k := 0; k+3 <= len(patch); k += 3 {
+		slot := int(patch[k])
+		v := uint16(patch[k+1]) | uint16(patch[k+2])<<8
+		c := paletteColor{byte((v >> 10) & 0x3f), byte((v >> 5) & 0x1f), byte(v & 0x1f)}
+		e := expandPaletteEntry(c)
+		entry := paletteColor{byte(e[0]), byte(e[1]), byte(e[2])}
+		if slot > len(d.lastPalette) {
+			return false
+		}
+		if slot == len(d.lastPalette) {
+			d.lastPalette = append(d.lastPalette, entry)
+		} else {
+			d.lastPalette[slot] = entry
+		}
+	}
+	return true
+}
+
 // ResetBase forgets the previous frame, e.g. after a lost packet, so change
 // frames are refused until the next full frame instead of drawing garbage.
 func (d *Decoder) ResetBase() {
 	d.mu.Lock()
 	d.baseValid = false
+	d.rc.valid = false
 	d.mu.Unlock()
 }
 
@@ -931,6 +979,10 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	if keyframe == 1 {
 		e.patchedSinceKey = false
 	}
+	if e.rangeCoding {
+		e.rcPrevFg = append(e.rcPrevFg[:0], e.sentFg...)
+		e.rcPrevBg = append(e.rcPrevBg[:0], e.sentBg...)
+	}
 	e.sentGlyphs = append(e.sentGlyphs[:0], glyphs...)
 	e.sentFg = append(e.sentFg[:0], finalFgIdx...)
 	e.sentBg = append(e.sentBg[:0], finalBgIdx...)
@@ -944,6 +996,46 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	var size [4]byte
 	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(cols)))
 	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(rows)))
+
+	if (frameType == frameTypeDelta || frameType == frameTypeDeltaPatch) && e.rangeCoding {
+		frameType = frameTypeDeltaRC
+		if len(patch) > 0 {
+			frameType = frameTypeDeltaPatchRC
+			if err := writeField(payload, patch); err != nil {
+				return nil, fmt.Errorf("write palette patch: %w", err)
+			}
+		}
+		payload.Bytes()[len(PayloadMagic)] = frameType
+		if !e.rc.valid {
+			e.rc.restart(totalCells)
+		}
+		if cap(e.rcChanged) < totalCells {
+			e.rcChanged = make([]bool, totalCells)
+		}
+		e.rcEnc.reset(e.rcEnc.out)
+		e.rc.encode(&e.rcEnc, glyphs, finalFgIdx, finalBgIdx, e.rcPrevFg, e.rcPrevBg, changeMask, cols, e.rcChanged[:totalCells])
+		payload.Write(e.rcEnc.finish())
+		e.updateKeyframeCounter(keyframe)
+		return bytes.Clone(payload.Bytes()), nil // range coded: no zstd
+	}
+	e.rc.valid = false // a full frame restarts the range coder's models
+
+	if e.rangeCoding {
+		frameType = frameTypeFullRC
+		if keyframe == 1 {
+			frameType = frameTypeKeyRC
+			if err := writeField(payload, palBytes); err != nil {
+				return nil, fmt.Errorf("write palette: %w", err)
+			}
+		}
+		payload.Bytes()[len(PayloadMagic)] = frameType
+		e.rcFull.restart()
+		e.rcEnc.reset(e.rcEnc.out)
+		e.rcFull.encode(&e.rcEnc, glyphs, finalFgIdx, finalBgIdx, cols)
+		payload.Write(e.rcEnc.finish())
+		e.updateKeyframeCounter(keyframe)
+		return bytes.Clone(payload.Bytes()), nil // range coded: no zstd
+	}
 
 	if frameType == frameTypeDelta || frameType == frameTypeDeltaPatch {
 		if frameType == frameTypeDeltaPatch {
@@ -1134,6 +1226,9 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty payload")
 	}
+	if bytes.HasPrefix(data, []byte(PayloadMagic)) {
+		return d.DecodePlain(data) // range-coded frames are not wrapped in zstd
+	}
 	payload, err := decompressZstd(data)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decode: %w", err)
@@ -1186,7 +1281,7 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 	var paletteBytes []byte
 
 	var patch []byte
-	if keyframe == frameTypeDeltaPatch {
+	if keyframe == frameTypeDeltaPatch || keyframe == frameTypeDeltaPatchRC {
 		var err error
 		if patch, err = readField("palette patch"); err != nil {
 			return nil, err
@@ -1195,7 +1290,35 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 			return nil, fmt.Errorf("palette patch length %d is not a multiple of 3", len(patch))
 		}
 	}
-	if keyframe == frameTypeDelta || keyframe == frameTypeDeltaPatch {
+	if keyframe == frameTypeDeltaRC || keyframe == frameTypeDeltaPatchRC {
+		d.mu.Lock()
+		valid := d.baseValid && d.baseCols == int(cols) && d.baseRows == int(rows)
+		if valid {
+			glyphs = append([]byte(nil), d.baseGlyphs...)
+			fgIdx = append([]byte(nil), d.baseFg...)
+			bgIdx = append([]byte(nil), d.baseBg...)
+			valid = d.applyPatchLocked(patch)
+		}
+		if valid {
+			if !d.rc.valid {
+				d.rc.restart(totalCells)
+			}
+			if cap(d.rcChanged) < totalCells {
+				d.rcChanged = make([]bool, totalCells)
+			}
+			d.rcDec.reset(payload[offset:])
+			d.rc.decode(&d.rcDec, glyphs, fgIdx, bgIdx, int(cols), d.rcChanged[:totalCells])
+		}
+		d.mu.Unlock()
+		if !valid {
+			return nil, ErrNoBase
+		}
+		for _, g := range glyphs {
+			if int(g) >= len(glyphPatterns) {
+				return nil, fmt.Errorf("glyph index %d out of range", g)
+			}
+		}
+	} else if keyframe == frameTypeDelta || keyframe == frameTypeDeltaPatch {
 		mask, err := readField("mask")
 		if err != nil {
 			return nil, err
@@ -1232,24 +1355,7 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 			glyphs = append([]byte(nil), d.baseGlyphs...)
 			fgIdx = append([]byte(nil), d.baseFg...)
 			bgIdx = append([]byte(nil), d.baseBg...)
-			// Patches apply in order, on the palette of the frame before:
-			// a frame lost before this one invalidated the base.
-			for k := 0; k+3 <= len(patch); k += 3 {
-				slot := int(patch[k])
-				v := uint16(patch[k+1]) | uint16(patch[k+2])<<8
-				c := paletteColor{byte((v >> 10) & 0x3f), byte((v >> 5) & 0x1f), byte(v & 0x1f)}
-				e := expandPaletteEntry(c)
-				entry := paletteColor{byte(e[0]), byte(e[1]), byte(e[2])}
-				if slot > len(d.lastPalette) {
-					valid = false
-					break
-				}
-				if slot == len(d.lastPalette) {
-					d.lastPalette = append(d.lastPalette, entry)
-				} else {
-					d.lastPalette[slot] = entry
-				}
-			}
+			valid = d.applyPatchLocked(patch)
 		}
 		d.mu.Unlock()
 		if !valid {
@@ -1260,6 +1366,23 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 			if mask[i/8]&(1<<(i%8)) != 0 {
 				glyphs[i], fgIdx[i], bgIdx[i] = changedGlyphs[k], changedFg[k], changedBg[k]
 				k++
+			}
+		}
+	} else if keyframe == frameTypeFullRC || keyframe == frameTypeKeyRC {
+		if keyframe == frameTypeKeyRC {
+			var err error
+			if paletteBytes, err = readField("palette"); err != nil {
+				return nil, err
+			}
+		}
+		glyphs = make([]byte, totalCells*3)
+		glyphs, fgIdx, bgIdx = glyphs[:totalCells:totalCells], glyphs[totalCells:2*totalCells:2*totalCells], glyphs[2*totalCells:]
+		d.rcDec.reset(payload[offset:])
+		d.rcFull.restart()
+		d.rcFull.decode(&d.rcDec, glyphs, fgIdx, bgIdx, int(cols))
+		for _, g := range glyphs {
+			if int(g) >= len(glyphPatterns) {
+				return nil, fmt.Errorf("glyph index %d out of range", g)
 			}
 		}
 	} else {
@@ -1294,7 +1417,7 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 		}
 	}
 	var palette []paletteColor
-	if keyframe == frameTypeKey {
+	if keyframe == frameTypeKey || keyframe == frameTypeKeyRC {
 		parsedPalette, err := decodePalettePayload(paletteBytes)
 		if err != nil {
 			return nil, err
@@ -1337,6 +1460,9 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 
 	// This frame is the base for the next change-only frame.
 	d.mu.Lock()
+	if keyframe == frameTypeFull || keyframe == frameTypeKey || keyframe == frameTypeFullRC || keyframe == frameTypeKeyRC {
+		d.rc.valid = false // the encoder restarts its models here too
+	}
 	d.baseGlyphs = append(d.baseGlyphs[:0], glyphs...)
 	d.baseFg = append(d.baseFg[:0], fgIdx...)
 	d.baseBg = append(d.baseBg[:0], bgIdx...)
@@ -2048,6 +2174,13 @@ func (e *Encoder) SetBW(on bool) {
 	e.lastPalette = e.lastPalette[:0]
 	e.lastPaletteExpanded = e.lastPaletteExpanded[:0]
 	e.prevCells = 0
+}
+
+// SetRangeCoding sends change frames range coded (frameTypeDeltaRC) instead
+// of zstd. Only for a peer whose decoder knows those frame types.
+func (e *Encoder) SetRangeCoding(on bool) {
+	e.rangeCoding = on
+	e.rc.valid = false
 }
 
 // SetPalettePatches lets change frames replace palette entries
