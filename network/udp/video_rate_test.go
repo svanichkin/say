@@ -1,9 +1,11 @@
 package udp
 
 import (
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/ui"
 )
 
@@ -172,5 +174,102 @@ func TestVideoAdaptDropsColourFirstAndRestoresItLast(t *testing.T) {
 	}
 	if a.noColour {
 		t.Fatal("colour not restored on a clean path")
+	}
+}
+
+// Frames that arrive after their sound has played are never shown; the
+// loss report must count them, or the sender never adapts to a path that
+// delivers video late.
+func TestVideoReceiverReportsLateFramesAsLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		lagTicks int32 // how far behind the playback clock frames arrive
+		minLoss  float64
+		maxLoss  float64
+	}{
+		{"on time", -20, 0, 0.01},
+		{"two seconds late", 500, 0.9, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			clock := func() (uint16, bool) {
+				return uint16(time.Since(start)/mediaTickDuration+1000) & mediaIndexMask, true
+			}
+			var wg sync.WaitGroup
+			stop := make(chan struct{})
+			in := make(chan []byte, 8)
+			out := make(chan *codec.TextFrame, 64)
+			go func() {
+				for range out {
+				}
+			}()
+			ui.UpdateRxVideoLoss(0)
+			startVideoReceiver(&wg, stop, in, out, clock)
+			enc := codec.NewEncoder(false, 10, 0, false)
+			img := make([]byte, 64*64*3)
+			for i := range img {
+				img[i] = byte(i)
+			}
+			deadline := time.Now().Add(1300 * time.Millisecond)
+			for seq := 0; time.Now().Before(deadline); seq++ {
+				payload, err := enc.Encode(codec.Frame{Data: img, Width: 64, Height: 64}, 16, 8)
+				if err != nil {
+					t.Fatal(err)
+				}
+				now, _ := clock()
+				index := advanceMediaIndex(now, -tc.lagTicks)
+				pkt := append([]byte{byte(index >> 8), byte(index), byte(seq)}, payload...)
+				in <- pkt
+				time.Sleep(33 * time.Millisecond)
+			}
+			close(stop)
+			wg.Wait()
+			close(out)
+			loss, at := ui.RxVideoLossSnapshot()
+			if at.Before(start) || loss < tc.minLoss || loss > tc.maxLoss {
+				t.Fatalf("reported loss %.2f (at %v), want %.2f..%.2f", loss, at, tc.minLoss, tc.maxLoss)
+			}
+		})
+	}
+}
+
+// Without an audio clock (the peer's microphone is off) frames that arrive
+// in a burst are skipped for the newest one. The path delivers unevenly;
+// that is not loss, and a smaller stream would not change it.
+func TestVideoReceiverBurstsAreNotLoss(t *testing.T) {
+	start := time.Now()
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	in := make(chan []byte, 8)
+	out := make(chan *codec.TextFrame, 64)
+	go func() {
+		for range out {
+		}
+	}()
+	ui.UpdateRxVideoLoss(0)
+	startVideoReceiver(&wg, stop, in, out, func() (uint16, bool) { return 0, false })
+	enc := codec.NewEncoder(false, 10, 0, false)
+	img := make([]byte, 64*64*3)
+	for i := range img {
+		img[i] = byte(i * 7)
+	}
+	deadline := time.Now().Add(1300 * time.Millisecond)
+	for seq := 0; time.Now().Before(deadline); {
+		for k := 0; k < 3; k++ { // three frames at once, then a pause
+			payload, err := enc.Encode(codec.Frame{Data: img, Width: 64, Height: 64}, 16, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			index := uint16(time.Since(start)/mediaTickDuration) & mediaIndexMask
+			in <- append([]byte{byte(index >> 8), byte(index), byte(seq)}, payload...)
+			seq++
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+	close(out)
+	if loss, at := ui.RxVideoLossSnapshot(); at.Before(start) || loss > 0.01 {
+		t.Fatalf("bursts reported as %.2f loss (at %v), want 0", loss, at)
 	}
 }

@@ -1107,6 +1107,8 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			staleTicks := int32((staleLimit + mediaTickDuration - 1) / mediaTickDuration)
 			if mediaIndexDelta(current, candidate.index) <= staleTicks {
 				display(candidate.frame)
+			} else {
+				loss.late(1) // arrived after its sound had played
 			}
 		}
 
@@ -1167,6 +1169,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				// arrival by the jitter buffer plus device latency, so the queue
 				// must hold more than that span of frames.
 				if len(queue) > videoMaxQueuedFrames {
+					loss.late(len(queue) - videoMaxQueuedFrames)
 					queue = queue[len(queue)-videoMaxQueuedFrames:]
 					logs.LogV("[video/udp] drop stale queued frame")
 				}

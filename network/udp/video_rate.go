@@ -62,6 +62,16 @@ func (m *videoLossMeter) failed() {
 	m.lost++
 }
 
+// late counts received frames that were never shown because they arrived
+// after their sound had played. To the viewer they are as lost as frames the
+// network dropped, and the remedy is the same: a smaller stream queues less
+// on the way. Frames skipped because they arrived in a burst with newer ones
+// are not counted: the path delivers unevenly, and a smaller stream does not
+// change that.
+func (m *videoLossMeter) late(n int) {
+	m.lost += max(0, n)
+}
+
 // report publishes the loss of the last window (about a second) via ui.
 func (m *videoLossMeter) report(now time.Time) {
 	if m.since.IsZero() || now.Sub(m.since) < time.Second {
