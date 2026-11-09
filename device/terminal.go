@@ -60,6 +60,9 @@ func StartTerminal(frameIn <-chan *TerminalFrame, stopCh <-chan struct{}, onStop
 				BeginSyncOutput()
 				fmt.Print(frame.Data)
 				EndSyncOutput()
+				if q := terminalQueryAfterFrame(); q != "" {
+					fmt.Print(q)
+				}
 			}
 		}
 	}()

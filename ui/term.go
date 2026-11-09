@@ -925,10 +925,37 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 		// shows both panes' news instead of each pane triggering its own.
 		var lastRender time.Time
 		var deferred <-chan time.Time
+		// While the terminal has not processed the previous frame, rendering
+		// waits for its answer (see device.TerminalBusy) and then draws the
+		// latest state once, instead of queueing frames inside the terminal.
+		var waiting atomic.Bool
+		var renders, waits int
+		statsAt := time.Now()
+		device.SetTerminalAckHandler(func() {
+			if waiting.Swap(false) {
+				RequestRedraw()
+			}
+		})
+		defer device.SetTerminalAckHandler(nil)
 		render := func() {
 			deferred = nil
+			if device.TerminalBusy() {
+				waits++
+				waiting.Store(true)
+				// The answer may have arrived just before waiting was set.
+				if device.TerminalBusy() || !waiting.Swap(false) {
+					return
+				}
+			}
 			renderTermFrames()
 			lastRender = time.Now()
+			renders++
+			if now := lastRender; now.Sub(statsAt) >= time.Second {
+				acks, mean := device.TerminalAckStats()
+				logs.LogV("[term] %d frames/s to the terminal, %d answered, mean answer %v, waited %d times",
+					renders, acks, mean.Round(time.Millisecond), waits)
+				renders, waits, statsAt = 0, 0, now
+			}
 		}
 
 		// Initial draw so the UI is not blank until the first event arrives.

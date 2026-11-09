@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 	"golang.org/x/term"
@@ -99,6 +100,10 @@ func mouseEventLoop() {
 			return
 		}
 		switch kind {
+		case '0': // ESC[0n, the answer to the status query after a frame
+			if c, e := reader.ReadByte(); e == nil && c == 'n' {
+				device.TerminalAck()
+			}
 		case '<':
 			if evt, ok := parseSGRMouseTail(reader); ok {
 				handleMouseEvent(evt)
