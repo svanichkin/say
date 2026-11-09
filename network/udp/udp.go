@@ -595,7 +595,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			videoSeq       byte
 			// adapted to the peer's video loss: colour first, then hold, then fps
 			// (a peer behind a colour filter gets no colour from the start)
-			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono, keyInt: videoKeyframeInterval}
+			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono}
 		)
 		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
 		defer fpsLimiter.Stop()
@@ -638,12 +638,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					if cols, rows, ok := ui.PeerSlot(); ok {
 						cells = cols * rows
 					}
-					prevFPS, prevHold, prevKey := adapt.fps, adapt.hold, adapt.keyInt
+					prevFPS, prevHold := adapt.fps, adapt.hold
 					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
-					if adapt.keyInt != prevKey {
-						logs.LogV("[video/udp] peer video loss %.0f%%: keyframe every %d frames", loss*100, adapt.keyInt)
-						netEncoder.SetKeyframeInterval(adapt.keyInt)
-					}
 					if mono := peer.mono || adapt.noColour; mono != netMono {
 						if mono {
 							logs.LogV("[video/udp] peer video loss %.0f%%: sending without colour", loss*100)
@@ -1162,6 +1158,12 @@ func startVideoReceiver(wg *sync.WaitGroup,
 					queue = queue[:0]
 				}
 				now := time.Now()
+				if !lastFrameAt.IsZero() && now.Sub(lastFrameAt) >= videoSilenceGap {
+					// Frames may have been lost unnoticed (the counter wraps):
+					// start from the next full frame.
+					decoder.ResetBase()
+					haveSeq = false
+				}
 				lastFrameAt = now
 				seq := pkt[mediaIndexBytes]
 				loss.observe(seq, now)

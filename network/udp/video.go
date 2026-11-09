@@ -8,25 +8,19 @@ import (
 
 // initVideoCodec возвращает набор кодеков для локального предпросмотра и сетевой отправки.
 // Выделяем отдельную функцию, чтобы инициализация видеокодеков была симметрична audio.go.
-// videoKeyframeInterval forces a keyframe (with its palette) this often on
-// the network stream. Delta frames reference the last keyframe's palette, so
-// a lost keyframe otherwise left the peer's pane blank or garbled until the
-// picture changed enough to trigger one (the palette costs at most 512 bytes).
-const videoKeyframeInterval = 100
-
-// videoKeyframeFrames keeps full frames about every half second at any
-// frame rate while the peer loses frames (see videoAdapt.updateKeyframes):
-// after a lost packet, change-only frames resume from the next full frame,
-// so this bounds how long the peer's picture can freeze.
-func videoKeyframeFrames(fps int) int {
-	return max(2, min(videoKeyframeInterval, fps/2))
-}
+// No periodic keyframes: a receiver that misses a frame asks for one
+// (ui.RequestKeyframe), and the encoder sends one by itself when the palette
+// cannot be patched or the scene cuts. A keyframe is the whole picture, so
+// periodic ones made the stream jump every few seconds for nothing.
 
 // Keyframe requests (a frame was lost): the receiver repeats its request
-// while no keyframe arrives, the sender serves at most one per gap.
+// while no keyframe arrives, the sender serves at most one per gap. A frame
+// after videoSilenceGap without video counts as a lost frame too: the 8-bit
+// frame counter can wrap around during a long outage unnoticed.
 const (
 	videoKeyframeRetry      = 300 * time.Millisecond
 	videoKeyframeRequestGap = 250 * time.Millisecond
+	videoSilenceGap         = time.Second
 )
 
 // videoShapeHold is the mean per-pixel colour difference (sum of three
@@ -67,7 +61,7 @@ type videoPeer struct {
 // to such a peer is smaller.
 func initVideoCodec(peer videoPeer, selfMono bool) (previewEncoder, netEncoder *codec.Encoder) {
 	previewEncoder = codec.NewEncoder(selfMono, 0, maxVideoFPS, true)
-	netEncoder = codec.NewEncoder(peer.mono, videoKeyframeInterval, maxVideoFPS, false)
+	netEncoder = codec.NewEncoder(peer.mono, 0, maxVideoFPS, false)
 	previewEncoder.SetShapeHold(videoShapeHold)
 	netEncoder.SetShapeHold(videoShapeHold)
 	previewEncoder.SetHoldDebug(videoHoldDebug)

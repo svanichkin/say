@@ -60,14 +60,6 @@ func TestNextVideoFPS(t *testing.T) {
 	}
 }
 
-func TestKeyframeIntervalStaysAboutHalfASecond(t *testing.T) {
-	for fps, want := range map[int]int{60: 30, 25: 12, 10: 5, 5: 2, 2: 2} {
-		if got := videoKeyframeFrames(fps); got != want {
-			t.Errorf("%d fps: keyframe every %d frames, want %d", fps, got, want)
-		}
-	}
-}
-
 func TestVideoHoldAdaptsToLossAndPictureSize(t *testing.T) {
 	if maxVideoHold(800) != 32 || maxVideoHold(12800) != 128 || maxVideoHold(3700) != 80 {
 		t.Fatalf("max hold: %d, %d, %d (want 32, 128, 80)", maxVideoHold(800), maxVideoHold(12800), maxVideoHold(3700))
@@ -274,32 +266,6 @@ func TestVideoReceiverBurstsAreNotLoss(t *testing.T) {
 	}
 }
 
-// The keyframe interval drops to half a second on loss and returns to the
-// maximum on a clean path (it used to stay at half a second for the rest of
-// the call after the first loss).
-func TestVideoAdaptKeyframeIntervalFollowsLoss(t *testing.T) {
-	const ceiling, base, maxHold = 30, 10, 80
-	a := videoAdapt{fps: ceiling, hold: base}
-	a.update(0, ceiling, ceiling, base, maxHold)
-	if a.keyInt != videoKeyframeInterval {
-		t.Fatalf("clean start: keyframe every %d, want %d", a.keyInt, videoKeyframeInterval)
-	}
-	a.update(0.05, ceiling, ceiling, base, maxHold)
-	if want := videoKeyframeFrames(ceiling); a.keyInt != want {
-		t.Fatalf("loss: keyframe every %d, want %d", a.keyInt, want)
-	}
-	a.update(0.02, ceiling, ceiling, base, maxHold) // neither clean nor lossy
-	if want := videoKeyframeFrames(ceiling); a.keyInt != want {
-		t.Fatalf("2%% loss: keyframe every %d, want %d kept", a.keyInt, want)
-	}
-	for i := 0; i < 10; i++ {
-		a.update(0, a.fps, ceiling, base, maxHold)
-	}
-	if a.keyInt != videoKeyframeInterval {
-		t.Fatalf("clean path: keyframe every %d, want back at %d", a.keyInt, videoKeyframeInterval)
-	}
-}
-
 // A gap in the frame counter asks the peer for a keyframe, and asks again
 // only after videoKeyframeRetry while frames keep failing.
 func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
@@ -358,6 +324,52 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 	if n := requests(); n != 1 {
 		t.Fatalf("%d requests after the retry time, want 1", n)
 	}
+	close(stop)
+	wg.Wait()
+	close(out)
+}
+
+// After a long silence frames may have been lost unnoticed (the 8-bit
+// counter wraps), so the next frame, even with the next counter, must not be
+// applied to the old base: the receiver asks for a keyframe.
+func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
+	for len(ui.KeyframeRequests()) > 0 {
+		<-ui.KeyframeRequests()
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	in := make(chan []byte, 8)
+	out := make(chan *codec.TextFrame, 8)
+	go func() {
+		for range out {
+		}
+	}()
+	startVideoReceiver(&wg, stop, in, out, nil)
+	enc := codec.NewEncoder(false, 0, 0, false)
+	enc.SetShapeHold(10)
+	img := make([]byte, 64*64*3)
+	for i := range img {
+		img[i] = byte(i * 3)
+	}
+	send := func(seq int) {
+		for i := 0; i < 8*64*3; i++ {
+			img[i] = byte(i*3 + seq*40)
+		}
+		payload, err := enc.Encode(codec.Frame{Data: img, Width: 64, Height: 64}, 16, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in <- append([]byte{0, byte(seq), byte(seq)}, payload...)
+	}
+	send(0)
+	send(1)
+	time.Sleep(videoSilenceGap + 100*time.Millisecond)
+	send(2) // the next counter, but after a silence
+	time.Sleep(50 * time.Millisecond)
+	if len(ui.KeyframeRequests()) != 1 {
+		t.Fatalf("no keyframe request after %v of silence", videoSilenceGap)
+	}
+	<-ui.KeyframeRequests()
 	close(stop)
 	wg.Wait()
 	close(out)

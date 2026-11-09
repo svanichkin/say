@@ -34,8 +34,8 @@ func TestHelloLegacyPeer(t *testing.T) {
 	if !got.Legacy || got.Proto != 1 || got.AudioCodec != "" || got.Name != "old-host" {
 		t.Fatalf("legacy peer parsed as %+v", got)
 	}
-	if !compatible(got) {
-		t.Fatal("protocol 1 peers are still supported")
+	if compatible(got) {
+		t.Fatal("protocol 1 peers are refused since protocol 4")
 	}
 	reply := helloLine("OK", "me")
 	if !strings.HasPrefix(reply, "OK me\t") {

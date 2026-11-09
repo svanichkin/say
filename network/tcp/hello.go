@@ -19,9 +19,12 @@ import (
 //	2  the handshake carries versions and the codec each side sends
 //	3  video change frames may replace palette entries (codec frame type 3)
 //	4  video frames may be range coded instead of zstd (codec frame types 4-7)
+//
+// Since protocol 4 older peers are refused: their video formats and loss
+// recovery (periodic keyframes) are gone.
 const (
 	ProtocolVersion    = 4
-	MinProtocolVersion = 1
+	MinProtocolVersion = 4
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

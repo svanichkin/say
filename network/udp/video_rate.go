@@ -155,31 +155,11 @@ type videoAdapt struct {
 	clean       int  // consecutive clean reports (see nextVideoFPS)
 	noColour    bool // sending brightness only
 	colourClean int  // consecutive clean reports while only colour is left to restore
-	// keyInt is the keyframe interval in frames: keyframes only let a
-	// receiver recover from a lost frame, so they come about every half
-	// second on a lossy path and back off to videoKeyframeInterval on a
-	// clean one (0: not set yet, videoKeyframeInterval).
-	keyInt int
-}
-
-// updateKeyframes sets the keyframe interval from a loss report: down to
-// half a second at once on loss, doubling back to the maximum per clean report.
-func (a *videoAdapt) updateKeyframes(loss float64) {
-	if a.keyInt <= 0 {
-		a.keyInt = videoKeyframeInterval
-	}
-	switch {
-	case loss >= videoLossLight:
-		a.keyInt = min(a.keyInt, videoKeyframeFrames(a.fps))
-	case loss < videoLossClean:
-		a.keyInt = min(videoKeyframeInterval, a.keyInt*2)
-	}
 }
 
 // update applies one loss report. sentFPS is the rate actually sent in the
 // last second (0 if unknown), maxHold the hold ceiling for the picture size.
 func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold int) {
-	a.updateKeyframes(loss)
 	maxHold = max(maxHold, baseHold)
 	switch {
 	case loss >= videoLossLight:
