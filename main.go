@@ -107,6 +107,10 @@ func run() (err error) {
 	termSync := &tcpsignal.TermSizeSync{
 		Local:   termUpdates,
 		Initial: initialTerm,
+		Current: func() (tcpsignal.TermSize, bool) {
+			vs, ok := ui.CurrentViewport()
+			return tcpsignal.TermSize{Cols: vs.Cols, Rows: vs.Rows}, ok
+		},
 		OnPeer: func(cols, rows int) {
 			ui.SetPeerTermSize(cols, rows)
 		},

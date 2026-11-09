@@ -110,7 +110,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 	defer stopKeepalive()
 
 	if termSync != nil && termSync.Local != nil {
-		stopTerm := startTermSizeSender(sessionCtx, conn, termSync.Local, termSync.Initial)
+		stopTerm := startTermSizeSender(sessionCtx, conn, termSync.Local, termSync.Initial, termSync.Current)
 		defer stopTerm()
 	}
 

@@ -18,9 +18,15 @@ type TermSize struct {
 // TermSizeSync wires terminal size exchange between the transport layer and
 // whichever component owns the UI. Local carries outbound sizes, Initial seeds
 // the first frame, and OnPeer receives sizes learned from the remote side.
+// Current, if set, reports the size as it is now: each connection starts with
+// it, and every Local update sends it instead of the queued value. Initial is
+// only the size at start-up, and a change made since then may already have
+// been taken from Local by an earlier connection, so the peer would encode
+// for the old size until the next resize.
 type TermSizeSync struct {
 	Local   <-chan TermSize
 	Initial *TermSize
+	Current func() (TermSize, bool)
 	OnPeer  func(cols, rows int)
 }
 
@@ -89,12 +95,23 @@ func startTermSizeSender(
 	conn net.Conn,
 	sizes <-chan TermSize,
 	initial *TermSize,
+	current func() (TermSize, bool),
 ) func() {
 	if conn == nil || sizes == nil {
 		return func() {}
 	}
 
+	var last TermSize
 	send := func(cols, rows int) {
+		if current != nil {
+			if ts, ok := current(); ok {
+				cols, rows = ts.Cols, ts.Rows
+			}
+		}
+		if (TermSize{Cols: cols, Rows: rows}) == last {
+			return
+		}
+		last = TermSize{Cols: cols, Rows: rows}
 		payload, ok := encodeTermSizeFrame(cols, rows)
 		if !ok {
 			return
@@ -109,6 +126,8 @@ func startTermSizeSender(
 	// optional initial size
 	if initial != nil {
 		send(initial.Cols, initial.Rows)
+	} else if current != nil {
+		send(0, 0)
 	}
 
 	go func() {

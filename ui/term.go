@@ -725,6 +725,18 @@ func subscribeViewportSize() (int, chan ViewportSize, ViewportSize, bool) {
 	return id, ch, initial, hasInitial
 }
 
+// CurrentViewport is the peer pane size for the terminal as it is now.
+func CurrentViewport() (ViewportSize, bool) {
+	if cols, rows, err := device.GetTermSize(); err == nil && cols > 0 && rows > 0 {
+		if slots, ok := calcViewportSlots(cols, rows); ok {
+			return ViewportSize{Cols: slots.peerSlot.cols, Rows: slots.peerSlot.rows}, true
+		}
+	}
+	viewportMu.Lock()
+	defer viewportMu.Unlock()
+	return viewportLast, viewportLastSet
+}
+
 func unsubscribeViewportSize(id int) {
 	viewportMu.Lock()
 	delete(viewportSubs, id)
