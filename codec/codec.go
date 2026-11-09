@@ -534,6 +534,21 @@ type Encoder struct {
 	reuseFgIdx          []byte
 	reuseBgIdx          []byte
 
+	// Palette patches (frameTypeDeltaPatch): a colour the palette misses
+	// takes a free entry instead of rebuilding the palette, which made every
+	// third frame of a large picture a full keyframe. patchedSinceKey: the
+	// palette differs from the one the last keyframe carried, so a frame
+	// without a palette must not be sent (a receiver that lost a patch
+	// would draw it in the old colours). paletteMissRatio: the share of
+	// colours a freshly built palette missed (more colours than it holds).
+	palettePatches   bool
+	patchedSinceKey  bool
+	paletteMissRatio float64
+	paletteUsed      [maxPaletteColors]uint32 // frame number of each entry's last use
+	paletteFrame     uint32
+	paletteMissed    []int32
+	palettePatch     []byte
+
 	// Cell hold (see holdShapes): holdBits is the per-pixel threshold.
 	holdBits   int
 	holdDebug  bool // tint held cells lilac (-video-hold-debug)
@@ -598,11 +613,15 @@ type Decoder struct {
 
 // Frame types (the byte after the magic).
 const (
-	frameTypeFull      byte = 0 // all cells, palette of the last keyframe
-	frameTypeKey       byte = 1 // all cells and a palette
-	frameTypeDelta     byte = 2 // only the cells that changed since the previous frame
-	deltaMaxChangedNum      = 6 // a change frame is sent while at most 6/10…
-	deltaMaxChangedDen      = 10
+	frameTypeFull  byte = 0 // all cells, palette of the last keyframe
+	frameTypeKey   byte = 1 // all cells and a palette
+	frameTypeDelta byte = 2 // only the cells that changed since the previous frame
+	// frameTypeDeltaPatch is a change frame that first replaces palette
+	// entries (index, colour code). Sent only to peers that announced
+	// support (SetPalettePatches).
+	frameTypeDeltaPatch byte = 3
+	deltaMaxChangedNum       = 6 // a change frame is sent while at most 6/10…
+	deltaMaxChangedDen       = 10
 )
 
 // ErrNoBase reports a change-only frame whose previous frame is missing
@@ -826,21 +845,37 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		reuseFg := ensureByteSlice(&e.reuseFgIdx, totalCells)
 		reuseBg := ensureByteSlice(&e.reuseBgIdx, totalCells)
 		e.match.reserve(2 * totalCells)
-		mismatches := assignPaletteIndices(fgColors, e.lastPalette, &e.match, reuseFg, paletteReuseColorErrorTolerance)
-		mismatches += assignPaletteIndices(bgColors, e.lastPalette, &e.match, reuseBg, paletteReuseColorErrorTolerance)
+		var mismatches int
+		limit := paletteReuseMaxMismatchRatio
+		if e.palettePatches {
+			mismatches = e.patchPalette(fgColors, bgColors, reuseFg, reuseBg)
+			// What is still missed found no free entry: a fresh palette
+			// would miss as much, so rebuilding it only costs a keyframe.
+			limit = max(limit, e.paletteMissRatio)
+		} else {
+			mismatches = assignPaletteIndices(fgColors, e.lastPalette, &e.match, reuseFg, paletteReuseColorErrorTolerance)
+			mismatches += assignPaletteIndices(bgColors, e.lastPalette, &e.match, reuseBg, paletteReuseColorErrorTolerance)
+		}
 
 		totalSamples := totalCells * 2
 		if totalSamples > 0 {
 			mismatchRatio := float64(mismatches) / float64(totalSamples)
-			if mismatchRatio <= paletteReuseMaxMismatchRatio {
+			if mismatchRatio <= limit {
 				keyframe = 0
 				finalFgIdx = reuseFg
 				finalBgIdx = reuseBg
 			}
 		}
 	}
+	patch := e.palettePatch
+	if keyframe != 0 {
+		patch = nil // a keyframe carries the whole palette
+	}
+	if len(patch) > 0 {
+		e.patchedSinceKey = true
+	}
 
-	if keyframe == 0 && e.shouldForcePeriodicKeyframe() {
+	if keyframe == 0 && (e.shouldForcePeriodicKeyframe() || e.patchedSinceKey && !e.deltaFits(glyphs, finalFgIdx, finalBgIdx, totalCells)) {
 		// A periodic keyframe only lets a receiver that lost the last one
 		// recover. The current palette still fits, so resend it with the
 		// reused indices: rebuilding it from this frame's slightly noisy
@@ -856,8 +891,12 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		bgIdx := ensureByteSlice(&e.bgIdx, totalCells)
 
 		e.match.reserve(2 * totalCells)
-		assignPaletteIndices(fgColors, e.lastPalette, &e.match, fgIdx, -1)
-		assignPaletteIndices(bgColors, e.lastPalette, &e.match, bgIdx, -1)
+		misses := assignPaletteIndices(fgColors, e.lastPalette, &e.match, fgIdx, paletteReuseColorErrorTolerance)
+		misses += assignPaletteIndices(bgColors, e.lastPalette, &e.match, bgIdx, paletteReuseColorErrorTolerance)
+		e.paletteMissRatio = 0
+		if totalCells > 0 {
+			e.paletteMissRatio = float64(misses) / float64(2*totalCells)
+		}
 
 		finalFgIdx = fgIdx
 		finalBgIdx = bgIdx
@@ -884,7 +923,13 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		e.changedGlyphs, e.changedFg, e.changedBg = changedGlyphs, changedFg, changedBg
 		if len(changedGlyphs)*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum {
 			frameType = frameTypeDelta
+			if len(patch) > 0 {
+				frameType = frameTypeDeltaPatch
+			}
 		}
+	}
+	if keyframe == 1 {
+		e.patchedSinceKey = false
 	}
 	e.sentGlyphs = append(e.sentGlyphs[:0], glyphs...)
 	e.sentFg = append(e.sentFg[:0], finalFgIdx...)
@@ -900,7 +945,12 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(cols)))
 	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(rows)))
 
-	if frameType == frameTypeDelta {
+	if frameType == frameTypeDelta || frameType == frameTypeDeltaPatch {
+		if frameType == frameTypeDeltaPatch {
+			if err := writeField(payload, patch); err != nil {
+				return nil, fmt.Errorf("write palette patch: %w", err)
+			}
+		}
 		for _, field := range [][]byte{changeMask, packGlyphs6Into(&e.packedGlyphs, changedGlyphs), changedFg, changedBg} {
 			if err := writeField(payload, field); err != nil {
 				return nil, fmt.Errorf("write change frame: %w", err)
@@ -944,6 +994,112 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		return nil, fmt.Errorf("zstd encode: %w", err)
 	}
 	return compressed, nil
+}
+
+// patchPalette assigns palette indices to the frame's colours. A colour
+// farther than paletteReuseColorErrorTolerance from every entry gets one of
+// its own: an entry no cell of this frame uses (so no cell on the receiver's
+// screen does either), least recently used first, or a new one while the
+// palette has room. The entries changed are recorded in e.palettePatch as
+// (index, colour code lo, hi). It returns how many colours are still missed.
+func (e *Encoder) patchPalette(fgColors, bgColors []paletteColor, fgIdx, bgIdx []byte) int {
+	const tol = paletteReuseColorErrorTolerance
+	e.paletteFrame++
+	frame := e.paletteFrame
+	var used [maxPaletteColors]bool
+	missed := e.paletteMissed[:0]
+	n := len(fgColors)
+	assign := func(colors []paletteColor, dst []byte, base int) {
+		for i, c := range colors {
+			idx, d := e.match.index(c)
+			if d > tol {
+				idx, d = e.match.refresh(c) // the remembered entry may have changed
+			}
+			dst[i] = idx
+			if d > tol {
+				missed = append(missed, int32(base+i))
+				continue
+			}
+			used[idx] = true
+		}
+	}
+	assign(fgColors, fgIdx, 0)
+	assign(bgColors, bgIdx, n)
+	for i, u := range used[:len(e.lastPalette)] {
+		if u {
+			e.paletteUsed[i] = frame
+		}
+	}
+	e.paletteMissed = missed
+	e.palettePatch = e.palettePatch[:0]
+	misses := 0
+	for _, pos := range missed {
+		c, dst, i := fgColors, fgIdx, int(pos)
+		if i >= n {
+			c, dst, i = bgColors, bgIdx, i-n
+		}
+		// An entry added for an earlier miss of this frame may fit.
+		idx, d := e.match.refresh(c[i])
+		if d > tol {
+			slot, ok := e.freePaletteEntry(&used)
+			if !ok {
+				dst[i] = idx
+				used[idx] = true
+				misses++
+				continue
+			}
+			code := paletteColor{c[i][0] >> 2, quantChroma5(c[i][1]), quantChroma5(c[i][2])}
+			if int(slot) == len(e.lastPalette) {
+				e.lastPalette = append(e.lastPalette, code)
+				e.lastPaletteExpanded = append(e.lastPaletteExpanded, expandPaletteEntry(code))
+			} else {
+				e.lastPalette[slot] = code
+				e.lastPaletteExpanded[slot] = expandPaletteEntry(code)
+			}
+			e.match.set(e.lastPaletteExpanded, slot)
+			v := uint16(code[0])<<10 | uint16(code[1])<<5 | uint16(code[2])
+			e.palettePatch = append(e.palettePatch, slot, byte(v), byte(v>>8))
+			idx, _ = e.match.refresh(c[i])
+		}
+		dst[i] = idx
+		used[idx] = true
+		e.paletteUsed[idx] = frame
+	}
+	return misses
+}
+
+// freePaletteEntry picks an entry for a new colour: a new one while the
+// palette has room, else the least recently used one no colour of this
+// frame uses.
+func (e *Encoder) freePaletteEntry(used *[maxPaletteColors]bool) (byte, bool) {
+	if len(e.lastPalette) < maxPaletteColors {
+		return byte(len(e.lastPalette)), true
+	}
+	best, found := 0, false
+	for i := range e.lastPalette {
+		if used[i] {
+			continue
+		}
+		if !found || e.paletteUsed[i] < e.paletteUsed[best] {
+			best, found = i, true
+		}
+	}
+	return byte(best), found
+}
+
+// deltaFits reports whether the frame will go out as a change frame (see
+// encodeCells): only then may it follow palette patches without the palette.
+func (e *Encoder) deltaFits(glyphs, fg, bg []byte, totalCells int) bool {
+	if e.sentCells != totalCells {
+		return false
+	}
+	changed := 0
+	for i := 0; i < totalCells; i++ {
+		if glyphs[i] != e.sentGlyphs[i] || fg[i] != e.sentFg[i] || bg[i] != e.sentBg[i] {
+			changed++
+		}
+	}
+	return changed*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum
 }
 
 func (e *Encoder) storePalette(palette []paletteColor) {
@@ -1029,7 +1185,17 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 	var glyphs, fgIdx, bgIdx []byte
 	var paletteBytes []byte
 
-	if keyframe == frameTypeDelta {
+	var patch []byte
+	if keyframe == frameTypeDeltaPatch {
+		var err error
+		if patch, err = readField("palette patch"); err != nil {
+			return nil, err
+		}
+		if len(patch)%3 != 0 {
+			return nil, fmt.Errorf("palette patch length %d is not a multiple of 3", len(patch))
+		}
+	}
+	if keyframe == frameTypeDelta || keyframe == frameTypeDeltaPatch {
 		mask, err := readField("mask")
 		if err != nil {
 			return nil, err
@@ -1066,6 +1232,24 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 			glyphs = append([]byte(nil), d.baseGlyphs...)
 			fgIdx = append([]byte(nil), d.baseFg...)
 			bgIdx = append([]byte(nil), d.baseBg...)
+			// Patches apply in order, on the palette of the frame before:
+			// a frame lost before this one invalidated the base.
+			for k := 0; k+3 <= len(patch); k += 3 {
+				slot := int(patch[k])
+				v := uint16(patch[k+1]) | uint16(patch[k+2])<<8
+				c := paletteColor{byte((v >> 10) & 0x3f), byte((v >> 5) & 0x1f), byte(v & 0x1f)}
+				e := expandPaletteEntry(c)
+				entry := paletteColor{byte(e[0]), byte(e[1]), byte(e[2])}
+				if slot > len(d.lastPalette) {
+					valid = false
+					break
+				}
+				if slot == len(d.lastPalette) {
+					d.lastPalette = append(d.lastPalette, entry)
+				} else {
+					d.lastPalette[slot] = entry
+				}
+			}
 		}
 		d.mu.Unlock()
 		if !valid {
@@ -1504,7 +1688,10 @@ func assignPaletteIndices(colors []paletteColor, palette []paletteColor, m *pale
 // encoder's time, growing and rehashing.
 type paletteMatcher struct {
 	palette [][3]int // expanded entries
-	sortedY bool     // palette in ascending Y: the search can stop early
+	// order lists the entries in ascending Y (stable), so the search can
+	// stop early; palette patches change entries in place, which breaks
+	// the order of the palette itself.
+	order []byte
 
 	// keys hold gen<<24 | colour; an entry of another generation is empty,
 	// so the table is cleared by advancing gen.
@@ -1518,14 +1705,53 @@ type paletteMatcher struct {
 // reset makes m match against palette and forgets earlier answers.
 func (m *paletteMatcher) reset(palette [][3]int) {
 	m.palette = palette
-	m.sortedY = true
-	for i := 1; i < len(palette); i++ {
-		if palette[i][0] < palette[i-1][0] {
-			m.sortedY = false
-			break
-		}
+	m.order = m.order[:0]
+	for i := range palette {
+		m.order = append(m.order, byte(i))
 	}
+	sort.SliceStable(m.order, func(a, b int) bool {
+		return palette[m.order[a]][0] < palette[m.order[b]][0]
+	})
 	m.forget()
+}
+
+// set makes entry idx of palette (which may have grown by it) take its new
+// value, keeping the order and the remembered answers: an answer that now
+// points to a changed entry returns that entry's new, larger distance, and
+// refresh replaces it.
+func (m *paletteMatcher) set(palette [][3]int, idx byte) {
+	m.palette = palette
+	if i := bytes.IndexByte(m.order, idx); i >= 0 {
+		m.order = append(m.order[:i], m.order[i+1:]...)
+	}
+	y := palette[idx][0]
+	at := sort.Search(len(m.order), func(i int) bool {
+		o := m.order[i]
+		return palette[o][0] > y || palette[o][0] == y && o > idx
+	})
+	m.order = append(m.order, 0)
+	copy(m.order[at+1:], m.order[at:])
+	m.order[at] = idx
+}
+
+// refresh finds the nearest entry anew and remembers it for c.
+func (m *paletteMatcher) refresh(c paletteColor) (byte, int) {
+	idx, dist := m.nearest(c)
+	color := uint32(c[0])<<16 | uint32(c[1])<<8 | uint32(c[2])
+	key := m.gen<<24 | color
+	mask := uint32(len(m.keys) - 1)
+	h := (color * 2654435761) >> m.shift
+	for {
+		k := m.keys[h]
+		if k == key || k>>24 != m.gen {
+			if k != key {
+				m.used++
+			}
+			m.keys[h], m.vals[h] = key, idx
+			return idx, dist
+		}
+		h = (h + 1) & mask
+	}
 }
 
 func (m *paletteMatcher) forget() {
@@ -1581,34 +1807,27 @@ func (m *paletteMatcher) index(c paletteColor) (byte, int) {
 // nearest searches the palette. Sorted by Y, it starts at c's Y and stops
 // on each side once the Y difference alone exceeds the best distance.
 func (m *paletteMatcher) nearest(c paletteColor) (byte, int) {
-	p := m.palette
+	p, o := m.palette, m.order
 	best, bestIdx := math.MaxInt, 0
-	if !m.sortedY {
-		for j := range p {
-			if d := colorDistance(p[j], c); d < best {
-				best, bestIdx = d, j
-			}
-		}
-		return byte(bestIdx), best
-	}
 	y := int(c[0])
-	lo, hi := 0, len(p) // first entry with Y >= y
+	lo, hi := 0, len(o) // first entry with Y >= y
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if p[mid][0] < y {
+		if p[o[mid]][0] < y {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
-	for j := lo; j < len(p) && p[j][0]-y <= best; j++ {
-		if d := colorDistance(p[j], c); d < best {
-			best, bestIdx = d, j
+	// The lowest index wins a tie.
+	for j := lo; j < len(o) && p[o[j]][0]-y <= best; j++ {
+		if d := colorDistance(p[o[j]], c); d < best || d == best && int(o[j]) < bestIdx {
+			best, bestIdx = d, int(o[j])
 		}
 	}
-	for j := lo - 1; j >= 0 && y-p[j][0] <= best; j-- {
-		if d := colorDistance(p[j], c); d <= best { // lower index wins a tie
-			best, bestIdx = d, j
+	for j := lo - 1; j >= 0 && y-p[o[j]][0] <= best; j-- {
+		if d := colorDistance(p[o[j]], c); d < best || d == best && int(o[j]) < bestIdx {
+			best, bestIdx = d, int(o[j])
 		}
 	}
 	return byte(bestIdx), best
@@ -1817,6 +2036,13 @@ func cellColorDistance(a, b paletteColor) int {
 }
 
 // SetKeyframeInterval sets how many frames may pass between full keyframes.
+// SetPalettePatches lets change frames replace palette entries
+// (frameTypeDeltaPatch) instead of sending a keyframe with a new palette.
+// Only for a peer whose decoder knows that frame type.
+func (e *Encoder) SetPalettePatches(on bool) {
+	e.palettePatches = on
+}
+
 func (e *Encoder) SetKeyframeInterval(frames int) {
 	e.keyframeInterval = max(0, frames)
 }
