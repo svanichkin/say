@@ -128,6 +128,7 @@ func run() (err error) {
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	network.SetLAN(!opts.NoLAN)
 	ui.SetColorFilter(opts.ColorFilter)
+	tcpsignal.SetLocalMonoView(ui.ColorFilterActive())
 	ui.SetColorMode(opts.Colors)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {
@@ -200,7 +201,7 @@ func run() (err error) {
 			}
 			// We decode the peer's voice with the codec it announced (an
 			// older peer announces none and expects ours).
-			return udptransport.StartSession(udpConn, remote, peer.AudioCodec)
+			return udptransport.StartSession(udpConn, remote, peer.AudioCodec, peer.Proto, peer.MonoView)
 		}
 	}
 

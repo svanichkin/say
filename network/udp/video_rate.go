@@ -20,6 +20,10 @@ const (
 	videoFPSStepDown  = 3
 	videoFPSStepUp    = 2
 	videoCleanReports = 3 // clean reports in a row before stepping up
+	// videoColourCleanReports: clean reports in a row, with the frame rate
+	// and the detail already restored, before colour comes back. Colour
+	// costs a third more traffic; a short wait keeps it from flapping.
+	videoColourCleanReports = 5
 )
 
 // videoLossMeter measures incoming video loss from the frame counters.
@@ -131,13 +135,16 @@ func nextVideoFPS(cur, maxFPS int, loss float64, clean *int) int {
 }
 
 // videoAdapt is the sender's reaction to the peer's video loss. On loss it
-// first coarsens the picture (cell hold up to its maximum) and lowers the
-// frame rate only once the hold is exhausted; on a clean path it restores the
-// frame rate first and then the detail.
+// first drops colour (the same picture in brightness only, a third less
+// traffic), then coarsens the picture (cell hold up to its maximum), and
+// lowers the frame rate only once the hold is exhausted; on a clean path it
+// restores the frame rate first, then the detail, and colour last.
 type videoAdapt struct {
-	fps, hold int
-	fpsTarget int // rate to restore before the hold may drop; 0: fps not lowered
-	clean     int // consecutive clean reports (see nextVideoFPS)
+	fps, hold   int
+	fpsTarget   int  // rate to restore before the hold may drop; 0: fps not lowered
+	clean       int  // consecutive clean reports (see nextVideoFPS)
+	noColour    bool // sending brightness only
+	colourClean int  // consecutive clean reports while only colour is left to restore
 }
 
 // update applies one loss report. sentFPS is the rate actually sent in the
@@ -146,6 +153,12 @@ func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold in
 	maxHold = max(maxHold, baseHold)
 	switch {
 	case loss >= videoLossLight:
+		a.colourClean = 0
+		if !a.noColour {
+			a.noColour = true
+			a.clean = 0
+			return
+		}
 		if a.hold < maxHold {
 			a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
 			a.clean = 0
@@ -171,8 +184,17 @@ func (a *videoAdapt) update(loss float64, sentFPS, ceiling, baseHold, maxHold in
 			}
 			a.fps, a.fpsTarget = ceiling, 0 // restored: lift the limiter again
 		}
-		a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
+		if a.hold > baseHold {
+			a.hold = nextVideoHold(a.hold, baseHold, maxHold, loss)
+			return
+		}
+		if a.noColour {
+			if a.colourClean++; a.colourClean >= videoColourCleanReports {
+				a.noColour, a.colourClean = false, 0
+			}
+		}
 	default:
 		a.clean = 0
+		a.colourClean = 0
 	}
 }

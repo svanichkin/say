@@ -17,8 +17,9 @@ import (
 //
 //	1  v1.0.0: no version in the handshake (a peer without one is taken as 1)
 //	2  the handshake carries versions and the codec each side sends
+//	3  video change frames may replace palette entries (codec frame type 3)
 const (
-	ProtocolVersion    = 2
+	ProtocolVersion    = 3
 	MinProtocolVersion = 1
 )
 
@@ -37,11 +38,23 @@ type PeerInfo struct {
 	AudioCodec string
 	// Legacy is set for a peer that announced nothing (before protocol 2).
 	Legacy bool
+	// MonoView: the peer shows video through a colour filter, which keeps
+	// only brightness ("view=mono"; peers that do not know it ignore it).
+	MonoView bool
 }
 
 var localInfo struct {
 	sync.RWMutex
 	app, codec string
+	mono       bool
+}
+
+// SetLocalMonoView announces that this side shows video through a colour
+// filter, so the peer may send it without colour.
+func SetLocalMonoView(on bool) {
+	localInfo.Lock()
+	localInfo.mono = on
+	localInfo.Unlock()
 }
 
 // SetLocalInfo sets the Say version and the voice codec this side announces.
@@ -75,6 +88,9 @@ func helloFields() string {
 	if localInfo.codec != "" {
 		f += " codec=" + localInfo.codec
 	}
+	if localInfo.mono {
+		f += " view=mono"
+	}
 	return f
 }
 
@@ -107,6 +123,8 @@ func parseHello(rest string) PeerInfo {
 			info.App = v
 		case "codec":
 			info.AudioCodec = v
+		case "view":
+			info.MonoView = v == "mono"
 		}
 	}
 	return info

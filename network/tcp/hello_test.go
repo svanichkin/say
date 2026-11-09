@@ -111,3 +111,17 @@ func TestServerRejectsIncompatibleClient(t *testing.T) {
 		t.Fatal("server kept the incompatible connection")
 	}
 }
+
+// A side that shows video through a colour filter announces it; a peer of
+// protocol 2 sends no such field and gets colour, as before.
+func TestHelloMonoView(t *testing.T) {
+	SetLocalMonoView(true)
+	defer SetLocalMonoView(false)
+	rest, _ := strings.CutPrefix(helloLine("HELLO", "me"), "HELLO ")
+	if got := parseHello(rest); !got.MonoView {
+		t.Fatalf("view=mono not announced: %+v", got)
+	}
+	if got := parseHello("peer\tproto=2 min=1 app=v1.0.6 codec=amrnb\n"); got.MonoView || got.Proto != 2 {
+		t.Fatalf("protocol 2 peer parsed as %+v", got)
+	}
+}

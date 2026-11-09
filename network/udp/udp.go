@@ -266,8 +266,11 @@ func (vs *dataSession) Done() <-chan struct{} {
 // type byte.
 //
 // peerCodec is the codec the peer encodes its voice with, as announced in
-// the handshake; "" (an older peer) means it uses ours.
-func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string) (*dataSession, error) {
+// the handshake; "" (an older peer) means it uses ours. peerProto is the
+// peer's protocol version: it decides the video formats we may send.
+// peerMono: the peer shows only brightness (a colour filter), so its video
+// is sent without colour.
+func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peerProto int, peerMono bool) (*dataSession, error) {
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	stopCh := make(chan struct{})
 	pc = newMediaPacketConn(pc, stopCh)
@@ -457,7 +460,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string) (*da
 		return nil, fmt.Errorf("media stopped during startup: %w", err)
 	}
 
-	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
+	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut,
+		videoPeer{palettePatches: peerProto >= videoPalettePatchProtocol, mono: peerMono})
 
 	// ======== Video screen layer: queues → local/remote slots ========
 	if useVideo && (videoSelfScreenOut != nil || videoPeerScreenOut != nil) {
@@ -532,12 +536,13 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
+	peer videoPeer,
 ) {
 	if useVoice {
 		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn)
 	}
 	if useVideo {
-		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut)
+		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut, peer)
 	}
 }
 
@@ -546,6 +551,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr,
 	mediaEpoch time.Time, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
+	peer videoPeer,
 ) {
 	_ = videoPeerScreenOut
 
@@ -554,7 +560,14 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 
 	// ======== Video sender: camera → textFrame → UDP ========
-	previewEncoder, netEncoder := initVideoCodec()
+	selfMono := ui.ColorFilterActive()
+	previewEncoder, netEncoder := initVideoCodec(peer, selfMono)
+	if peer.mono {
+		log.Printf("[video] the peer shows brightness only: sending without colour")
+	}
+	// Cells are shared by both panes only when both want the same: colour
+	// or brightness only.
+	netMono := peer.mono
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -575,8 +588,9 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			ceiling        = videoFPSCeiling()
 			lastLossReport time.Time
 			videoSeq       byte
-			// adapted to the peer's video loss: hold first, then fps
-			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold}
+			// adapted to the peer's video loss: colour first, then hold, then fps
+			// (a peer behind a colour filter gets no colour from the start)
+			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono}
 		)
 		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
 		defer fpsLimiter.Stop()
@@ -621,6 +635,15 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					}
 					prevFPS, prevHold := adapt.fps, adapt.hold
 					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
+					if mono := peer.mono || adapt.noColour; mono != netMono {
+						if mono {
+							logs.LogV("[video/udp] peer video loss %.0f%%: sending without colour", loss*100)
+						} else {
+							logs.LogV("[video/udp] peer video clean: colour back")
+						}
+						netMono = mono
+						netEncoder.SetBW(mono)
+					}
 					if adapt.hold != prevHold {
 						logs.LogV("[video/udp] peer video loss %.0f%%: cell hold %d -> %d", loss*100, prevHold, adapt.hold)
 						netEncoder.SetShapeHold(adapt.hold)
@@ -670,7 +693,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				var dataNet []byte
 				var selfView *codec.TextFrame
 				var errLocal, errNet error
-				if selfOK && sendNet && selfCols == peerCols && selfRows == peerRows {
+				if netMono == selfMono && selfOK && sendNet && selfCols == peerCols && selfRows == peerRows {
 					// Both panes have one size: the cells are built once and
 					// the self view mirrors them.
 					start := time.Now()

@@ -2036,6 +2036,20 @@ func cellColorDistance(a, b paletteColor) int {
 }
 
 // SetKeyframeInterval sets how many frames may pass between full keyframes.
+// SetBW switches the encoder to brightness only (neutral colour) or back.
+// The next frame starts afresh: a keyframe with a new palette (greys would
+// otherwise match the old palette's tinted entries within the tolerance) and
+// no held cells (they would keep their old colours).
+func (e *Encoder) SetBW(on bool) {
+	if on == e.forceBW {
+		return
+	}
+	e.forceBW = on
+	e.lastPalette = e.lastPalette[:0]
+	e.lastPaletteExpanded = e.lastPaletteExpanded[:0]
+	e.prevCells = 0
+}
+
 // SetPalettePatches lets change frames replace palette entries
 // (frameTypeDeltaPatch) instead of sending a keyframe with a new palette.
 // Only for a peer whose decoder knows that frame type.

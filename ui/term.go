@@ -469,6 +469,12 @@ func RequestRedraw() {
 	}
 }
 
+// ColorFilterActive reports whether frames are drawn through a colour filter,
+// which keeps only their brightness.
+func ColorFilterActive() bool {
+	return activeColorFilter.Load() != nil
+}
+
 // SetColorFilter applies a named tint to subsequent frame renders. Empty key clears the filter.
 func SetColorFilter(key string) {
 	normalized := strings.ToLower(strings.TrimSpace(key))

@@ -138,3 +138,39 @@ func TestVideoAdaptCleanReportNeverLowersFPS(t *testing.T) {
 		t.Fatalf("2%% loss with 7 frames sent: %d fps, want 60", a.fps)
 	}
 }
+
+func TestVideoAdaptDropsColourFirstAndRestoresItLast(t *testing.T) {
+	const ceiling, base, maxHold = 25, 10, 80
+	a := videoAdapt{fps: ceiling, hold: base}
+	a.update(0.05, ceiling, ceiling, base, maxHold)
+	if !a.noColour || a.hold != base || a.fps != ceiling {
+		t.Fatalf("first loss: colour off %v, hold %d, fps %d; want colour off only", a.noColour, a.hold, a.fps)
+	}
+	a.update(0.05, ceiling, ceiling, base, maxHold)
+	if a.hold == base || a.fps != ceiling {
+		t.Fatalf("second loss: hold %d, fps %d; want the hold raised", a.hold, a.fps)
+	}
+	// Clean: the hold comes back first, colour only after a longer clean spell.
+	for i := 0; a.hold > base; i++ {
+		if i > 40 {
+			t.Fatalf("hold stuck at %d", a.hold)
+		}
+		a.update(0, ceiling, ceiling, base, maxHold)
+		if !a.noColour {
+			t.Fatalf("colour back with hold %d above %d", a.hold, base)
+		}
+	}
+	for i := 1; i < videoColourCleanReports; i++ {
+		a.update(0, ceiling, ceiling, base, maxHold)
+		if !a.noColour {
+			t.Fatalf("colour back after %d clean reports, want %d", i, videoColourCleanReports)
+		}
+	}
+	a.update(0.02, ceiling, ceiling, base, maxHold) // not clean: the count starts over
+	for i := 0; i < videoColourCleanReports; i++ {
+		a.update(0, ceiling, ceiling, base, maxHold)
+	}
+	if a.noColour {
+		t.Fatal("colour not restored on a clean path")
+	}
+}

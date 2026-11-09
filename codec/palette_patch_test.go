@@ -132,3 +132,45 @@ func TestLostPalettePatchWaitsForThePalette(t *testing.T) {
 		t.Fatalf("lost %v, recovered %v", lost, recovered)
 	}
 }
+
+// Switching to brightness only starts afresh: no grey may be matched to an
+// old tinted palette entry, and no held cell may keep its colour.
+func TestSetBWLeavesNoColour(t *testing.T) {
+	enc := NewEncoder(false, 0, 0, false)
+	enc.SetPalettePatches(true)
+	enc.SetShapeHold(64)
+	dec := NewDecoder()
+	frames := driftingFrames(12)
+	for f, frame := range frames {
+		if f == 6 {
+			enc.SetBW(true)
+		}
+		out, err := enc.Encode(Frame{Data: frame, Width: 352, Height: 288}, 88, 36)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tf, err := dec.Decode(out)
+		if err != nil {
+			t.Fatalf("frame %d: %v", f, err)
+		}
+		if f == 6 && frameType(t, out) != frameTypeKey {
+			t.Fatalf("switch frame type %d, want a keyframe", frameType(t, out))
+		}
+		if f < 6 {
+			continue
+		}
+		for c, g := range tf.Glyphs {
+			p := glyphPatterns[g]
+			// Only colours that are drawn: a cell all background (or all
+			// foreground) leaves the other colour unused.
+			for _, pl := range [][]byte{tf.FgYCbCr, tf.BgYCbCr} {
+				if (p == 0 && &pl[0] == &tf.FgYCbCr[0]) || (p == 0xffffffff && &pl[0] == &tf.BgYCbCr[0]) {
+					continue
+				}
+				if pl[c*3+1] != 128 || pl[c*3+2] != 128 {
+					t.Fatalf("frame %d: cell %d (pattern %08x) has colour (Cb %d, Cr %d) after SetBW", f, c, p, pl[c*3+1], pl[c*3+2])
+				}
+			}
+		}
+	}
+}

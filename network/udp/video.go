@@ -35,12 +35,27 @@ func SetVideoShapeHold(threshold int) {
 	videoShapeHold = max(0, threshold)
 }
 
-func initVideoCodec() (previewEncoder, netEncoder *codec.Encoder) {
-	previewEncoder = codec.NewEncoder(false, 0, maxVideoFPS, true)
-	netEncoder = codec.NewEncoder(false, videoKeyframeInterval, maxVideoFPS, false)
+// videoPalettePatchProtocol is the protocol version (network/tcp
+// ProtocolVersion) from which a peer decodes palette patches.
+const videoPalettePatchProtocol = 3
+
+// videoPeer is what the peer's handshake tells about the video it wants.
+type videoPeer struct {
+	palettePatches bool // its decoder knows palette patches
+	mono           bool // it shows brightness only (a colour filter)
+}
+
+// initVideoCodec returns the self view and the network encoders. A pane
+// shown through a colour filter uses only brightness, so it is encoded
+// without colour: the glyphs then follow brightness edges, and the stream
+// to such a peer is smaller.
+func initVideoCodec(peer videoPeer, selfMono bool) (previewEncoder, netEncoder *codec.Encoder) {
+	previewEncoder = codec.NewEncoder(selfMono, 0, maxVideoFPS, true)
+	netEncoder = codec.NewEncoder(peer.mono, videoKeyframeInterval, maxVideoFPS, false)
 	previewEncoder.SetShapeHold(videoShapeHold)
 	netEncoder.SetShapeHold(videoShapeHold)
 	previewEncoder.SetHoldDebug(videoHoldDebug)
 	netEncoder.SetHoldDebug(videoHoldDebug)
+	netEncoder.SetPalettePatches(peer.palettePatches)
 	return
 }
