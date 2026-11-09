@@ -26,6 +26,10 @@ type yggTransport struct {
 // lanEnabled turns on Yggdrasil LAN discovery (multicast); see SetLAN.
 var lanEnabled = true
 
+// lanPassword is the LAN discovery password of Say nodes: they peer over the
+// local network only with each other.
+const lanPassword = "say-lan-v1"
+
 // SetLAN enables or disables LAN discovery for transports set up afterwards.
 func SetLAN(enabled bool) {
 	lanEnabled = enabled
@@ -39,11 +43,18 @@ func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 
 	log.Printf("[net] loading")
 	ygg.SetVerbose(verbose)
-	ygg.SetMaxPeers(100)
+	// One peer, the fastest: a node with a single link is a leaf of the
+	// Yggdrasil network, so no one else's traffic is routed through it (with
+	// dozens of fast peers it was a good transit router). The library keeps
+	// the ranked backups and switches to one within seconds if the peer is
+	// lost.
+	ygg.SetMaxPeers(1)
 	// LAN discovery: peers in the same local network (or on the same machine)
 	// find each other by multicast and connect directly instead of through
-	// public peers on the internet, which cuts latency and jitter.
-	ygg.SetLAN(lanEnabled, "")
+	// public peers on the internet, which cuts latency and jitter. The
+	// password limits it to Say nodes: another Yggdrasil node nearby (the
+	// system's own, say) would otherwise peer too and route through us.
+	ygg.SetLAN(lanEnabled, lanPassword)
 	ygg.SetConnectivityHandler(func(connected bool) {
 		if connected {
 			t.readyOnce.Do(func() {
