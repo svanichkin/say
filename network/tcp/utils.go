@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ const (
 	frameFileEnd    byte = 0x09
 	frameFileResult byte = 0x0a // receiver → sender: file saved or failed
 	frameBye        byte = 0x0b // the peer is hanging up: end the call now
+	frameKeyframe   byte = 0x0c // receiver → sender: a video frame was lost, send a keyframe
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -137,6 +139,8 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			return
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
 			handleChatFrame(s.conn, t, payload, s.incoming)
+		case frameKeyframe:
+			ui.NotePeerKeyframeRequest()
 		case frameTermSize:
 			if cols, rows, ok := decodeTermSizeFrame(payload); ok && s.termSync != nil {
 				s.termSync.notifyPeer(cols, rows)
@@ -183,4 +187,26 @@ func hangup(conn net.Conn) error {
 		time.Sleep(hangupFlush)
 	}
 	return err
+}
+
+// startKeyframeRequester forwards the video receiver's keyframe requests
+// (ui.RequestKeyframe) to the peer. A peer that does not know the frame
+// ignores it, as every unknown control frame.
+func startKeyframeRequester(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ui.KeyframeRequests():
+				if err := writeFrameSafe(conn, frameKeyframe, nil); err != nil {
+					log.Printf("[p2p] keyframe request failed: %v", err)
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }

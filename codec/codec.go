@@ -582,6 +582,7 @@ type Encoder struct {
 
 	framesSinceLastKey int
 	keyframeInterval   int
+	forceKey           bool // ForceKeyframe: the next frame is a keyframe
 	forceBW            bool
 	maxFPS             int
 	mirror             bool
@@ -590,14 +591,32 @@ type Encoder struct {
 var defaultEncoder = NewEncoder(false, defaultKeyframeInterval, 0, false)
 
 func (e *Encoder) shouldForcePeriodicKeyframe() bool {
-	if e == nil || e.keyframeInterval <= 0 {
+	if e == nil {
+		return false
+	}
+	if e.forceKey {
+		return true
+	}
+	if e.keyframeInterval <= 0 {
 		return false
 	}
 	return e.framesSinceLastKey >= e.keyframeInterval
 }
 
+// ForceKeyframe makes the next frame a keyframe (the peer lost a frame and
+// asked for one).
+func (e *Encoder) ForceKeyframe() {
+	e.forceKey = true
+}
+
 func (e *Encoder) updateKeyframeCounter(keyframe byte) {
-	if e == nil || e.keyframeInterval <= 0 {
+	if e == nil {
+		return
+	}
+	if keyframe == 1 {
+		e.forceKey = false
+	}
+	if e.keyframeInterval <= 0 {
 		return
 	}
 	if keyframe == 1 {

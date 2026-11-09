@@ -591,10 +591,11 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		var (
 			ceiling        = videoFPSCeiling()
 			lastLossReport time.Time
+			lastForcedKey  time.Time
 			videoSeq       byte
 			// adapted to the peer's video loss: colour first, then hold, then fps
 			// (a peer behind a colour filter gets no colour from the start)
-			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono}
+			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono, keyInt: videoKeyframeInterval}
 		)
 		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
 		defer fpsLimiter.Stop()
@@ -637,8 +638,12 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					if cols, rows, ok := ui.PeerSlot(); ok {
 						cells = cols * rows
 					}
-					prevFPS, prevHold := adapt.fps, adapt.hold
+					prevFPS, prevHold, prevKey := adapt.fps, adapt.hold, adapt.keyInt
 					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
+					if adapt.keyInt != prevKey {
+						logs.LogV("[video/udp] peer video loss %.0f%%: keyframe every %d frames", loss*100, adapt.keyInt)
+						netEncoder.SetKeyframeInterval(adapt.keyInt)
+					}
 					if mono := peer.mono || adapt.noColour; mono != netMono {
 						if mono {
 							logs.LogV("[video/udp] peer video loss %.0f%%: sending without colour", loss*100)
@@ -655,7 +660,6 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					if adapt.fps != prevFPS {
 						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, prevFPS, adapt.fps)
 						fpsLimiter.Reset(time.Second / time.Duration(adapt.fps))
-						netEncoder.SetKeyframeInterval(videoKeyframeFrames(adapt.fps))
 					}
 				}
 
@@ -692,6 +696,15 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					addr = getPeer()
 				}
 				sendNet := addr != nil
+
+				// The peer lost a frame and asked for a keyframe. At most one
+				// per videoKeyframeRequestGap: a keyframe is large, and a lossy
+				// path must not get a burst of them (the peer asks again).
+				if ui.TakePeerKeyframeRequest() && time.Since(lastForcedKey) >= videoKeyframeRequestGap {
+					lastForcedKey = time.Now()
+					netEncoder.ForceKeyframe()
+					logs.LogV("[video/udp] the peer asked for a keyframe")
+				}
 
 				// ----- encode -----
 				var dataNet []byte
@@ -1053,6 +1066,15 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
+		// A lost frame stops the picture until the next full frame: ask the
+		// peer for one, again while none arrives (it travels over UDP too).
+		var lastKeyRequest time.Time
+		requestKeyframe := func(now time.Time) {
+			if now.Sub(lastKeyRequest) >= videoKeyframeRetry {
+				lastKeyRequest = now
+				ui.RequestKeyframe()
+			}
+		}
 		var syncLogAt time.Time
 		var newestIndex uint16
 		var haveNewest bool
@@ -1152,11 +1174,13 @@ func startVideoReceiver(wg *sync.WaitGroup,
 						// A frame is missing: change-only frames have no base
 						// until the next full frame.
 						decoder.ResetBase()
+						requestKeyframe(now)
 					}
 				}
 				haveSeq, lastSeq = true, seq
 				tv, err := decoder.Decode(pkt[mediaIndexBytes+videoSeqBytes:])
 				if err != nil {
+					requestKeyframe(now)
 					if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
 						loss.failed()
 						log.Printf("[video/udp] textFrame decode: %v", err)

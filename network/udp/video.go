@@ -1,6 +1,10 @@
 package udp
 
-import "github.com/svanichkin/say/codec"
+import (
+	"time"
+
+	"github.com/svanichkin/say/codec"
+)
 
 // initVideoCodec возвращает набор кодеков для локального предпросмотра и сетевой отправки.
 // Выделяем отдельную функцию, чтобы инициализация видеокодеков была симметрична audio.go.
@@ -11,11 +15,19 @@ import "github.com/svanichkin/say/codec"
 const videoKeyframeInterval = 100
 
 // videoKeyframeFrames keeps full frames about every half second at any
-// frame rate: after a lost packet, change-only frames resume from the next
-// full frame, so this bounds how long the peer's picture can freeze.
+// frame rate while the peer loses frames (see videoAdapt.updateKeyframes):
+// after a lost packet, change-only frames resume from the next full frame,
+// so this bounds how long the peer's picture can freeze.
 func videoKeyframeFrames(fps int) int {
 	return max(2, min(videoKeyframeInterval, fps/2))
 }
+
+// Keyframe requests (a frame was lost): the receiver repeats its request
+// while no keyframe arrives, the sender serves at most one per gap.
+const (
+	videoKeyframeRetry      = 300 * time.Millisecond
+	videoKeyframeRequestGap = 250 * time.Millisecond
+)
 
 // videoShapeHold is the mean per-pixel colour difference (sum of three
 // channels) below which a cell keeps its previous glyph and colours

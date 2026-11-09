@@ -282,3 +282,25 @@ func TestRangeCodedFullFrames(t *testing.T) {
 	}
 	t.Logf("frame types %v", types)
 }
+
+func TestForceKeyframe(t *testing.T) {
+	for _, rc := range []bool{false, true} {
+		enc := NewEncoder(false, 0, 0, false)
+		enc.SetShapeHold(10)
+		enc.SetRangeCoding(rc)
+		frames := noisyFrames(6, 4)
+		for f, frame := range frames {
+			if f == 3 {
+				enc.ForceKeyframe()
+			}
+			out, err := enc.Encode(Frame{Data: frame, Width: 352, Height: 288}, 88, 36)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := frameKind(t, out) == frameTypeKey || frameKind(t, out) == frameTypeKeyRC
+			if want := f == 0 || f == 3; key != want {
+				t.Fatalf("range coding %v, frame %d: keyframe %v, want %v", rc, f, key, want)
+			}
+		}
+	}
+}

@@ -273,3 +273,92 @@ func TestVideoReceiverBurstsAreNotLoss(t *testing.T) {
 		t.Fatalf("bursts reported as %.2f loss (at %v), want 0", loss, at)
 	}
 }
+
+// The keyframe interval drops to half a second on loss and returns to the
+// maximum on a clean path (it used to stay at half a second for the rest of
+// the call after the first loss).
+func TestVideoAdaptKeyframeIntervalFollowsLoss(t *testing.T) {
+	const ceiling, base, maxHold = 30, 10, 80
+	a := videoAdapt{fps: ceiling, hold: base}
+	a.update(0, ceiling, ceiling, base, maxHold)
+	if a.keyInt != videoKeyframeInterval {
+		t.Fatalf("clean start: keyframe every %d, want %d", a.keyInt, videoKeyframeInterval)
+	}
+	a.update(0.05, ceiling, ceiling, base, maxHold)
+	if want := videoKeyframeFrames(ceiling); a.keyInt != want {
+		t.Fatalf("loss: keyframe every %d, want %d", a.keyInt, want)
+	}
+	a.update(0.02, ceiling, ceiling, base, maxHold) // neither clean nor lossy
+	if want := videoKeyframeFrames(ceiling); a.keyInt != want {
+		t.Fatalf("2%% loss: keyframe every %d, want %d kept", a.keyInt, want)
+	}
+	for i := 0; i < 10; i++ {
+		a.update(0, a.fps, ceiling, base, maxHold)
+	}
+	if a.keyInt != videoKeyframeInterval {
+		t.Fatalf("clean path: keyframe every %d, want back at %d", a.keyInt, videoKeyframeInterval)
+	}
+}
+
+// A gap in the frame counter asks the peer for a keyframe, and asks again
+// only after videoKeyframeRetry while frames keep failing.
+func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
+	for len(ui.KeyframeRequests()) > 0 {
+		<-ui.KeyframeRequests()
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	in := make(chan []byte, 64)
+	out := make(chan *codec.TextFrame, 64)
+	go func() {
+		for range out {
+		}
+	}()
+	startVideoReceiver(&wg, stop, in, out, nil)
+	enc := codec.NewEncoder(false, 0, 0, false)
+	enc.SetShapeHold(10)
+	img := make([]byte, 64*64*3)
+	for i := range img {
+		img[i] = byte(i * 3)
+	}
+	send := func(seq int) {
+		for i := 0; i < 8*64*3; i++ { // a small part changes: change frames
+			img[i] = byte(i*3 + seq*40)
+		}
+		payload, err := enc.Encode(codec.Frame{Data: img, Width: 64, Height: 64}, 16, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in <- append([]byte{0, byte(seq), byte(seq)}, payload...)
+	}
+	requests := func() int {
+		time.Sleep(50 * time.Millisecond)
+		n := 0
+		for len(ui.KeyframeRequests()) > 0 {
+			<-ui.KeyframeRequests()
+			n++
+		}
+		return n
+	}
+	send(0)
+	send(1)
+	if n := requests(); n != 0 {
+		t.Fatalf("%d keyframe requests without loss", n)
+	}
+	send(3) // frame 2 lost
+	if n := requests(); n != 1 {
+		t.Fatalf("%d keyframe requests after a loss, want 1", n)
+	}
+	send(4) // still no base: within the retry time, no new request
+	if n := requests(); n != 0 {
+		t.Fatalf("asked again %d times within %v", n, videoKeyframeRetry)
+	}
+	time.Sleep(videoKeyframeRetry)
+	send(5)
+	if n := requests(); n != 1 {
+		t.Fatalf("%d requests after the retry time, want 1", n)
+	}
+	close(stop)
+	wg.Wait()
+	close(out)
+}
