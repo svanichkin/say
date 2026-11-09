@@ -239,131 +239,59 @@ func glyphCandidates() ([]uint32, []int) {
 	return glyphCandPatterns, glyphCandCodes
 }
 
-// findCharDataBlock picks the glyph and colours that best represent a cell.
-// When two colours cover most of the cell they are used directly; otherwise
-// the cell is split along its widest channel and the halves are averaged.
+// findCharDataBlock picks the glyph and colours that best represent a cell:
+// the cell is split along its widest channel at the middle of its range, the
+// glyph closest to that split is chosen, and the pixels under its set and
+// clear bits are averaged into the colours.
 //
-// A camera cell has only a few distinct colours (2-4 in most cells), so the
-// work is done per colour: the channel ranges and each colour's side of the
-// split are computed once per colour, not once per pixel.
+// Everything is done per pixel in one pass. Finding the cell's distinct
+// colours first (a camera cell has 12-24) to catch the case of two colours
+// covering most of it, which held in about one cell in nine and was then drawn
+// in those two exact colours, cost a third of the encoder's time.
 func findCharDataBlock(block *cellBlock, flags int) CharData {
-	minC := [3]int{255, 255, 255}
-	maxC := [3]int{0, 0, 0}
-
-	// Distinct colours in order of first appearance, found through a small
-	// open-addressing table; pixColor maps each pixel to its colour.
-	var colors [32]uint32
-	var counts [32]int
-	var pixColor [32]uint8
-	var slots [64]int8 // index+1 into colors; 0 is empty
-	nColors := 0
-	last, lastIdx := uint32(1<<31), 0 // never a 24-bit colour
-	for i, px := range block {
-		color := px & 0xffffff
-		if color != last {
-			h := (color * 2654435761) >> 26 // 6 bits
-			for {
-				slot := slots[h]
-				if slot == 0 {
-					lastIdx = nColors
-					colors[nColors], counts[nColors] = color, 0
-					nColors++
-					slots[h] = int8(nColors)
-					y, cb, cr := int(color>>16), int(color>>8&0xff), int(color&0xff)
-					minC[0], maxC[0] = min(minC[0], y), max(maxC[0], y)
-					minC[1], maxC[1] = min(minC[1], cb), max(maxC[1], cb)
-					minC[2], maxC[2] = min(minC[2], cr), max(maxC[2], cr)
-					break
-				}
-				if colors[slot-1] == color {
-					lastIdx = int(slot - 1)
-					break
-				}
-				h = (h + 1) & 63
-			}
-			last = color
-		}
-		counts[lastIdx]++
-		pixColor[i] = uint8(lastIdx)
+	minY, minCb, minCr := uint32(255), uint32(255), uint32(255)
+	maxY, maxCb, maxCr := uint32(0), uint32(0), uint32(0)
+	for _, px := range block {
+		y, cb, cr := px>>16&0xff, px>>8&0xff, px&0xff
+		minY, maxY = min(minY, y), max(maxY, y)
+		minCb, maxCb = min(minCb, cb), max(maxCb, cb)
+		minCr, maxCr = min(minCr, cr), max(maxCr, cr)
 	}
-
-	var maxColor1, maxColor2 uint32
-	count2 := 0
-	best1, best2 := -1, -1
-	idx1, idx2 := -1, -1
-	for i := 0; i < nColors; i++ {
-		c := counts[i]
-		if c > best1 {
-			best2, idx2 = best1, idx1
-			best1, idx1 = c, i
-		} else if c > best2 {
-			best2, idx2 = c, i
-		}
+	// Widest channel; the first wins a tie.
+	shift, lo, span := uint(16), minY, maxY-minY
+	if maxCb-minCb > span {
+		shift, lo, span = 8, minCb, maxCb-minCb
 	}
-	if idx1 >= 0 {
-		maxColor1 = colors[idx1]
-		maxColor2 = maxColor1
-		count2 = counts[idx1]
+	if maxCr-minCr > span {
+		shift, lo, span = 0, minCr, maxCr-minCr
 	}
-	if idx2 >= 0 {
-		maxColor2 = colors[idx2]
-		count2 += counts[idx2]
-	}
-
-	direct := count2 > (8*4)/2
-
-	// colorBit is each colour's bit in the cell's pattern.
-	var colorBit [32]uint32
-	if direct {
-		y1, cb1, cr1 := int(maxColor1>>16&0xff), int(maxColor1>>8&0xff), int(maxColor1&0xff)
-		y2, cb2, cr2 := int(maxColor2>>16&0xff), int(maxColor2>>8&0xff), int(maxColor2&0xff)
-		for i := 0; i < nColors; i++ {
-			c := colors[i]
-			y, cb, cr := int(c>>16), int(c>>8&0xff), int(c&0xff)
-			d1 := (y1-y)*(y1-y) + (cb1-cb)*(cb1-cb) + (cr1-cr)*(cr1-cr)
-			d2 := (y2-y)*(y2-y) + (cb2-cb)*(cb2-cb) + (cr2-cr)*(cr2-cr)
-			if d1 > d2 {
-				colorBit[i] = 1
-			}
-		}
-	} else {
-		splitIndex := 0
-		bestSplit := 0
-		for i := 0; i < 3; i++ {
-			if maxC[i]-minC[i] > bestSplit {
-				bestSplit = maxC[i] - minC[i]
-				splitIndex = i
-			}
-		}
-		splitValue := minC[splitIndex] + bestSplit/2
-		shift := uint(16 - 8*splitIndex)
-		for i := 0; i < nColors; i++ {
-			if int(colors[i]>>shift&0xff) > splitValue {
-				colorBit[i] = 1
-			}
-		}
-	}
+	splitValue := lo + span/2
 	var bitsVal uint32
-	for _, ci := range pixColor {
-		bitsVal = bitsVal<<1 | colorBit[ci]
+	for _, px := range block {
+		var bit uint32
+		if px>>shift&0xff > splitValue {
+			bit = 1
+		}
+		bitsVal = bitsVal<<1 | bit
 	}
 
 	bestDiff := 32
 	bestPattern := uint32(0x0000ffff)
 	codePoint := 0x2584
-	inverted := false
 
 	// Each glyph is tried as is and inverted (32 minus the difference), in
-	// that order; an exact match cannot be beaten.
+	// that order; an exact match cannot be beaten. The colours are the
+	// averages under the glyph's set and clear bits, so an inverted match
+	// needs nothing more.
 	if flags == 0 {
 		patterns, codes := glyphCandidates()
 		for i, pattern := range patterns {
 			diff := bits.OnesCount32(pattern ^ bitsVal)
 			if diff < bestDiff {
-				bestDiff, bestPattern, codePoint, inverted = diff, pattern, codes[i], false
+				bestDiff, bestPattern, codePoint = diff, pattern, codes[i]
 			}
 			if 32-diff < bestDiff {
-				bestDiff, bestPattern, codePoint, inverted = 32-diff, pattern, codes[i], true
+				bestDiff, bestPattern, codePoint = 32-diff, pattern, codes[i]
 			}
 			if bestDiff == 0 {
 				break
@@ -376,29 +304,15 @@ func findCharDataBlock(block *cellBlock, flags int) CharData {
 			}
 			diff := bits.OnesCount32(bm.pattern ^ bitsVal)
 			if diff < bestDiff {
-				bestDiff, bestPattern, codePoint, inverted = diff, bm.pattern, bm.codePoint, false
+				bestDiff, bestPattern, codePoint = diff, bm.pattern, bm.codePoint
 			}
 			if 32-diff < bestDiff {
-				bestDiff, bestPattern, codePoint, inverted = 32-diff, bm.pattern, bm.codePoint, true
+				bestDiff, bestPattern, codePoint = 32-diff, bm.pattern, bm.codePoint
 			}
 			if bestDiff == 0 {
 				break
 			}
 		}
-	}
-
-	if direct {
-		var res CharData
-		if inverted {
-			maxColor1, maxColor2 = maxColor2, maxColor1
-		}
-		for i := 0; i < 3; i++ {
-			shift := uint(16 - 8*i)
-			res.FgColor[i] = int((maxColor2 >> shift) & 0xff)
-			res.BgColor[i] = int((maxColor1 >> shift) & 0xff)
-		}
-		res.CodePoint = codePoint
-		return res
 	}
 
 	return createCharDataBlock(block, codePoint, bestPattern)
@@ -442,13 +356,21 @@ func glyphIndexMap() map[int]byte {
 // packGlyphs6 packs glyph indices (each 0..63) into a bitstream
 // using 6 bits per glyph.
 func packGlyphs6(src []byte) []byte {
+	var out []byte
+	return packGlyphs6Into(&out, src)
+}
+
+// packGlyphs6Into is packGlyphs6 writing into *buf, grown as needed and
+// reused across frames.
+func packGlyphs6Into(buf *[]byte, src []byte) []byte {
 	n := len(src)
 	if n == 0 {
 		return nil
 	}
 	totalBits := n * 6
 	outLen := (totalBits + 7) / 8
-	out := make([]byte, outLen)
+	out := ensureByteSlice(buf, outLen)
+	clear(out)
 	bitPos := 0
 	for _, v := range src {
 		val := int(v) & 0x3f
@@ -627,6 +549,13 @@ type Encoder struct {
 	sentBg     []byte
 	sentCells  int
 
+	// Scratch for building a payload, reused across frames.
+	changeMask    []byte
+	changedGlyphs []byte
+	changedFg     []byte
+	changedBg     []byte
+	packedGlyphs  []byte
+
 	framesSinceLastKey int
 	keyframeInterval   int
 	forceBW            bool
@@ -724,31 +653,168 @@ func (e *Encoder) EncodePlain(frame Frame, cols, rows int) ([]byte, error) {
 	return e.encode(frame, cols, rows, false)
 }
 
+// EncodeWithSelfView encodes frame for the network, as Encode does, and makes
+// the self view from the same cells instead of computing them a second time:
+// mirrored left to right, as an Encoder made with mirror would. Both views have
+// the size cols x rows. The self view keeps this encoder's cell hold; self only
+// lends its buffers.
+func (e *Encoder) EncodeWithSelfView(frame Frame, cols, rows int, self *Encoder) (net []byte, selfView *TextFrame, err error) {
+	glyphs, fgColors, bgColors, err := e.cells(frame, cols, rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	net, err = e.encodeCells(glyphs, fgColors, bgColors, cols, rows, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	mg, mfg, mbg := self.mirrorCells(glyphs, fgColors, bgColors, cols, rows)
+	return net, newTextFrame(mg, mfg, mbg, cols, rows), nil
+}
+
+// SelfView draws a frame for this process only (the self view): the cells in
+// their own colours, with no palette, payload or compression in between.
+func (e *Encoder) SelfView(frame Frame, cols, rows int) (*TextFrame, error) {
+	glyphs, fgColors, bgColors, err := e.cells(frame, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	return newTextFrame(glyphs, fgColors, bgColors, cols, rows), nil
+}
+
+// newTextFrame copies cells into a new TextFrame, which the caller may keep.
+func newTextFrame(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows int) *TextFrame {
+	total := cols * rows
+	buf := make([]byte, total*7) // one allocation: glyphs, then fg, then bg
+	tf := &TextFrame{
+		Cols:    cols,
+		Rows:    rows,
+		Width:   cols << 2,
+		Height:  rows << 3,
+		Glyphs:  buf[:total:total],
+		FgYCbCr: buf[total : total*4 : total*4],
+		BgYCbCr: buf[total*4:],
+	}
+	copy(tf.Glyphs, glyphs[:total])
+	for i := 0; i < total; i++ {
+		copy(tf.FgYCbCr[i*3:i*3+3], fgColors[i][:])
+		copy(tf.BgYCbCr[i*3:i*3+3], bgColors[i][:])
+	}
+	return tf
+}
+
 func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, error) {
+	glyphs, fgColors, bgColors, err := e.cells(frame, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	return e.encodeCells(glyphs, fgColors, bgColors, cols, rows, compress)
+}
+
+// cells turns a frame into glyphs and fg/bg colours, after the cell hold.
+// The slices are the encoder's own buffers, valid until its next frame.
+func (e *Encoder) cells(frame Frame, cols, rows int) ([]byte, []paletteColor, []paletteColor, error) {
 	if len(frame.Data) == 0 || frame.Width <= 0 || frame.Height <= 0 {
-		return nil, fmt.Errorf("invalid frame data")
+		return nil, nil, nil, fmt.Errorf("invalid frame data")
 	}
 	if len(frame.Data) != frame.Width*frame.Height*3 {
-		return nil, fmt.Errorf("frame data size mismatch: got %d, want %d", len(frame.Data), frame.Width*frame.Height*3)
+		return nil, nil, nil, fmt.Errorf("frame data size mismatch: got %d, want %d", len(frame.Data), frame.Width*frame.Height*3)
 	}
 	if cols <= 0 || rows <= 0 {
-		return nil, fmt.Errorf("cols and rows must be > 0")
+		return nil, nil, nil, fmt.Errorf("cols and rows must be > 0")
 	}
 
 	if cols > MaxFrameCols || rows > MaxFrameRows {
-		return nil, fmt.Errorf("cols/rows too large: cols=%d (max %d), rows=%d (max %d)", cols, MaxFrameCols, rows, MaxFrameRows)
+		return nil, nil, nil, fmt.Errorf("cols/rows too large: cols=%d (max %d), rows=%d (max %d)", cols, MaxFrameCols, rows, MaxFrameRows)
 	}
 
 	glyphs, fgColors, bgColors, frameW, frameH, err := e.buildCellData(frame, cols, rows, e.forceBW)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	e.holdShapes(glyphs, fgColors, bgColors)
 
 	if frameW > int(math.MaxUint16) || frameH > int(math.MaxUint16) {
-		return nil, fmt.Errorf("frame dimensions too large: %dx%d (max %dx%d)", frameW, frameH, math.MaxUint16, math.MaxUint16)
+		return nil, nil, nil, fmt.Errorf("frame dimensions too large: %dx%d (max %dx%d)", frameW, frameH, math.MaxUint16, math.MaxUint16)
 	}
+	return glyphs, fgColors, bgColors, nil
+}
 
+// mirrorCells writes the left-right mirror image of a cell grid into e's
+// buffers: the columns in reverse order, each glyph replaced by its mirror
+// (see glyphMirrors).
+func (e *Encoder) mirrorCells(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows int) ([]byte, []paletteColor, []paletteColor) {
+	total := cols * rows
+	mg := ensureByteSlice(&e.glyphs, total)
+	if cap(e.fgColors) < total {
+		e.fgColors = make([]paletteColor, total)
+	}
+	if cap(e.bgColors) < total {
+		e.bgColors = make([]paletteColor, total)
+	}
+	mfg, mbg := e.fgColors[:total], e.bgColors[:total]
+	mirror, swap := glyphMirrors()
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			src, dst := r*cols+c, r*cols+cols-1-c
+			g, fg, bg := glyphs[src], fgColors[src], bgColors[src]
+			if int(g) < len(mirror) {
+				if swap[g] {
+					fg, bg = bg, fg
+				}
+				g = mirror[g]
+			}
+			mg[dst], mfg[dst], mbg[dst] = g, fg, bg
+		}
+	}
+	return mg, mfg, mbg
+}
+
+var (
+	glyphMirrorOnce sync.Once
+	glyphMirror     []byte // glyph index of each glyph's left-right mirror image
+	glyphMirrorSwap []bool // the mirror image is that glyph with fg and bg swapped
+)
+
+// mirrorPattern flips a 4x8 pattern left to right.
+func mirrorPattern(p uint32) uint32 {
+	var m uint32
+	for y := 0; y < 8; y++ {
+		shift := uint(28 - 4*y)
+		row := p >> shift & 0xf
+		m |= (row&1<<3 | row&2<<1 | row&4>>1 | row&8>>3) << shift
+	}
+	return m
+}
+
+// glyphMirrors maps each glyph to the one that draws its mirror image: the
+// same shape, or the inverse shape with the colours swapped (the left half
+// block mirrored is the right half, which is the left half inverted). A
+// mirror image no glyph draws exactly gets the nearest one.
+func glyphMirrors() ([]byte, []bool) {
+	glyphMirrorOnce.Do(func() {
+		initGlyphTables()
+		glyphMirror = make([]byte, len(glyphPatterns))
+		glyphMirrorSwap = make([]bool, len(glyphPatterns))
+		for i, p := range glyphPatterns {
+			m := mirrorPattern(p)
+			best, bestDiff, swap := i, 33, false
+			for j, q := range glyphPatterns {
+				if d := bits.OnesCount32(q ^ m); d < bestDiff {
+					best, bestDiff, swap = j, d, false
+				}
+				if d := 32 - bits.OnesCount32(q^m); d < bestDiff {
+					best, bestDiff, swap = j, d, true
+				}
+			}
+			glyphMirror[i], glyphMirrorSwap[i] = byte(best), swap
+		}
+	})
+	return glyphMirror, glyphMirrorSwap
+}
+
+// encodeCells packs cells (glyph indices and fg/bg colours) into a payload:
+// a palette or its indices, change-only frames, zstd if compress.
+func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows int, compress bool) ([]byte, error) {
 	totalCells := cols * rows
 
 	keyframe := byte(1)
@@ -803,7 +869,10 @@ func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, er
 	frameType := keyframe
 	var changeMask, changedGlyphs, changedFg, changedBg []byte
 	if keyframe == 0 && e.sentCells == totalCells {
-		changeMask = make([]byte, (totalCells+7)/8)
+		// The encoder's own buffers: writeField copies them into the payload.
+		changeMask = ensureByteSlice(&e.changeMask, (totalCells+7)/8)
+		clear(changeMask)
+		changedGlyphs, changedFg, changedBg = e.changedGlyphs[:0], e.changedFg[:0], e.changedBg[:0]
 		for i := 0; i < totalCells; i++ {
 			if glyphs[i] != e.sentGlyphs[i] || finalFgIdx[i] != e.sentFg[i] || finalBgIdx[i] != e.sentBg[i] {
 				changeMask[i/8] |= 1 << (i % 8)
@@ -812,6 +881,7 @@ func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, er
 				changedBg = append(changedBg, finalBgIdx[i])
 			}
 		}
+		e.changedGlyphs, e.changedFg, e.changedBg = changedGlyphs, changedFg, changedBg
 		if len(changedGlyphs)*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum {
 			frameType = frameTypeDelta
 		}
@@ -826,15 +896,12 @@ func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, er
 
 	payload.WriteString(PayloadMagic)
 	payload.WriteByte(frameType)
-	if err := binary.Write(payload, binary.LittleEndian, uint16(cols)); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(payload, binary.LittleEndian, uint16(rows)); err != nil {
-		return nil, err
-	}
+	var size [4]byte
+	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(cols)))
+	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(rows)))
 
 	if frameType == frameTypeDelta {
-		for _, field := range [][]byte{changeMask, packGlyphs6(changedGlyphs), changedFg, changedBg} {
+		for _, field := range [][]byte{changeMask, packGlyphs6Into(&e.packedGlyphs, changedGlyphs), changedFg, changedBg} {
 			if err := writeField(payload, field); err != nil {
 				return nil, fmt.Errorf("write change frame: %w", err)
 			}
@@ -851,7 +918,7 @@ func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, er
 	}
 
 	// write per-cell planes: glyph indices (packed as 6 bits) and palette-based color indices
-	glyphsPacked := packGlyphs6(glyphs)
+	glyphsPacked := packGlyphs6Into(&e.packedGlyphs, glyphs)
 	if err := writeField(payload, glyphsPacked); err != nil {
 		return nil, fmt.Errorf("write glyphs: %w", err)
 	}
@@ -1065,8 +1132,9 @@ func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
 
 	palCount := len(palette)
 
-	fgYCbCr := make([]byte, totalCells*3)
-	bgYCbCr := make([]byte, totalCells*3)
+	colours := make([]byte, totalCells*6) // one allocation for both planes
+	fgYCbCr := colours[: totalCells*3 : totalCells*3]
+	bgYCbCr := colours[totalCells*3:]
 	for i := 0; i < totalCells; i++ {
 		idx := int(fgIdx[i])
 		if idx < 0 || idx >= palCount {
@@ -1120,12 +1188,21 @@ func decodePalettePayload(paletteBytes []byte) ([]paletteColor, error) {
 		cr5 := v & 0x1f
 
 		palette[i][0] = byte((y6 << 2) | (y6 >> 4))
-		palette[i][1] = byte((cb5 << 3) | (cb5 >> 2))
-		palette[i][2] = byte((cr5 << 3) | (cr5 >> 2))
+		palette[i][1] = expandChroma5(byte(cb5))
+		palette[i][2] = expandChroma5(byte(cr5))
 	}
 
 	return palette, nil
 }
+
+// Palette chroma has 5 bits. Values are rounded to the nearest of 32 levels
+// eight apart and come back as level*8, so neutral 128 stays 128 exactly. It
+// was truncated and expanded as (q<<3)|(q>>2), which turned 128 into 132 and
+// 127 into 123: grey drawn lilac, and a noisy grey flickering between lilac
+// and green. A peer still on that expansion sees a level up to 4 higher.
+func quantChroma5(c byte) byte { return byte(min(31, (int(c)+4)>>3)) }
+
+func expandChroma5(q byte) byte { return q << 3 }
 
 func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, []paletteColor, []paletteColor, int, int, error) {
 	if cols <= 0 || rows <= 0 {
@@ -1255,23 +1332,32 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 		go func(start int) {
 			defer wg.Done()
 			var block cellBlock
+			data := frame.Data
 			for by := start; by < rows; by += workers {
 				for bx := 0; bx < cols; bx++ {
 					cell := by*cols + bx
 					// Read the cell's pixels straight from the frame (what
-					// getPixel does, without a call per pixel).
-					xo := xOff[bx*4 : bx*4+4 : bx*4+4]
+					// getPixel does, without a call per pixel). Each pixel is
+					// a three-byte subslice: one bounds check instead of
+					// three, which halved this loop.
+					x0, x1, x2, x3 := xOff[bx*4], xOff[bx*4+1], xOff[bx*4+2], xOff[bx*4+3]
 					for y := 0; y < 8; y++ {
-						row := frame.Data[rowOff[by*8+y]:]
+						r := rowOff[by*8+y]
 						b := block[y*4 : y*4+4 : y*4+4]
+						p0 := data[r+x0 : r+x0+3 : r+x0+3]
+						p1 := data[r+x1 : r+x1+3 : r+x1+3]
+						p2 := data[r+x2 : r+x2+3 : r+x2+3]
+						p3 := data[r+x3 : r+x3+3 : r+x3+3]
 						if bw {
-							for x, o := range xo {
-								b[x] = uint32(row[o])<<16 | 128<<8 | 128
-							}
+							b[0] = uint32(p0[0])<<16 | 128<<8 | 128
+							b[1] = uint32(p1[0])<<16 | 128<<8 | 128
+							b[2] = uint32(p2[0])<<16 | 128<<8 | 128
+							b[3] = uint32(p3[0])<<16 | 128<<8 | 128
 						} else {
-							for x, o := range xo {
-								b[x] = uint32(row[o])<<16 | uint32(row[o+1])<<8 | uint32(row[o+2])
-							}
+							b[0] = uint32(p0[0])<<16 | uint32(p0[1])<<8 | uint32(p0[2])
+							b[1] = uint32(p1[0])<<16 | uint32(p1[1])<<8 | uint32(p1[2])
+							b[2] = uint32(p2[0])<<16 | uint32(p2[1])<<8 | uint32(p2[2])
+							b[3] = uint32(p3[0])<<16 | uint32(p3[1])<<8 | uint32(p3[2])
 						}
 					}
 					// A cell whose pixels did not change since the last frame
@@ -1343,7 +1429,7 @@ func buildPaletteFromColors(fgColors, bgColors []paletteColor, totalCells int) [
 	// maxPaletteColors entries. Check before every insertion: each cell adds
 	// two colors, and checking once per cell could overshoot to 257.
 	add := func(c paletteColor) bool {
-		code := packColor(c[0]>>2, c[1]>>3, c[2]>>3)
+		code := packColor(c[0]>>2, quantChroma5(c[1]), quantChroma5(c[2]))
 		if _, ok := paletteMap[code]; ok {
 			return true
 		}
@@ -1384,8 +1470,8 @@ func buildPaletteFromColors(fgColors, bgColors []paletteColor, totalCells int) [
 func expandPaletteEntry(p paletteColor) [3]int {
 	return [3]int{
 		int((p[0] << 2) | (p[0] >> 4)),
-		int((p[1] << 3) | (p[1] >> 2)),
-		int((p[2] << 3) | (p[2] >> 2)),
+		int(expandChroma5(p[1])),
+		int(expandChroma5(p[2])),
 	}
 }
 
@@ -1591,7 +1677,8 @@ func decompressZstd(data []byte) ([]byte, error) {
 }
 
 func writeField(buf *bytes.Buffer, data []byte) error {
-	if err := binary.Write(buf, binary.LittleEndian, uint32(len(data))); err != nil {
+	var size [4]byte
+	if _, err := buf.Write(binary.LittleEndian.AppendUint32(size[:0], uint32(len(data)))); err != nil {
 		return err
 	}
 	if len(data) == 0 {

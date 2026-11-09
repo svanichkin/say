@@ -59,7 +59,7 @@ func TestNextVideoFPS(t *testing.T) {
 }
 
 func TestKeyframeIntervalStaysAboutHalfASecond(t *testing.T) {
-	for fps, want := range map[int]int{60: 10, 25: 10, 10: 5, 5: 2, 2: 2} {
+	for fps, want := range map[int]int{60: 30, 25: 12, 10: 5, 5: 2, 2: 2} {
 		if got := videoKeyframeFrames(fps); got != want {
 			t.Errorf("%d fps: keyframe every %d frames, want %d", fps, got, want)
 		}

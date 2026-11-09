@@ -8,7 +8,7 @@ import "github.com/svanichkin/say/codec"
 // the network stream. Delta frames reference the last keyframe's palette, so
 // a lost keyframe otherwise left the peer's pane blank or garbled until the
 // picture changed enough to trigger one (the palette costs at most 512 bytes).
-const videoKeyframeInterval = 10
+const videoKeyframeInterval = 100
 
 // videoKeyframeFrames keeps full frames about every half second at any
 // frame rate: after a lost packet, change-only frames resume from the next
@@ -35,13 +35,12 @@ func SetVideoShapeHold(threshold int) {
 	videoShapeHold = max(0, threshold)
 }
 
-func initVideoCodec() (previewEncoder, netEncoder *codec.Encoder, previewDecoder *codec.Decoder) {
+func initVideoCodec() (previewEncoder, netEncoder *codec.Encoder) {
 	previewEncoder = codec.NewEncoder(false, 0, maxVideoFPS, true)
 	netEncoder = codec.NewEncoder(false, videoKeyframeInterval, maxVideoFPS, false)
 	previewEncoder.SetShapeHold(videoShapeHold)
 	netEncoder.SetShapeHold(videoShapeHold)
 	previewEncoder.SetHoldDebug(videoHoldDebug)
 	netEncoder.SetHoldDebug(videoHoldDebug)
-	previewDecoder = codec.NewDecoder()
 	return
 }

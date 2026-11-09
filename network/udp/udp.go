@@ -554,7 +554,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 
 	// ======== Video sender: camera → textFrame → UDP ========
-	previewEncoder, netEncoder, previewDecoder := initVideoCodec()
+	previewEncoder, netEncoder := initVideoCodec()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -658,18 +658,44 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					Height: frame.Height,
 				}
 
-				// ----- local preview (self view) -----
-				if cols, rows, ok := ui.SelfSlot(); ok {
-					start := time.Now()
-					// The self view never leaves this process: no compression.
-					dataLocal, err := previewEncoder.EncodePlain(rawFrame, cols, rows)
-					tEncodeLocal += time.Since(start)
+				selfCols, selfRows, selfOK := ui.SelfSlot()
+				peerCols, peerRows, peerOK := ui.PeerSlot()
+				var addr *net.UDPAddr
+				if peerOK {
+					addr = getPeer()
+				}
+				sendNet := addr != nil
 
-					if err != nil {
+				// ----- encode -----
+				var dataNet []byte
+				var selfView *codec.TextFrame
+				var errLocal, errNet error
+				if selfOK && sendNet && selfCols == peerCols && selfRows == peerRows {
+					// Both panes have one size: the cells are built once and
+					// the self view mirrors them.
+					start := time.Now()
+					dataNet, selfView, errNet = netEncoder.EncodeWithSelfView(rawFrame, peerCols, peerRows, previewEncoder)
+					errLocal = errNet
+					tEncodeNet += time.Since(start)
+				} else {
+					if selfOK {
+						start := time.Now()
+						// The self view never leaves this process: no palette or payload.
+						selfView, errLocal = previewEncoder.SelfView(rawFrame, selfCols, selfRows)
+						tEncodeLocal += time.Since(start)
+					}
+					if sendNet {
+						start := time.Now()
+						dataNet, errNet = netEncoder.Encode(rawFrame, peerCols, peerRows)
+						tEncodeNet += time.Since(start)
+					}
+				}
+
+				// ----- local preview (self view) -----
+				if selfOK {
+					if err := errLocal; err != nil {
 						log.Printf("[video/udp] Encode local: %v", err)
-					} else if tv, err := previewDecoder.DecodePlain(dataLocal); err != nil {
-						log.Printf("[video/udp] Decode local: %v", err)
-					} else if videoSelfScreenOut != nil {
+					} else if tv := selfView; videoSelfScreenOut != nil {
 						select {
 						case videoSelfScreenOut <- tv:
 						default:
@@ -688,17 +714,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				}
 
 				// ----- send encoded frame over the network -----
-				if cols, rows, ok := ui.PeerSlot(); ok {
-					addr := getPeer()
-					if addr == nil {
-						continue
-					}
-
-					start := time.Now()
-					dataNet, err := netEncoder.Encode(rawFrame, cols, rows)
-					tEncodeNet += time.Since(start)
-
-					if err != nil {
+				if sendNet {
+					if err := errNet; err != nil {
 						log.Printf("[video/udp] Encode net: %v", err)
 						continue
 					}

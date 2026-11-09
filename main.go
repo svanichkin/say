@@ -422,7 +422,31 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			ui.SetStatusMessage(fmt.Sprintf("Re-dialing %s (attempt %d)…", target, attempt))
 		}
 
-		stopClient, connDone, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), host, port, termSync, mediaFactory, dial)
+		// The dial and the handshake have their own timeouts (up to 10 s
+		// each) and take no context: run them aside so Ctrl-C does not wait
+		// for them. A connection that still comes up afterwards is hung up.
+		type dialResult struct {
+			stop func() error
+			done <-chan struct{}
+			err  error
+		}
+		dialed := make(chan dialResult, 1)
+		go func() {
+			stop, done, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), host, port, termSync, mediaFactory, dial)
+			dialed <- dialResult{stop, done, err}
+		}()
+		var res dialResult
+		select {
+		case <-ctx.Done():
+			go func() {
+				if r := <-dialed; r.err == nil {
+					r.stop()
+				}
+			}()
+			return ctx.Err()
+		case res = <-dialed:
+		}
+		stopClient, connDone, err := res.stop, res.done, res.err
 		if err == nil {
 			ui.SetStatusMessage(fmt.Sprintf("Connected to %s", target))
 			log.Printf("[p2p] dial established to %s", target)
