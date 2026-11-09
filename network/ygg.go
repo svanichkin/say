@@ -11,6 +11,7 @@ import (
 
 	ygg "github.com/svanichkin/ygg"
 	"github.com/yggdrasil-network/yggdrasil-go/src/address"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 type yggTransport struct {
@@ -18,6 +19,8 @@ type yggTransport struct {
 	addr      string
 	readyCh   chan struct{}
 	readyOnce sync.Once
+	statsOnce sync.Once
+	statsStop chan struct{}
 }
 
 // lanEnabled turns on Yggdrasil LAN discovery (multicast); see SetLAN.
@@ -30,7 +33,8 @@ func SetLAN(enabled bool) {
 
 func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	t := &yggTransport{
-		readyCh: make(chan struct{}),
+		readyCh:   make(chan struct{}),
+		statsStop: make(chan struct{}),
 	}
 
 	log.Printf("[net] loading")
@@ -85,7 +89,55 @@ func (t *yggTransport) ListenTCP(port int) (net.Listener, error) {
 }
 
 func (t *yggTransport) ListenUDP(port int) (net.PacketConn, error) {
-	return ygg.ListenUDP(port)
+	pc, err := ygg.ListenUDP(port)
+	if err == nil && t.node != nil && t.node.Net != nil {
+		// The netstack exists once a socket is open.
+		st := t.node.Net.Stack
+		t.statsOnce.Do(func() { go logNetstackDrops(st, t.statsStop) })
+	}
+	return pc, err
+}
+
+// logNetstackDrops logs packets the in-process netstack itself dropped, so
+// local overload can be told apart from loss on the Yggdrasil path: drops
+// as they happen, a summary every 10 s.
+func logNetstackDrops(st *stack.Stack, stop <-chan struct{}) {
+	if st == nil {
+		return
+	}
+	type counts struct{ rx, rxFull, tx, txErr, nicFull, ipErr uint64 }
+	read := func() counts {
+		s := st.Stats()
+		return counts{
+			rx:      s.UDP.PacketsReceived.Value(),
+			rxFull:  s.UDP.ReceiveBufferErrors.Value(),
+			tx:      s.UDP.PacketsSent.Value(),
+			txErr:   s.UDP.PacketSendErrors.Value(),
+			nicFull: s.NICs.TxPacketsDroppedNoBufferSpace.Value(),
+			ipErr:   s.IP.OutgoingPacketErrors.Value(),
+		}
+	}
+	prev, sum := read(), read()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for n := 1; ; n++ {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+		c := read()
+		if c.rxFull != prev.rxFull || c.txErr != prev.txErr || c.nicFull != prev.nicFull || c.ipErr != prev.ipErr {
+			log.Printf("[net/stack] drops in 1 s: rx buffer full %d, udp send errors %d, tx queue full %d, ip send errors %d (rx %d, tx %d pkts)",
+				c.rxFull-prev.rxFull, c.txErr-prev.txErr, c.nicFull-prev.nicFull, c.ipErr-prev.ipErr, c.rx-prev.rx, c.tx-prev.tx)
+		}
+		prev = c
+		if n%10 == 0 {
+			log.Printf("[net/stack] 10 s: rx %d pkts (%d dropped, buffer full), tx %d pkts (%d udp errors, %d tx queue full, %d ip errors)",
+				c.rx-sum.rx, c.rxFull-sum.rxFull, c.tx-sum.tx, c.txErr-sum.txErr, c.nicFull-sum.nicFull, c.ipErr-sum.ipErr)
+			sum = c
+		}
+	}
 }
 
 func (t *yggTransport) DialTCP(host string, port int) (net.Conn, error) {
@@ -95,6 +147,11 @@ func (t *yggTransport) DialTCP(host string, port int) (net.Conn, error) {
 func (t *yggTransport) Close() error {
 	if t == nil || t.node == nil {
 		return nil
+	}
+	select {
+	case <-t.statsStop:
+	default:
+		close(t.statsStop)
 	}
 	return t.node.Close()
 }

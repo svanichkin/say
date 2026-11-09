@@ -775,6 +775,8 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 			rxAudioPkts, rxAudioBytes uint64
 			rxVideoPkts, rxVideoBytes uint64
 			lastRateSample            = time.Now()
+			lastRxAudio, lastRxVideo  uint16
+			haveRxAudio, haveRxVideo  bool
 		)
 		publishRxRates := func(force bool) {
 			now := time.Now()
@@ -792,6 +794,11 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				logs.LogV("[voice/udp] rx: %d pkts, %.2f kB/s", rxAudioPkts, audioRate)
 				ui.UpdateRxAudioRate(audioRate)
 				rxAudioPkts, rxAudioBytes = 0, 0
+			}
+			if haveRxAudio && haveRxVideo {
+				// Sender clocks: audio and video stamps should stay within a frame or two.
+				logs.LogV("[av/rx] newest audio - newest video = %d ms",
+					mediaIndexDelta(lastRxAudio, lastRxVideo)*int32(mediaTickDuration/time.Millisecond))
 			}
 			if useVideo {
 				videoRate := (float64(rxVideoBytes) / 1024) / seconds
@@ -854,6 +861,7 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 
 			switch t {
 			case mediaKindAudio:
+				lastRxAudio, haveRxAudio = index, true
 				rxAudioPkts++
 				rxAudioBytes += uint64(len(payload))
 				if netAudioIn == nil {
@@ -883,6 +891,7 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				}
 
 			case mediaKindVideo:
+				lastRxVideo, haveRxVideo = index, true
 				rxVideoPkts++
 				rxVideoBytes += uint64(len(payload))
 				if netVideoIn == nil {
@@ -1017,7 +1026,16 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
+		var syncLogAt time.Time
+		var newestIndex uint16
+		var haveNewest bool
 		presentDue := func() {
+			if now := time.Now(); haveNewest && playbackIndex != nil && now.Sub(syncLogAt) >= time.Second {
+				syncLogAt = now
+				cur, ok := playbackIndex()
+				logs.LogV("[av/sync] newest video - playback = %d ms (clock ok=%v), queued %d",
+					mediaIndexDelta(newestIndex, cur)*int32(mediaTickDuration/time.Millisecond), ok, len(queue))
+			}
 			if !mediactrl.PlaybackEnabled() {
 				queue = queue[:0]
 				return
@@ -1117,6 +1135,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 					continue
 				}
 
+				newestIndex, haveNewest = index, true
 				queue = append(queue, timedFrame{index: index, frame: tv})
 				sort.Slice(queue, func(i, j int) bool {
 					return mediaIndexDelta(queue[i].index, queue[j].index) < 0
