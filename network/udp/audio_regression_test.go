@@ -45,7 +45,9 @@ func TestDecodedDuplicatesDoNotChangeDelayOrDecoder(t *testing.T) {
 	}
 }
 
-func TestOneLateSlotCountsOnceAndKeepsTheLead(t *testing.T) {
+// A late packet raises the jitter buffer lead by one frame; its repeats
+// count once and raise it no further.
+func TestOneLateSlotCountsOnceAndRaisesTheLeadOnce(t *testing.T) {
 	q := device.NewPlaybackQueue(128)
 	p := newAudioPlayout(&countedDecoder{}, 160, q)
 	now := time.Now()
@@ -58,8 +60,8 @@ func TestOneLateSlotCountsOnceAndKeepsTheLead(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		p.onPacket(index, []byte{1}, now)
 	}
-	if p.lead != before || p.lateEvents != 1 {
-		t.Fatalf("lead=%d late=%d", p.lead, p.lateEvents)
+	if p.lead != before+1 || p.lateEvents != 1 {
+		t.Fatalf("lead=%d (was %d) late=%d", p.lead, before, p.lateEvents)
 	}
 }
 

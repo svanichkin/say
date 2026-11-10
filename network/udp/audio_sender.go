@@ -79,6 +79,10 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			return true
 		}
 		for {
+			// A frame whose wait is over goes now, whatever woke us.
+			if !send(bundle.due(time.Now())) {
+				return
+			}
 			var flushC <-chan time.Time
 			if dl := bundle.pendingDeadline(); !dl.IsZero() {
 				flushC = time.After(time.Until(dl))

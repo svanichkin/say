@@ -2,6 +2,7 @@ package udp
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -297,4 +298,53 @@ func TestPlayoutReordersPacketsBeforeTheirSlotIsDue(t *testing.T) {
 			t.Fatalf("played out of order: %v", order)
 		}
 	}
+}
+
+// Packets with 0-80 ms of jitter: the lead grows until none arrives late any
+// more, and returns to the start once the path is clean again.
+func TestPlayoutLeadAdaptsToJitter(t *testing.T) {
+	// The buffers of a call (10 ms speaker periods, 40 ms lead); the
+	// package defaults are restored afterwards for the other tests.
+	period, periods, lead := audioSpeakerPeriodMs, audioSpeakerPeriods, audioBufferLeadFrames*audioFrameMillis
+	ResetAudioSettings()
+	defer func() { SetSpeakerBuffer(period, periods); SetJitterLead(lead) }()
+	const frame = 160
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	rng := rand.New(rand.NewSource(11))
+	const jitterSteps, cleanSteps = 750, 4000 // 15 s of jitter, 80 s clean (20 ms steps)
+	arrivals := map[int][]uint16{}
+	for i := 0; i < jitterSteps+cleanSteps; i++ {
+		delay := 0
+		if i < jitterSteps {
+			delay = rng.Intn(5) // 0..80 ms
+		}
+		arrivals[i+delay] = append(arrivals[i+delay], uint16(i*audioFrameTicks)&mediaIndexMask)
+	}
+	now := time.Now()
+	lateFirst, lateLast := 0, 0
+	maxLead := p.lead
+	for step := 0; step < jitterSteps+cleanSteps; step++ {
+		for _, idx := range arrivals[step] {
+			p.onPacket(idx, []byte{byte(idx / audioFrameTicks), 0}, now)
+		}
+		p.onTickAt(now)
+		q.TakeFrame()
+		if step == jitterSteps/3 {
+			lateFirst = int(p.lateEvents)
+		}
+		if step == jitterSteps {
+			lateLast = int(p.lateEvents)
+		}
+		maxLead = max(maxLead, p.lead)
+		now = now.Add(20 * time.Millisecond)
+	}
+	if lateFirst == 0 || lateLast-lateFirst > lateFirst/2 {
+		t.Fatalf("late packets: %d in the first 5 s, %d in the 10 s after: the lead did not adapt", lateFirst, lateLast-lateFirst)
+	}
+	if maxLead*audioFrameMillis < 80 || p.lead != p.baseLead {
+		t.Fatalf("lead peaked at %d ms and ended at %d ms (start %d ms)", maxLead*audioFrameMillis, p.lead*audioFrameMillis, p.baseLead*audioFrameMillis)
+	}
+	t.Logf("late: %d in the first 5 s, %d in the next 10 s; lead peaked at %d ms, back to %d ms on the clean path",
+		lateFirst, lateLast-lateFirst, maxLead*audioFrameMillis, p.lead*audioFrameMillis)
 }

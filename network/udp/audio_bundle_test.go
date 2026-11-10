@@ -50,15 +50,11 @@ func TestAudioBundlerPairsConsecutiveFrames(t *testing.T) {
 	frame := func(i int) []byte { return []byte{byte(i)} }
 	at := func(i int) time.Time { return now.Add(time.Duration(i*audioFrameMillis) * time.Millisecond) }
 	var sent [][]byte
-	for i := 0; i < 4; i++ { // consecutive frames, each when it is captured
-		if d := b.due(at(i)); d != nil {
-			sent = append(sent, d)
-		}
+	for i := 0; i < 4; i++ { // consecutive frames: a full pair goes out at once
 		sent = append(sent, b.add(uint16(i*audioFrameTicks), frame(i), at(i))...)
-	}
-	sent = append(sent, b.due(at(3).Add(audioBundleWait))) // the second bundle's deadline
-	if len(sent) != 2 || sent[1] == nil {
-		t.Fatalf("%d datagrams for 4 frames, want 2", len(sent))
+		if want := (i + 1) / 2; len(sent) != want {
+			t.Fatalf("after frame %d: %d datagrams, want %d", i, len(sent), want)
+		}
 	}
 	for k, d := range sent {
 		_, first, _ := decodeMediaHeader(d)
@@ -84,7 +80,7 @@ func TestAudioBundlerPairsConsecutiveFrames(t *testing.T) {
 	if b.due(at(20).Add(audioBundleWait)) == nil {
 		t.Fatal("lone frame held past its wait")
 	}
-	// A video datagram takes the waiting frames: nothing is left to send.
+	// A video datagram takes the waiting frame: nothing is left to send.
 	b.add(30*audioFrameTicks, frame(30), at(30))
 	if first, frames, ok := b.takeFrames(); !ok || first != 30*audioFrameTicks || len(frames) != 1 {
 		t.Fatalf("takeFrames: %d %v %v", first, frames, ok)

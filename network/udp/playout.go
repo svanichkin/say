@@ -47,8 +47,12 @@ type audioPlayout struct {
 	lossMissing  uint64
 	lossWindow   time.Time
 
-	// Jitter buffer lead in frames: the profile or -audio value.
+	// Jitter buffer lead in frames: the profile or -audio value at the
+	// start (baseLead), raised by late packets (see onLate).
 	lead       int
+	baseLead   int
+	lastLate   time.Time
+	lastShrink time.Time
 	level      float64 // smoothed PCM queue occupancy for clock drift correction
 	missed     [audioBufferMaxFrames]missedSlot
 	missedHead int
@@ -78,6 +82,7 @@ func newAudioPlayout(dec audioDecoder, frameSamples int, out *device.PlaybackQue
 		lossWindow:   time.Now(),
 		lowWater:     frameSamples * audioPlayoutLowFrames,
 		lead:         audioBufferLeadFrames,
+		baseLead:     audioBufferLeadFrames,
 		maxQueued:    frameSamples * audioQueueMaxFrames,
 		targetQueued: frameSamples * audioQueueTargetFrames,
 	}
@@ -130,6 +135,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 			// duplicate must not.
 			if p.takeMissed(index) {
 				p.lateEvents++
+				p.onLate(now)
 			}
 			return
 		}
@@ -170,6 +176,49 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 	}
 	p.insert(queuedPacket{index: index, payload: append([]byte(nil), payload...)})
 	p.pump(now)
+}
+
+// Adaptive jitter buffer. The lead starts small (the profile's), so a good
+// path has little delay; a packet that arrives after its slot was concealed
+// raises it by a frame at once, up to audioLeadAdaptMaxFrames, and a path
+// without late packets for audioLeadShrinkAfter lowers it a frame at a time,
+// back to the start.
+const (
+	audioLeadAdaptMaxFrames = 10 // 200 ms
+	audioLeadShrinkAfter    = 10 * time.Second
+)
+
+// onLate raises the lead after a late packet. The extra frame of audio goes
+// into the queue at once (concealment, so speech continues naturally), with
+// almost no media time: the playback clock, which video follows, holds
+// while it plays, and every later packet has a frame more to arrive.
+func (p *audioPlayout) onLate(now time.Time) {
+	p.lastLate = now
+	if !p.ready || p.lead >= max(p.baseLead, audioLeadAdaptMaxFrames) {
+		return
+	}
+	p.lead++
+	written, err := p.dec.Conceal(p.scratch)
+	if err != nil || written <= 0 {
+		clear(p.scratch)
+		written = p.frameSamples
+	}
+	samples := make([]int16, p.frameSamples)
+	copy(samples, p.scratch[:min(written, p.frameSamples)])
+	p.out.Push(device.PlaybackFrame{Samples: samples, MediaIndex: p.nextIndex, MediaSamples: 1, Discontinuous: true})
+	p.level = 0 // the drift correction starts over at the new level
+	logs.LogV("[voice/udp] late packet: jitter buffer %d ms", p.lead*audioFrameMillis)
+}
+
+// shrinkLead lowers a raised lead after a while without late packets. The
+// drift correction then drains the queue towards the lower target.
+func (p *audioPlayout) shrinkLead(now time.Time) {
+	if p.lead <= p.baseLead || now.Sub(p.lastLate) < audioLeadShrinkAfter || now.Sub(p.lastShrink) < audioLeadShrinkAfter {
+		return
+	}
+	p.lead--
+	p.lastShrink = now
+	logs.LogV("[voice/udp] no late packets: jitter buffer %d ms", p.lead*audioFrameMillis)
 }
 
 // insert adds a packet to the reorder buffer, keeping it sorted by index.
@@ -239,6 +288,7 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 	if !p.started {
 		return
 	}
+	p.shrinkLead(now)
 	p.pump(now)
 	// DTX deliberately sends no packets for most 20 ms slots. Prime by
 	// elapsed time, not by waiting for a full buffer of later packets.

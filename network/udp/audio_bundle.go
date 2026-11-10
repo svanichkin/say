@@ -19,8 +19,8 @@ import (
 //
 // A sender holds a frame for at most audioBundleWait waiting for the next:
 // in DTX silence frames come alone and go out after that wait. A video
-// datagram leaving meanwhile takes the waiting frames along (see
-// appendVideoVoice), which saves the voice datagram altogether.
+// datagram leaving meanwhile takes the waiting frame along (see
+// appendVideoHead), which saves the voice datagram and the rest of the wait.
 
 const (
 	// audioBundleFrames is how many frames a bundle holds: 2 is 40 ms of
@@ -88,13 +88,13 @@ type audioBundler struct {
 	deadline time.Time
 }
 
-// add appends a frame with media index index. It returns the pending
-// bundle (header + payload) to send first if the frame does not continue it
-// or would make it longer than audioBundleFrames. A full bundle still waits
-// for its deadline: a video datagram may take it along meanwhile.
+// add appends a frame with media index index. It returns the bundles
+// (header + payload) to send now: the pending one if the frame does not
+// continue it, and the new one once it is full. A full bundle goes out at
+// once: every ms a voice frame waits is a ms less for the receiver's jitter
+// buffer, and frames that arrive after their turn are lost.
 func (b *audioBundler) add(index uint16, frame []byte, now time.Time) (flush [][]byte) {
-	if len(b.frames) > 0 && (len(b.frames) >= audioBundleFrames ||
-		index != advanceMediaIndex(b.first, int32(len(b.frames))*audioFrameTicks)) {
+	if len(b.frames) > 0 && index != advanceMediaIndex(b.first, int32(len(b.frames))*audioFrameTicks) {
 		flush = append(flush, b.take())
 	}
 	if len(b.frames) == 0 {
@@ -102,6 +102,9 @@ func (b *audioBundler) add(index uint16, frame []byte, now time.Time) (flush [][
 		b.deadline = now.Add(audioBundleWait)
 	}
 	b.frames = append(b.frames, frame)
+	if len(b.frames) >= audioBundleFrames {
+		flush = append(flush, b.take())
+	}
 	return flush
 }
 
