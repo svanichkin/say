@@ -54,6 +54,9 @@ func run() (err error) {
 		printSupportInfo()
 		return nil
 	}
+	if !opts.NoWT && relaunchInWindowsTerminal() {
+		return nil // Say goes on in a Windows Terminal window
+	}
 
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
@@ -127,6 +130,7 @@ func run() (err error) {
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	network.SetLAN(!opts.NoLAN)
+	network.SetDirect(!opts.NoDirect)
 	ui.SetColorFilter(opts.ColorFilter)
 	tcpsignal.SetLocalMonoView(ui.ColorFilterActive())
 	ui.SetColorMode(opts.Colors)
@@ -201,7 +205,16 @@ func run() (err error) {
 			}
 			// We decode the peer's voice with the codec it announced (an
 			// older peer announces none and expects ours).
-			return udptransport.StartSession(udpConn, remote, peer.AudioCodec, peer.Proto, peer.MonoView)
+			sess, err := udptransport.StartSession(udpConn, remote, peer.AudioCodec, peer.Proto, peer.MonoView)
+			if err != nil {
+				return nil, err
+			}
+			if remote == nil {
+				return sess, nil
+			}
+			// The caller asks for a direct link (unless -nodirect on either
+			// side); it lasts as long as the call.
+			return &directSession{MediaSession: sess, stopDirect: transport.StartDirect(peerHost)}, nil
 		}
 	}
 
@@ -564,4 +577,15 @@ func printDonateInfo() {
 
 func printSupportInfo() {
 	fmt.Println(support)
+}
+
+// directSession is a call's media session together with its direct link.
+type directSession struct {
+	tcpsignal.MediaSession
+	stopDirect func()
+}
+
+func (s *directSession) Stop() error {
+	s.stopDirect()
+	return s.MediaSession.Stop()
 }

@@ -670,9 +670,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				if frame.Data == nil {
 					continue
 				}
-				if !mediactrl.CaptureEnabled() {
-					continue
-				}
+				// Muting (mediactrl) is for the sound only: the camera keeps going.
 				if fpsLimiter != nil {
 					select {
 					case <-fpsLimiter.C:
@@ -1123,10 +1121,8 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				logs.LogV("[av/sync] newest video - playback = %d ms (clock ok=%v), queued %d",
 					mediaIndexDelta(newestIndex, cur)*int32(mediaTickDuration/time.Millisecond), ok, len(queue))
 			}
-			if !mediactrl.PlaybackEnabled() {
-				queue = queue[:0]
-				return
-			}
+			// Muting the peer (mediactrl) silences its sound only: its video
+			// goes on, shown as it arrives once the audio clock stops.
 			if len(queue) == 0 {
 				return
 			}
@@ -1187,9 +1183,6 @@ func startVideoReceiver(wg *sync.WaitGroup,
 					return
 				}
 				if pkt == nil {
-					continue
-				}
-				if !mediactrl.PlaybackEnabled() {
 					continue
 				}
 				if len(pkt) <= mediaIndexBytes+videoSeqBytes {

@@ -271,6 +271,8 @@ type AppOptions struct {
 	AudioCodec  string
 	Camera      string // -camera: a camera device such as /dev/video2 (Linux)
 	NoLAN       bool
+	NoWT        bool // -nowt: stay in the console Windows started us in
+	NoDirect    bool // -nodirect: no direct links through the NATs, calls stay on Yggdrasil routes
 	NoMic       bool
 	SysAudio    bool // the system voice processing (default on macOS and Windows)
 	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
@@ -836,6 +838,26 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.NoLAN = boolVal
+		case "nodirect":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -nodirect: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.NoDirect = boolVal
+		case "nowt":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -nowt: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.NoWT = boolVal
 		case "version":
 			boolVal := true
 			if hasValue && value != "" {

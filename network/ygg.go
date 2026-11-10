@@ -35,6 +35,17 @@ func SetLAN(enabled bool) {
 	lanEnabled = enabled
 }
 
+// directEnabled turns on direct links (see SetDirect).
+var directEnabled = true
+
+// SetDirect enables or disables direct links for transports set up
+// afterwards: a call to a peer that has them on too goes straight between
+// the two machines, through their NATs, instead of through public Yggdrasil
+// peers. Each side then sees the other's public IP address.
+func SetDirect(enabled bool) {
+	directEnabled = enabled
+}
+
 func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	t := &yggTransport{
 		readyCh:   make(chan struct{}),
@@ -43,18 +54,19 @@ func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 
 	log.Printf("[net] loading")
 	ygg.SetVerbose(verbose)
-	// One peer, the fastest: a node with a single link is a leaf of the
-	// Yggdrasil network, so no one else's traffic is routed through it (with
-	// dozens of fast peers it was a good transit router). The library keeps
-	// the ranked backups and switches to one within seconds if the peer is
-	// lost.
-	ygg.SetMaxPeers(1)
+	// Three peers, the fastest: enough for the route to go around a loaded
+	// or distant relay (with a single peer every call went through it, and
+	// one bad relay made a bad call), few enough that the node is not a
+	// popular transit router (with dozens of fast peers it was). The library
+	// keeps the ranked backups and replaces lost peers within seconds.
+	ygg.SetMaxPeers(3)
 	// LAN discovery: peers in the same local network (or on the same machine)
 	// find each other by multicast and connect directly instead of through
 	// public peers on the internet, which cuts latency and jitter. The
 	// password limits it to Say nodes: another Yggdrasil node nearby (the
 	// system's own, say) would otherwise peer too and route through us.
 	ygg.SetLAN(lanEnabled, lanPassword)
+	ygg.SetDirect(directEnabled)
 	ygg.SetConnectivityHandler(func(connected bool) {
 		if connected {
 			t.readyOnce.Do(func() {
@@ -153,6 +165,10 @@ func logNetstackDrops(st *stack.Stack, stop <-chan struct{}) {
 
 func (t *yggTransport) DialTCP(host string, port int) (net.Conn, error) {
 	return ygg.DialTCP(host, port)
+}
+
+func (t *yggTransport) StartDirect(host string) func() {
+	return ygg.StartDirect(host)
 }
 
 func (t *yggTransport) Close() error {

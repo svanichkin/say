@@ -21,12 +21,14 @@ func init() {
 	playbackEnabled.Store(true)
 }
 
-// CaptureEnabled reports whether local microphone/camera capture is active.
+// CaptureEnabled reports whether the local microphone is on. The camera is
+// not muted: a click on the self view silences the sound only.
 func CaptureEnabled() bool {
 	return captureEnabled.Load()
 }
 
-// PlaybackEnabled reports whether remote audio/video playback is active.
+// PlaybackEnabled reports whether the peer's sound is played. Its video is
+// not affected: a click on the peer view silences the sound only.
 func PlaybackEnabled() bool {
 	return playbackEnabled.Load()
 }

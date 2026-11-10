@@ -41,6 +41,10 @@ type Transport interface {
 	// IsLocalPeer reports whether host is reachable over the local network
 	// (directly peered by LAN discovery, or a loopback/private address).
 	IsLocalPeer(host string) bool
+	// StartDirect tries to link to the peer at host directly, through the
+	// NATs, and keeps the link until stop is called. A no-op where the
+	// transport has no such thing or it is off.
+	StartDirect(host string) (stop func())
 	Close() error
 }
 

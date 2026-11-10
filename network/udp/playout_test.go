@@ -300,8 +300,9 @@ func TestPlayoutReordersPacketsBeforeTheirSlotIsDue(t *testing.T) {
 	}
 }
 
-// Packets with 0-80 ms of jitter: the lead grows until none arrives late any
-// more, and returns to the start once the path is clean again.
+// Packets with 0-80 ms of jitter: nothing that arrives is lost (late
+// packets are played, stretching the playback), the lead grows while the
+// path jitters and returns to the start once it is clean again.
 func TestPlayoutLeadAdaptsToJitter(t *testing.T) {
 	// The buffers of a call (10 ms speaker periods, 40 ms lead); the
 	// package defaults are restored afterwards for the other tests.
@@ -312,7 +313,7 @@ func TestPlayoutLeadAdaptsToJitter(t *testing.T) {
 	q := device.NewPlaybackQueue(audioBufferMaxFrames)
 	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
 	rng := rand.New(rand.NewSource(11))
-	const jitterSteps, cleanSteps = 750, 4000 // 15 s of jitter, 80 s clean (20 ms steps)
+	const jitterSteps, cleanSteps = 750, 2000 // 15 s of jitter, 40 s clean (20 ms steps)
 	arrivals := map[int][]uint16{}
 	for i := 0; i < jitterSteps+cleanSteps; i++ {
 		delay := 0
@@ -322,29 +323,160 @@ func TestPlayoutLeadAdaptsToJitter(t *testing.T) {
 		arrivals[i+delay] = append(arrivals[i+delay], uint16(i*audioFrameTicks)&mediaIndexMask)
 	}
 	now := time.Now()
-	lateFirst, lateLast := 0, 0
 	maxLead := p.lead
+	played, underrun := 0, 0
 	for step := 0; step < jitterSteps+cleanSteps; step++ {
 		for _, idx := range arrivals[step] {
 			p.onPacket(idx, []byte{byte(idx / audioFrameTicks), 0}, now)
 		}
 		p.onTickAt(now)
-		q.TakeFrame()
-		if step == jitterSteps/3 {
-			lateFirst = int(p.lateEvents)
-		}
-		if step == jitterSteps {
-			lateLast = int(p.lateEvents)
+		// The speaker takes 20 ms of audio per step, whatever the frames.
+		for need := frame; need > 0; {
+			f, ok := q.TakeFrame()
+			if !ok {
+				if step > 10 {
+					underrun++
+				}
+				break
+			}
+			if f.Samples[0] >= 1000 {
+				played++
+			}
+			need -= len(f.Samples)
 		}
 		maxLead = max(maxLead, p.lead)
 		now = now.Add(20 * time.Millisecond)
 	}
-	if lateFirst == 0 || lateLast-lateFirst > lateFirst/2 {
-		t.Fatalf("late packets: %d in the first 5 s, %d in the 10 s after: the lead did not adapt", lateFirst, lateLast-lateFirst)
+	sent := jitterSteps + cleanSteps
+	if lost := sent - played; lost > sent/100 {
+		t.Fatalf("%d of %d frames never played (late events %d)", lost, sent, p.lateEvents)
 	}
 	if maxLead*audioFrameMillis < 80 || p.lead != p.baseLead {
 		t.Fatalf("lead peaked at %d ms and ended at %d ms (start %d ms)", maxLead*audioFrameMillis, p.lead*audioFrameMillis, p.baseLead*audioFrameMillis)
 	}
-	t.Logf("late: %d in the first 5 s, %d in the next 10 s; lead peaked at %d ms, back to %d ms on the clean path",
-		lateFirst, lateLast-lateFirst, maxLead*audioFrameMillis, p.lead*audioFrameMillis)
+	if underrun > 0 {
+		t.Fatalf("%d underruns", underrun)
+	}
+	t.Logf("%d of %d frames played, %d late packets (played, not dropped); lead peaked at %d ms, back to %d ms",
+		played, sent, p.lateEvents, maxLead*audioFrameMillis, p.lead*audioFrameMillis)
 }
+
+// A packet that arrives after its slot was concealed is still played: its
+// audio follows the concealment, the playback clock holding meanwhile.
+func TestLatePacketIsPlayedNotDropped(t *testing.T) {
+	const frame = 160
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	now := time.Now()
+	for i := 0; i < 8; i++ {
+		p.onPacket(uint16(i*audioFrameTicks), []byte{byte(i), 0}, now)
+	}
+	late := p.nextIndex
+	p.conceal() // the slot's turn came without its packet
+	lead := p.lead
+	p.onPacket(late, []byte{77, 0}, now)
+	if p.lead != lead+1 || p.lateEvents != 1 {
+		t.Fatalf("lead %d (was %d), late %d", p.lead, lead, p.lateEvents)
+	}
+	var got []int16
+	var last device.PlaybackFrame
+	for {
+		f, ok := q.TakeFrame()
+		if !ok {
+			break
+		}
+		got = append(got, f.Samples[0])
+		last = f
+	}
+	if len(got) < 2 || got[len(got)-1] != 1000+77 || got[len(got)-2] != -1 {
+		t.Fatalf("queue ends %v: want the concealment, then the late packet's audio", got)
+	}
+	if last.MediaIndex != p.nextIndex || last.MediaSamples > 1 {
+		t.Fatalf("late audio at index %d (%d media samples): the clock must hold at %d", last.MediaIndex, last.MediaSamples, p.nextIndex)
+	}
+}
+
+// Audio that piled up before the speaker started (or in a short stall) is
+// drained: pauses are skipped, speech plays a little faster, nothing is
+// dropped, and the queue comes back to its target.
+func TestPlayoutDrainsABacklogBelowTheTrim(t *testing.T) {
+	period, periods, lead := audioSpeakerPeriodMs, audioSpeakerPeriods, audioBufferLeadFrames*audioFrameMillis
+	ResetAudioSettings()
+	defer func() { SetSpeakerBuffer(period, periods); SetJitterLead(lead) }()
+	for _, tc := range []struct {
+		name  string
+		quiet bool
+		limit time.Duration
+	}{{"pauses", true, 3 * time.Second}, {"speech", false, 40 * time.Second}} {
+		t.Run(tc.name, func(t *testing.T) {
+			const frame = 160
+			q := device.NewPlaybackQueue(audioBufferMaxFrames)
+			dec := fakeDecoder{frame: frame}
+			p := newAudioPlayout(dec, frame, q)
+			if tc.quiet {
+				p = newAudioPlayout(quietDecoder{frame}, frame, q)
+			}
+			now := time.Now()
+			idx := 0
+			send := func() {
+				p.onPacket(uint16(idx*audioFrameTicks)&mediaIndexMask, []byte{byte(idx), 0}, now)
+				idx++
+			}
+			// 600 ms arrive while the speaker is not taking anything yet.
+			for i := 0; i < 30; i++ {
+				send()
+				p.onTickAt(now)
+				now = now.Add(20 * time.Millisecond)
+			}
+			target := max(p.lead*frame, p.lowWater+frame)
+			start := q.QueuedSamples()
+			if start < target+10*frame {
+				t.Fatalf("no backlog to drain: %d samples queued, target %d", start, target)
+			}
+			// Then real time: a frame arrives every 20 ms and the speaker
+			// plays 20 ms of samples (what it took beyond that counts
+			// towards the next step: frames come shortened or whole).
+			var took time.Duration
+			need := 0
+			next := int16(-1) // speech: every frame plays, in order
+			for step := 0; step < 3000; step++ {
+				send()
+				p.onTickAt(now)
+				for need += frame; need > 0; {
+					f, ok := q.TakeFrame()
+					if !ok {
+						t.Fatalf("underrun at step %d", step)
+					}
+					need -= len(f.Samples)
+					if !tc.quiet {
+						if v := f.Samples[0]; next >= 0 && v != next {
+							t.Fatalf("played frame %d after %d: speech was dropped", v-1000, next-1001)
+						}
+						next = 1000 + (f.Samples[0]-1000+1)%256
+					}
+				}
+				now = now.Add(20 * time.Millisecond)
+				if took == 0 && q.QueuedSamples() <= target+frame {
+					took = time.Duration(step+1) * 20 * time.Millisecond
+				}
+			}
+			if took == 0 || took > tc.limit {
+				t.Fatalf("backlog of %d ms drained in %v (limit %v); %d samples queued at the end, target %d",
+					(start-target)/8, took, tc.limit, q.QueuedSamples(), target)
+			}
+			t.Logf("backlog of %d ms drained in %v", (start-target)/8, took)
+		})
+	}
+}
+
+// quietDecoder decodes every frame to near-silence (pauses between words).
+type quietDecoder struct{ frame int }
+
+func (d quietDecoder) DecodeFrame(p []byte, dst []int16) (int, error) {
+	for i := range dst[:d.frame] {
+		dst[i] = 1
+	}
+	return d.frame, nil
+}
+func (d quietDecoder) Conceal(dst []int16) (int, error) { return d.DecodeFrame(nil, dst) }
+func (quietDecoder) IsDTXFrame([]byte) bool             { return false }

@@ -78,6 +78,9 @@ func detectPlainLocalAddr() string {
 	return fallbackV6
 }
 
+// StartDirect does nothing: plain transport connects directly anyway.
+func (t *plainTransport) StartDirect(string) func() { return func() {} }
+
 func (t *plainTransport) IsLocalPeer(host string) bool {
 	return isLocalIP(net.ParseIP(strings.Trim(host, "[]")))
 }

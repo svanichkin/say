@@ -49,14 +49,19 @@ type audioPlayout struct {
 
 	// Jitter buffer lead in frames: the profile or -audio value at the
 	// start (baseLead), raised by late packets (see onLate).
-	lead       int
-	baseLead   int
-	lastLate   time.Time
-	lastShrink time.Time
-	level      float64 // smoothed PCM queue occupancy for clock drift correction
-	missed     [audioBufferMaxFrames]missedSlot
-	missedHead int
-	lateEvents int64 // packets that arrived after their slot was concealed
+	lead     int
+	baseLead int
+	catchUp  int // samples of extra audio still to drain after the lead came down
+	// backlogMin and backlogFrames: the lowest queue level in the current
+	// window and the frames seen in it (see audioCatchUpWindowFrames).
+	backlogMin    int
+	backlogFrames int
+	lastLate      time.Time
+	lastShrink    time.Time
+	level         float64 // smoothed PCM queue occupancy for clock drift correction
+	missed        [audioBufferMaxFrames]missedSlot
+	missedHead    int
+	lateEvents    int64 // packets that arrived after their slot was concealed
 
 	lowWater     int // samples; conceal below this
 	maxQueued    int
@@ -103,6 +108,8 @@ func (p *audioPlayout) reset() {
 // rebuffer stops feeding the speaker until the jitter buffer is primed again.
 func (p *audioPlayout) rebuffer() {
 	p.level = 0
+	p.catchUp = 0
+	p.backlogFrames = 0
 	p.missed = [audioBufferMaxFrames]missedSlot{}
 	p.ready = false
 	p.pre, p.preSample = p.pre[:0], 0
@@ -135,7 +142,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 			// duplicate must not.
 			if p.takeMissed(index) {
 				p.lateEvents++
-				p.onLate(now)
+				p.onLate(now, index, payload)
 			}
 			return
 		}
@@ -178,47 +185,86 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 	p.pump(now)
 }
 
-// Adaptive jitter buffer. The lead starts small (the profile's), so a good
-// path has little delay; a packet that arrives after its slot was concealed
-// raises it by a frame at once, up to audioLeadAdaptMaxFrames, and a path
-// without late packets for audioLeadShrinkAfter lowers it a frame at a time,
-// back to the start.
+// Adaptive jitter buffer, as players like WebRTC's NetEq do it: nothing
+// that arrives is thrown away, the playback time stretches instead. The lead
+// starts small (the profile's), so a good path has little delay. A packet
+// that arrives after its slot was concealed is played right after that
+// concealment (speech stretched by a frame, not lost) and raises the lead
+// by a frame, up to audioLeadAdaptMaxFrames. After audioLeadShrinkAfter
+// without late packets the lead comes down a frame per audioLeadShrinkEvery,
+// and push drains the extra audio by skipping quiet frames (pauses between
+// words) and playing speech slightly faster, never by dropping speech.
 const (
-	audioLeadAdaptMaxFrames = 10 // 200 ms
-	audioLeadShrinkAfter    = 10 * time.Second
+	// audioLeadAdaptMaxFrames: 600 ms. A path over loaded public relays
+	// delays packets by hundreds of ms at times.
+	audioLeadAdaptMaxFrames = 30
+	audioLeadShrinkAfter    = 5 * time.Second
+	audioLeadShrinkEvery    = time.Second
+	// audioCatchUpPermille: how much faster speech plays while the queue is
+	// over its target by a frame or more (25: 2.5%, hardly audible).
+	audioCatchUpPermille = 25
+	// audioCatchUpStartFrames: extra audio in the queue, beyond the target,
+	// that starts the catch-up by itself, wherever it came from: frames that
+	// piled up while the speaker was starting (the system's voice unit opens
+	// seconds into a call), or a stall shorter than the trim threshold. The
+	// clock-drift correction alone takes minutes over it, and video, which
+	// follows the audio clock, would lag as long.
+	audioCatchUpStartFrames = 2
+	// audioCatchUpWindowFrames: the window (1 s) whose lowest queue level
+	// tells extra audio from the sawtooth of the speaker's periods.
+	audioCatchUpWindowFrames = 50
 )
 
-// onLate raises the lead after a late packet. The extra frame of audio goes
-// into the queue at once (concealment, so speech continues naturally), with
-// almost no media time: the playback clock, which video follows, holds
-// while it plays, and every later packet has a frame more to arrive.
-func (p *audioPlayout) onLate(now time.Time) {
+// onLate handles a packet that arrived after its slot was concealed: the
+// playback clock (which video follows) holds while the extra audio plays.
+func (p *audioPlayout) onLate(now time.Time, index uint16, payload []byte) {
 	p.lastLate = now
-	if !p.ready || p.lead >= max(p.baseLead, audioLeadAdaptMaxFrames) {
+	if !p.ready {
 		return
 	}
-	p.lead++
-	written, err := p.dec.Conceal(p.scratch)
-	if err != nil || written <= 0 {
-		clear(p.scratch)
-		written = p.frameSamples
+	grow := p.lead < max(p.baseLead, audioLeadAdaptMaxFrames)
+	if grow {
+		p.lead++
 	}
-	samples := make([]int16, p.frameSamples)
-	copy(samples, p.scratch[:min(written, p.frameSamples)])
+	var samples []int16
+	if d := mediaIndexDelta(p.nextIndex, index); d >= audioFrameTicks/2 && d <= audioFrameTicks+audioFrameTicks/2 {
+		// Its slot was the last one queued: its audio follows the
+		// concealment that stood in for it.
+		if written, err := p.dec.DecodeFrame(payload, p.scratch); err == nil && written > 0 {
+			samples = make([]int16, p.frameSamples)
+			copy(samples, p.scratch[:min(written, p.frameSamples)])
+		}
+	}
+	if samples == nil {
+		// Newer audio is queued already: the packet's audio has no place
+		// in order. Only raise the lead (with concealment), if it can.
+		if !grow {
+			return
+		}
+		written, err := p.dec.Conceal(p.scratch)
+		if err != nil || written <= 0 {
+			clear(p.scratch)
+			written = p.frameSamples
+		}
+		samples = make([]int16, p.frameSamples)
+		copy(samples, p.scratch[:min(written, p.frameSamples)])
+	}
 	p.out.Push(device.PlaybackFrame{Samples: samples, MediaIndex: p.nextIndex, MediaSamples: 1, Discontinuous: true})
 	p.level = 0 // the drift correction starts over at the new level
 	logs.LogV("[voice/udp] late packet: jitter buffer %d ms", p.lead*audioFrameMillis)
 }
 
-// shrinkLead lowers a raised lead after a while without late packets. The
-// drift correction then drains the queue towards the lower target.
+// shrinkLead lowers a raised lead once the path has been calm for a while.
 func (p *audioPlayout) shrinkLead(now time.Time) {
-	if p.lead <= p.baseLead || now.Sub(p.lastLate) < audioLeadShrinkAfter || now.Sub(p.lastShrink) < audioLeadShrinkAfter {
+	if p.lead <= p.baseLead || now.Sub(p.lastLate) < audioLeadShrinkAfter || now.Sub(p.lastShrink) < audioLeadShrinkEvery {
 		return
 	}
 	p.lead--
 	p.lastShrink = now
-	logs.LogV("[voice/udp] no late packets: jitter buffer %d ms", p.lead*audioFrameMillis)
+	p.catchUp += p.frameSamples
+	if p.lead == p.baseLead {
+		logs.LogV("[voice/udp] no late packets: jitter buffer back to %d ms", p.lead*audioFrameMillis)
+	}
 }
 
 // insert adds a packet to the reorder buffer, keeping it sorted by index.
@@ -344,22 +390,60 @@ func (p *audioPlayout) push(pcm []int16) {
 	copy(samples, pcm)
 	index := p.nextIndex
 	p.nextIndex = advanceMediaIndex(p.nextIndex, audioFrameTicks)
+	if p.ready && p.catchUp == 0 {
+		// The queue's low point over a window: the speaker takes whole
+		// periods (up to 80 ms at once), so the queue saws by a period, and
+		// only what stays queued through the dips is extra.
+		level := p.out.QueuedSamples() + len(samples)
+		if p.backlogFrames == 0 || level < p.backlogMin {
+			p.backlogMin = level
+		}
+		p.backlogFrames++
+		if p.backlogFrames >= audioCatchUpWindowFrames {
+			target := max(p.lead*p.frameSamples, p.lowWater+p.frameSamples)
+			if excess := p.backlogMin - target; excess >= audioCatchUpStartFrames*p.frameSamples {
+				p.catchUp = excess
+			}
+			p.backlogFrames = 0
+		}
+	}
+	if p.ready && p.catchUp > 0 {
+		// The lead came down: drain the extra audio, but only what is
+		// really queued over the new target. A pause is skipped, speech
+		// plays a little faster; nothing is dropped.
+		target := max(p.lead*p.frameSamples, p.lowWater+p.frameSamples)
+		excess := min(p.catchUp, p.out.QueuedSamples()+len(samples)-target)
+		if excess <= 0 {
+			p.catchUp = 0
+		} else {
+			p.level = 0
+			if excess >= len(samples) && isQuiet(samples) {
+				p.catchUp -= len(samples)
+				return
+			}
+			cut := min(excess, max(1, len(samples)*audioCatchUpPermille/1000))
+			p.catchUp -= cut
+			samples = resizePCM(samples, len(samples)-cut)
+			p.out.Push(device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples})
+			return
+		}
+	}
 	if p.ready {
+		q := p.out.QueuedSamples()
+		target := max(p.lead*p.frameSamples, p.lowWater+p.frameSamples)
 		// Average the device-period sawtooth over several seconds. A tiny
 		// continuous rate correction compensates independent audio clocks.
-		q := p.out.QueuedSamples()
 		delta := 0
 		level := float64(q + len(samples))
 		if p.level == 0 {
 			p.level = level
 		}
 		p.level += (level - p.level) / 200
-		target := float64(max(p.lead*p.frameSamples, p.lowWater+p.frameSamples))
 		band := float64(p.frameSamples) / 2
-		if p.level > target+band && q > p.lowWater {
+		if p.level > float64(target)+band && q > p.lowWater {
 			delta = -1
 		}
-		if p.level < target-band {
+		if p.level < float64(target)-band {
 			delta = 1
 		}
 		if delta != 0 {

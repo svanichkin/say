@@ -1149,11 +1149,12 @@ func renderChatScreen(cols, rows int) string {
 	if latencyLabel != "" {
 		remoteCaption += " " + latencyLabel
 	}
+	// A click mutes the sound only (mediactrl); the video goes on.
 	if !mediactrl.CaptureEnabled() {
-		localCaption = "MUTED"
+		localCaption = "MUTED " + localCaption
 	}
 	if !mediactrl.PlaybackEnabled() {
-		remoteCaption = "PAUSED"
+		remoteCaption = "MUTED " + remoteCaption
 	}
 	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
 	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption)
