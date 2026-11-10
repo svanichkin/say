@@ -917,27 +917,13 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				if netAudioIn == nil {
 					continue
 				}
-				// Preserve the media index for the audio decoder; buf is reused on next ReadFrom.
-				pkt := make([]byte, mediaIndexBytes+len(payload))
-				pkt[0], pkt[1] = byte(index>>8), byte(index)
-				copy(pkt[mediaIndexBytes:], payload)
-				select {
-				case netAudioIn <- pkt:
-				default:
-					// Drop oldest audio packet if the queue is full to avoid blocking receiver.
-					// Non-blocking drain one element if possible, then try again.
-					select {
-					case <-netAudioIn:
-						logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped oldest)")
-					default:
-						logs.LogV("[voice/udp] drop rx audio frame (queue full, could not drain oldest)")
-					}
-					select {
-					case netAudioIn <- pkt:
-					default:
-						// If we still can't enqueue, drop the new packet as well.
-						logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped newest)")
-					}
+				frames, err := splitAudioBundle(payload)
+				if err != nil {
+					logs.LogV("[voice/udp] %v (%d bytes)", err, len(payload))
+					continue
+				}
+				for k, frame := range frames {
+					queueAudioFrame(netAudioIn, advanceMediaIndex(index, int32(k)*audioFrameTicks), frame)
 				}
 
 			case mediaKindVideo:
@@ -971,6 +957,30 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 			}
 		}
 	}()
+}
+
+// queueAudioFrame hands one received speech frame, with its media index, to
+// the audio decoder (copied: the receive buffer is reused). A full queue
+// drops its oldest frame rather than block the receiver.
+func queueAudioFrame(netAudioIn chan []byte, index uint16, frame []byte) {
+	pkt := make([]byte, mediaIndexBytes+len(frame))
+	pkt[0], pkt[1] = byte(index>>8), byte(index)
+	copy(pkt[mediaIndexBytes:], frame)
+	select {
+	case netAudioIn <- pkt:
+		return
+	default:
+	}
+	select {
+	case <-netAudioIn:
+		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped oldest)")
+	default:
+	}
+	select {
+	case netAudioIn <- pkt:
+	default:
+		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped newest)")
+	}
 }
 
 // audioPacketsExpected returns how many packets the sender transmitted in a

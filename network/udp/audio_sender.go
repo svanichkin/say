@@ -48,10 +48,43 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		defer tick.Stop()
 		last := time.Now()
 		var bytes, count uint64
+		// Consecutive frames share a datagram (see audioBundler).
+		var bundle audioBundler
+		var addr *net.UDPAddr
+		send := func(data []byte) bool {
+			if data == nil || addr == nil {
+				return true
+			}
+			n, err := pc.WriteTo(data, addr)
+			if err != nil {
+				if !isFatalSendError(err) {
+					sendErrLog.report("voice", err)
+					return true
+				}
+				log.Printf("[voice/udp] write error: %v", err)
+				if stop != nil {
+					stop()
+				}
+				return false
+			}
+			count++
+			if n > mediaHeaderBytes {
+				bytes += uint64(n - mediaHeaderBytes)
+			}
+			return true
+		}
 		for {
+			var flushC <-chan time.Time
+			if dl := bundle.pendingDeadline(); !dl.IsZero() {
+				flushC = time.After(time.Until(dl))
+			}
 			select {
 			case <-stopCh:
 				return
+			case <-flushC:
+				if !send(bundle.due(time.Now())) {
+					return
+				}
 			case <-tick.C:
 				rate := float64(bytes) / 1024 / time.Since(last).Seconds()
 				logs.LogV("[voice/udp] tx: %d pkts, %.2f kB/s, %d stale/full-queue drops", count, rate, dropped.Swap(0))
@@ -59,6 +92,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				bytes, count, last = 0, 0, time.Now()
 			case pkt, ok := <-packets:
 				if !ok {
+					send(bundle.take()) // the frames still waiting for a partner
 					return
 				}
 				if time.Since(pkt.queuedAt) > audioSendMaxAge {
@@ -70,21 +104,15 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					return
 				default:
 				}
-				n, err := pc.WriteTo(pkt.data, pkt.addr)
-				if err != nil {
-					if !isFatalSendError(err) {
-						sendErrLog.report("voice", err)
-						continue
-					}
-					log.Printf("[voice/udp] write error: %v", err)
-					if stop != nil {
-						stop()
-					}
-					return
+				_, index, ok := decodeMediaHeader(pkt.data)
+				if !ok {
+					continue
 				}
-				count++
-				if n > mediaHeaderBytes {
-					bytes += uint64(n - mediaHeaderBytes)
+				addr = pkt.addr
+				for _, data := range bundle.add(index, pkt.data[mediaHeaderBytes:], time.Now()) {
+					if !send(data) {
+						return
+					}
 				}
 			}
 		}

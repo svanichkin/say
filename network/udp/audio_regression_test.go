@@ -108,6 +108,24 @@ func (e senderTestEncoder) EncodeFrame(p []int16, out []byte) (int, error) {
 }
 func testPeer() *net.UDPAddr { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234} }
 
+// frameIndexes returns the media index of every frame of a voice datagram.
+func frameIndexes(t *testing.T, packet []byte) []uint16 {
+	t.Helper()
+	_, first, ok := decodeMediaHeader(packet)
+	if !ok {
+		t.Fatalf("bad media header")
+	}
+	frames, err := splitAudioBundle(packet[mediaHeaderBytes:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]uint16, len(frames))
+	for k := range frames {
+		out[k] = advanceMediaIndex(first, int32(k)*audioFrameTicks)
+	}
+	return out
+}
+
 func TestSenderPreservesCaptureGapAndIgnoresCallbackJitter(t *testing.T) {
 	for _, gap := range []bool{false, true} {
 		t.Run(fmt.Sprint(gap), func(t *testing.T) {
@@ -135,15 +153,16 @@ func TestSenderPreservesCaptureGapAndIgnoresCallbackJitter(t *testing.T) {
 			close(conn.packets)
 			i := 0
 			for packet := range conn.packets {
-				_, index, _ := decodeMediaHeader(packet)
-				want := i * 5
-				if gap && i >= 2 {
-					want += 5
+				for _, index := range frameIndexes(t, packet) {
+					want := i * 5
+					if gap && i >= 2 {
+						want += 5
+					}
+					if int(index) != want {
+						t.Fatalf("frame %d index %d, want %d", i, index, want)
+					}
+					i++
 				}
-				if int(index) != want {
-					t.Fatalf("frame %d index %d, want %d", i, index, want)
-				}
-				i++
 			}
 			if i != 4 {
 				t.Fatalf("sent %d frames", i)
@@ -184,8 +203,7 @@ func TestBlockedTransportDoesNotBlockCaptureProcessing(t *testing.T) {
 	close(conn.packets)
 	var indexes []uint16
 	for packet := range conn.packets {
-		_, index, _ := decodeMediaHeader(packet)
-		indexes = append(indexes, index)
+		indexes = append(indexes, frameIndexes(t, packet)...)
 	}
 	// The final EncodeFrame notification can precede its enqueue, so one
 	// additional packet may enter after the writer is released.
