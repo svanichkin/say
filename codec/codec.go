@@ -549,6 +549,8 @@ type Encoder struct {
 	paletteMissed    []int32
 	palettePatch     []byte
 
+	skipEmpty bool // SetSkipEmpty
+
 	// Range-coded change frames (SetRangeCoding).
 	rangeCoding bool
 	rc          rcModel
@@ -993,6 +995,11 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 			if len(patch) > 0 {
 				frameType = frameTypeDeltaPatch
 			}
+		}
+		if e.skipEmpty && frameType == frameTypeDelta && len(changedGlyphs) == 0 {
+			// Nothing changed: nothing to send. Returned before any state the
+			// receiver follows (the range coder's models above all) moves.
+			return nil, nil
 		}
 	}
 	if keyframe == 1 {
@@ -2193,6 +2200,13 @@ func (e *Encoder) SetBW(on bool) {
 	e.lastPalette = e.lastPalette[:0]
 	e.lastPaletteExpanded = e.lastPaletteExpanded[:0]
 	e.prevCells = 0
+}
+
+// SetSkipEmpty makes Encode return a nil payload instead of a change frame
+// in which no cell changed: nothing to send. The caller still sends one now
+// and then, so the receiver knows the stream is alive.
+func (e *Encoder) SetSkipEmpty(on bool) {
+	e.skipEmpty = on
 }
 
 // SetRangeCoding sends change frames range coded (frameTypeDeltaRC) instead

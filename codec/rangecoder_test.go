@@ -304,3 +304,42 @@ func TestForceKeyframe(t *testing.T) {
 		}
 	}
 }
+
+// Unchanged frames are not sent (SetSkipEmpty); the frames that are sent
+// still decode exactly: the range coder's models did not move for the
+// skipped ones. An unchanged frame sent anyway (a heartbeat) decodes too.
+func TestSkipEmptyKeepsTheStreamInSync(t *testing.T) {
+	src := noisyFrames(12, 21)
+	var frames [][]byte
+	for i, f := range src { // every frame twice or three times: repeats are unchanged
+		for k := 0; k < 2+i%2; k++ {
+			frames = append(frames, f)
+		}
+	}
+	enc := NewEncoder(false, 0, 0, false)
+	enc.SetShapeHold(10)
+	enc.SetPalettePatches(true)
+	enc.SetRangeCoding(true)
+	dec := NewDecoder()
+	skipped, sent := 0, 0
+	for f, frame := range frames {
+		enc.SetSkipEmpty(f%7 != 6) // every 7th frame is a heartbeat
+		out, err := enc.Encode(Frame{Data: frame, Width: 352, Height: 288}, 88, 36)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			skipped++
+			continue
+		}
+		sent++
+		if _, err := dec.Decode(out); err != nil {
+			t.Fatalf("frame %d: %v", f, err)
+		}
+		assertSameAsSent(t, enc, dec, f)
+	}
+	if skipped == 0 {
+		t.Fatal("no unchanged frame was skipped")
+	}
+	t.Logf("%d frames: %d sent, %d skipped", len(frames), sent, skipped)
+}

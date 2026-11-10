@@ -592,6 +592,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			ceiling        = videoFPSCeiling()
 			lastLossReport time.Time
 			lastForcedKey  time.Time
+			lastVideoSent  time.Time // the last datagram (see SetSkipEmpty)
+			skippedFrames  int
 			videoSeq       byte
 			// adapted to the peer's video loss: colour first, then hold, then fps
 			// (a peer behind a colour filter gets no colour from the start)
@@ -618,14 +620,15 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 				if frames > 0 {
 					logs.LogV(
-						"[video/prof] fps=%d encodeLocal=%.1fms encodeNet=%.1fms",
-						frames,
+						"[video/prof] fps=%d (unchanged, not sent: %d) encodeLocal=%.1fms encodeNet=%.1fms",
+						frames, skippedFrames,
 						float64(tEncodeLocal/time.Millisecond)/float64(frames),
 						float64(tEncodeNet/time.Millisecond)/float64(frames),
 					)
 				}
 
 				sentFPS := int(frames) // what actually went out in the last second
+				skippedFrames = 0
 				sentPkts, sentBytes = 0, 0
 				frames = 0
 				tEncodeLocal, tEncodeNet = 0, 0
@@ -702,6 +705,10 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					logs.LogV("[video/udp] the peer asked for a keyframe")
 				}
 
+				// Unchanged frames are not sent, but one goes out at least every
+				// videoHeartbeat, so the peer knows the stream is alive.
+				netEncoder.SetSkipEmpty(time.Since(lastVideoSent) < videoHeartbeat)
+
 				// ----- encode -----
 				var dataNet []byte
 				var selfView *codec.TextFrame
@@ -750,11 +757,18 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				}
 
 				// ----- send encoded frame over the network -----
+				if sendNet && errNet == nil && dataNet == nil {
+					// Nothing changed (SetSkipEmpty): no datagram, and the
+					// frame counter does not move, so this is not a loss.
+					skippedFrames++
+					sendNet = false
+				}
 				if sendNet {
 					if err := errNet; err != nil {
 						log.Printf("[video/udp] Encode net: %v", err)
 						continue
 					}
+					lastVideoSent = time.Now()
 
 					if mediaHeaderBytes+videoSeqBytes+len(dataNet) > maxMediaDatagram {
 						// Cannot happen within codec.MaxFrameCells; never send an

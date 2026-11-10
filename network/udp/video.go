@@ -21,6 +21,9 @@ const (
 	videoKeyframeRetry      = 300 * time.Millisecond
 	videoKeyframeRequestGap = 250 * time.Millisecond
 	videoSilenceGap         = time.Second
+	// videoHeartbeat: a frame with no change is sent at least this often
+	// (well under videoSilenceGap), the others are skipped.
+	videoHeartbeat = 200 * time.Millisecond
 )
 
 // videoShapeHold is the mean per-pixel colour difference (sum of three
