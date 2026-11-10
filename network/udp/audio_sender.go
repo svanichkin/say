@@ -28,6 +28,7 @@ type audioDatagram struct {
 func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho,
 	frameSamples int, mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame,
+	voice *voiceMux,
 ) {
 	if !useVoice || enc == nil || audioMicIn == nil {
 		return
@@ -48,8 +49,12 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		defer tick.Stop()
 		last := time.Now()
 		var bytes, count uint64
-		// Consecutive frames share a datagram (see audioBundler).
-		var bundle audioBundler
+		// Consecutive frames share a datagram, or ride in a video datagram
+		// (see audioBundler, voiceMux).
+		bundle := voice
+		if bundle == nil {
+			bundle = &voiceMux{}
+		}
 		var addr *net.UDPAddr
 		send := func(data []byte) bool {
 			if data == nil || addr == nil {

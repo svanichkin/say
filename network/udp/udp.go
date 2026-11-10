@@ -460,7 +460,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 		return nil, fmt.Errorf("media stopped during startup: %w", err)
 	}
 
-	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut,
+	voice := &voiceMux{} // voice frames waiting for a datagram, shared with video
+	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut, voice,
 		videoPeer{
 			palettePatches: peerProto >= videoPalettePatchProtocol,
 			rangeCoding:    peerProto >= videoRangeCodingProtocol,
@@ -540,13 +541,13 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr, enc audioEncoder, aec *audioEcho, frameSamples int,
 	mediaEpoch time.Time, audioMicIn <-chan device.AudioCaptureFrame, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
-	peer videoPeer,
+	voice *voiceMux, peer videoPeer,
 ) {
 	if useVoice {
-		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn)
+		startAudioSender(wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, voice)
 	}
 	if useVideo {
-		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut, peer)
+		startVideoSender(wg, pc, stop, stopCh, getPeer, mediaEpoch, videoCamIn, videoSelfScreenOut, videoPeerScreenOut, voice, peer)
 	}
 }
 
@@ -555,7 +556,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr,
 	mediaEpoch time.Time, videoCamIn <-chan device.CameraFrame,
 	videoSelfScreenOut chan *codec.TextFrame, videoPeerScreenOut chan *codec.TextFrame,
-	peer videoPeer,
+	voice *voiceMux, peer videoPeer,
 ) {
 	_ = videoPeerScreenOut
 
@@ -770,7 +771,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					}
 					lastVideoSent = time.Now()
 
-					if mediaHeaderBytes+videoSeqBytes+len(dataNet) > maxMediaDatagram {
+					if mediaHeaderBytes+videoSeqBytes+videoFlagsBytes+len(dataNet) > maxMediaDatagram {
 						// Cannot happen within codec.MaxFrameCells; never send an
 						// oversized datagram that the network would drop or fragment.
 						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", mediaHeaderBytes+len(dataNet), maxMediaDatagram)
@@ -781,11 +782,13 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						continue
 					}
 					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
-					out := make([]byte, mediaHeaderBytes+videoSeqBytes+len(dataNet))
-					copy(out[:mediaHeaderBytes], header[:])
-					out[mediaHeaderBytes] = videoSeq // frame counter for the peer's loss estimate
+					// Voice frames waiting for their datagram ride along.
+					voiceFirst, voiceFrames, _ := voice.takeFrames()
+					out := make([]byte, 0, mediaHeaderBytes+videoSeqBytes+videoFlagsBytes+len(dataNet)+64)
+					out = append(out, header[:]...)
+					out = appendVideoHead(out, videoSeq, voiceFirst, voiceFrames) // frame counter for the peer's loss estimate
 					videoSeq++
-					copy(out[mediaHeaderBytes+videoSeqBytes:], dataNet)
+					out = append(out, dataNet...)
 
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
@@ -930,13 +933,28 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 				lastRxVideo, haveRxVideo = index, true
 				rxVideoPkts++
 				rxVideoBytes += uint64(len(payload))
+				seq, voiceFirst, voiceFrames, video, err := splitVideoHead(payload)
+				if err != nil {
+					logs.LogV("[video/udp] %v (%d bytes)", err, len(payload))
+					continue
+				}
+				if len(voiceFrames) > 0 {
+					lastRxAudio, haveRxAudio = advanceMediaIndex(voiceFirst, int32(len(voiceFrames)-1)*audioFrameTicks), true
+					for k, frame := range voiceFrames {
+						rxAudioBytes += uint64(len(frame))
+						if netAudioIn != nil {
+							queueAudioFrame(netAudioIn, advanceMediaIndex(voiceFirst, int32(k)*audioFrameTicks), frame)
+						}
+					}
+				}
 				if netVideoIn == nil {
 					continue
 				}
-				// Preserve the media index for the video scheduler; buf is reused on next ReadFrom.
-				pkt := make([]byte, mediaIndexBytes+len(payload))
-				pkt[0], pkt[1] = byte(index>>8), byte(index)
-				copy(pkt[mediaIndexBytes:], payload)
+				// The video scheduler gets media index, frame counter, frame;
+				// buf is reused on the next ReadFrom.
+				pkt := make([]byte, mediaIndexBytes+videoSeqBytes+len(video))
+				pkt[0], pkt[1], pkt[2] = byte(index>>8), byte(index), seq
+				copy(pkt[mediaIndexBytes+videoSeqBytes:], video)
 				select {
 				case netVideoIn <- pkt:
 				default:

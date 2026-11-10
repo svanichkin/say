@@ -3,6 +3,8 @@ package udp
 import (
 	"bytes"
 	"math/rand"
+	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,23 +48,28 @@ func TestAudioBundlerPairsConsecutiveFrames(t *testing.T) {
 	var b audioBundler
 	now := time.Now()
 	frame := func(i int) []byte { return []byte{byte(i)} }
+	at := func(i int) time.Time { return now.Add(time.Duration(i*audioFrameMillis) * time.Millisecond) }
 	var sent [][]byte
-	for i := 0; i < 4; i++ { // 4 consecutive frames: 2 datagrams
-		sent = append(sent, b.add(uint16(i*audioFrameTicks), frame(i), now)...)
+	for i := 0; i < 4; i++ { // consecutive frames, each when it is captured
+		if d := b.due(at(i)); d != nil {
+			sent = append(sent, d)
+		}
+		sent = append(sent, b.add(uint16(i*audioFrameTicks), frame(i), at(i))...)
 	}
-	if len(sent) != 2 {
-		t.Fatalf("%d datagrams for 4 frames", len(sent))
+	sent = append(sent, b.due(at(3).Add(audioBundleWait))) // the second bundle's deadline
+	if len(sent) != 2 || sent[1] == nil {
+		t.Fatalf("%d datagrams for 4 frames, want 2", len(sent))
 	}
-	_, first, _ := decodeMediaHeader(sent[1])
-	if first != 2*audioFrameTicks {
-		t.Fatalf("second datagram starts at %d", first)
+	for k, d := range sent {
+		_, first, _ := decodeMediaHeader(d)
+		frames, _ := splitAudioBundle(d[mediaHeaderBytes:])
+		if first != uint16(2*k*audioFrameTicks) || len(frames) != 2 {
+			t.Fatalf("datagram %d: first %d, %d frames", k, first, len(frames))
+		}
 	}
 	// A gap (DTX) sends what is pending at once.
-	sent = b.add(10*audioFrameTicks, frame(10), now)
-	if len(sent) != 0 || b.due(now) != nil {
-		t.Fatal("a single frame went out before its wait")
-	}
-	sent = b.add(20*audioFrameTicks, frame(20), now)
+	b.add(10*audioFrameTicks, frame(10), at(10))
+	sent = b.add(20*audioFrameTicks, frame(20), at(20))
 	if len(sent) != 1 {
 		t.Fatalf("gap: %d datagrams, want the pending one", len(sent))
 	}
@@ -71,11 +78,19 @@ func TestAudioBundlerPairsConsecutiveFrames(t *testing.T) {
 		t.Fatalf("gap flushed %v", frames)
 	}
 	// A lone frame (DTX update) waits at most audioBundleWait.
-	if b.due(now.Add(audioBundleWait-time.Millisecond)) != nil {
+	if b.due(at(20).Add(audioBundleWait-time.Millisecond)) != nil {
 		t.Fatal("lone frame sent early")
 	}
-	if b.due(now.Add(audioBundleWait)) == nil {
+	if b.due(at(20).Add(audioBundleWait)) == nil {
 		t.Fatal("lone frame held past its wait")
+	}
+	// A video datagram takes the waiting frames: nothing is left to send.
+	b.add(30*audioFrameTicks, frame(30), at(30))
+	if first, frames, ok := b.takeFrames(); !ok || first != 30*audioFrameTicks || len(frames) != 1 {
+		t.Fatalf("takeFrames: %d %v %v", first, frames, ok)
+	}
+	if b.due(at(40)) != nil {
+		t.Fatal("frames taken by video were sent again")
 	}
 }
 
@@ -122,5 +137,106 @@ func TestPlayoutWithBundledFrames(t *testing.T) {
 		if !found {
 			t.Fatalf("frame %d never played: %v", k-1000, played)
 		}
+	}
+}
+
+func TestVideoHeadRoundTrip(t *testing.T) {
+	video := []byte("TEXT\x04video payload")
+	for _, voice := range [][][]byte{nil, {{1, 2, 3}}, {{4}, {5, 6}}} {
+		p := appendVideoHead(nil, 77, 0x1234, voice)
+		p = append(p, video...)
+		seq, first, gotVoice, gotVideo, err := splitVideoHead(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seq != 77 || !bytes.Equal(gotVideo, video) || len(gotVoice) != len(voice) {
+			t.Fatalf("seq %d video %q voice %v", seq, gotVideo, gotVoice)
+		}
+		if len(voice) > 0 && first != 0x1234 {
+			t.Fatalf("voice index %#x", first)
+		}
+		for k := range voice {
+			if !bytes.Equal(gotVoice[k], voice[k]) {
+				t.Fatalf("voice frame %d differs", k)
+			}
+		}
+	}
+	rng := rand.New(rand.NewSource(5))
+	for trial := 0; trial < 3000; trial++ {
+		b := make([]byte, rng.Intn(24))
+		rng.Read(b)
+		_, _, _, _, _ = splitVideoHead(b) // no panic
+	}
+	for _, bad := range [][]byte{nil, {1}, {1, 2}, {1, 1}, {1, 1, 0, 0, 9, 1}} {
+		if _, _, _, _, err := splitVideoHead(bad); err == nil {
+			t.Fatalf("% x accepted", bad)
+		}
+	}
+}
+
+// Voice frames riding in a video datagram reach the voice decoder with their
+// media indices; the video decoder gets the frame without them.
+func TestReceiverSplitsVoiceFromVideo(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	audioIn := make(chan []byte, 16)
+	videoIn := make(chan []byte, 16)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var peer *net.UDPAddr
+	var mu sync.Mutex
+	startReceiver(&wg, pc, stop, audioIn, videoIn,
+		func() *net.UDPAddr { mu.Lock(); defer mu.Unlock(); return peer },
+		func(a *net.UDPAddr) { mu.Lock(); peer = a; mu.Unlock() })
+	defer func() { close(stop); pc.Close(); wg.Wait() }()
+	conn, err := net.Dial("udp", pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	header := encodeMediaHeader(mediaKindVideo, 500)
+	dg := append(header[:], appendVideoHead(nil, 9, 300, [][]byte{{0xa1, 0xa2}, {0xb1}})...)
+	dg = append(dg, []byte("frame")...)
+	if _, err := conn.Write(dg); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range []struct {
+		index uint16
+		data  []byte
+	}{{300, []byte{0xa1, 0xa2}}, {300 + audioFrameTicks, []byte{0xb1}}} {
+		select {
+		case pkt := <-audioIn:
+			if got := uint16(pkt[0])<<8 | uint16(pkt[1]); got != want.index || !bytes.Equal(pkt[2:], want.data) {
+				t.Fatalf("voice frame %d: index %d data % x", k, got, pkt[2:])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("voice frame %d not delivered", k)
+		}
+	}
+	select {
+	case pkt := <-videoIn:
+		if got := uint16(pkt[0])<<8 | uint16(pkt[1]); got != 500 || pkt[2] != 9 || string(pkt[3:]) != "frame" {
+			t.Fatalf("video pkt index %d seq %d payload %q", got, pkt[2], pkt[3:])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("video frame not delivered")
+	}
+	// A video datagram without voice delivers video only.
+	dg = append(header[:], appendVideoHead(nil, 10, 0, nil)...)
+	dg = append(dg, []byte("next")...)
+	conn.Write(dg)
+	select {
+	case pkt := <-videoIn:
+		if pkt[2] != 10 || string(pkt[3:]) != "next" {
+			t.Fatalf("plain video pkt seq %d payload %q", pkt[2], pkt[3:])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("plain video frame not delivered")
+	}
+	if len(audioIn) != 0 {
+		t.Fatal("voice out of a datagram that carried none")
 	}
 }

@@ -3,6 +3,7 @@ package udp
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -17,7 +18,9 @@ import (
 //	frames the frames; frame k has media index first + k*audioFrameTicks
 //
 // A sender holds a frame for at most audioBundleWait waiting for the next:
-// in DTX silence frames come alone and go out after that wait.
+// in DTX silence frames come alone and go out after that wait. A video
+// datagram leaving meanwhile takes the waiting frames along (see
+// appendVideoVoice), which saves the voice datagram altogether.
 
 const (
 	// audioBundleFrames is how many frames a bundle holds: 2 is 40 ms of
@@ -85,11 +88,13 @@ type audioBundler struct {
 	deadline time.Time
 }
 
-// add appends a frame with media index index. It returns a finished bundle
-// (header + payload) to send first if the frame does not continue the
-// pending one, and the pending bundle itself once it is full.
+// add appends a frame with media index index. It returns the pending
+// bundle (header + payload) to send first if the frame does not continue it
+// or would make it longer than audioBundleFrames. A full bundle still waits
+// for its deadline: a video datagram may take it along meanwhile.
 func (b *audioBundler) add(index uint16, frame []byte, now time.Time) (flush [][]byte) {
-	if len(b.frames) > 0 && index != advanceMediaIndex(b.first, int32(len(b.frames))*audioFrameTicks) {
+	if len(b.frames) > 0 && (len(b.frames) >= audioBundleFrames ||
+		index != advanceMediaIndex(b.first, int32(len(b.frames))*audioFrameTicks)) {
 		flush = append(flush, b.take())
 	}
 	if len(b.frames) == 0 {
@@ -97,10 +102,114 @@ func (b *audioBundler) add(index uint16, frame []byte, now time.Time) (flush [][
 		b.deadline = now.Add(audioBundleWait)
 	}
 	b.frames = append(b.frames, frame)
-	if len(b.frames) >= audioBundleFrames {
-		flush = append(flush, b.take())
-	}
 	return flush
+}
+
+// takeFrames empties the bundler and returns its frames and the first one's
+// media index (ok false: nothing pending).
+func (b *audioBundler) takeFrames() (first uint16, frames [][]byte, ok bool) {
+	if len(b.frames) == 0 {
+		return 0, nil, false
+	}
+	first, frames = b.first, append([][]byte(nil), b.frames...)
+	b.frames = b.frames[:0]
+	return first, frames, true
+}
+
+// voiceMux is the voice bundler shared by a session's voice sender, which
+// fills it and sends due bundles, and its video sender, which takes the
+// waiting frames along in its datagrams.
+type voiceMux struct {
+	mu sync.Mutex
+	b  audioBundler
+}
+
+func (m *voiceMux) add(index uint16, frame []byte, now time.Time) [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.b.add(index, frame, now)
+}
+
+func (m *voiceMux) due(now time.Time) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.b.due(now)
+}
+
+func (m *voiceMux) take() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.b.take()
+}
+
+func (m *voiceMux) pendingDeadline() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.b.pendingDeadline()
+}
+
+// takeFrames hands the waiting frames to a video datagram.
+func (m *voiceMux) takeFrames() (first uint16, frames [][]byte, ok bool) {
+	if m == nil {
+		return 0, nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.b.takeFrames()
+}
+
+// Video datagrams (protocol 4), after the media header:
+//
+//	seq    1 byte, the frame counter (loss detection)
+//	flags  1 byte; videoFlagVoice: voice frames follow
+//	voice  if videoFlagVoice: the first voice frame's media index (2 bytes,
+//	       big endian), the bundle's length (uvarint), the bundle (as in a
+//	       voice datagram)
+//	video  the rest: the encoded frame
+const (
+	videoFlagsBytes = 1
+	videoFlagVoice  = 1
+)
+
+// appendVideoHead appends a video datagram's seq, flags and voice part.
+func appendVideoHead(dst []byte, seq byte, voiceFirst uint16, voice [][]byte) []byte {
+	if len(voice) == 0 {
+		return append(dst, seq, 0)
+	}
+	dst = append(dst, seq, videoFlagVoice, byte(voiceFirst>>8), byte(voiceFirst))
+	bundle := appendAudioBundle(nil, voice)
+	dst = binary.AppendUvarint(dst, uint64(len(bundle)))
+	return append(dst, bundle...)
+}
+
+var errVideoHead = errors.New("malformed video datagram")
+
+// splitVideoHead parses what follows a video datagram's media header: the
+// frame counter, the voice frames it carries (if any) and the video payload.
+// Everything returned aliases p.
+func splitVideoHead(p []byte) (seq byte, voiceFirst uint16, voice [][]byte, video []byte, err error) {
+	if len(p) < 1+videoFlagsBytes {
+		return 0, 0, nil, nil, errVideoHead
+	}
+	seq, flags, p := p[0], p[1], p[2:]
+	if flags&^videoFlagVoice != 0 {
+		return 0, 0, nil, nil, errVideoHead
+	}
+	if flags&videoFlagVoice != 0 {
+		if len(p) < 2 {
+			return 0, 0, nil, nil, errVideoHead
+		}
+		voiceFirst, p = uint16(p[0])<<8|uint16(p[1]), p[2:]
+		n, w := binary.Uvarint(p)
+		if w <= 0 || n > uint64(len(p)-w) {
+			return 0, 0, nil, nil, errVideoHead
+		}
+		if voice, err = splitAudioBundle(p[w : w+int(n)]); err != nil {
+			return 0, 0, nil, nil, err
+		}
+		p = p[w+int(n):]
+	}
+	return seq, voiceFirst & mediaIndexMask, voice, p, nil
 }
 
 // due returns the pending bundle if it has waited long enough.

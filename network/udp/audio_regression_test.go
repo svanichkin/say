@@ -135,7 +135,7 @@ func TestSenderPreservesCaptureGapAndIgnoresCallbackJitter(t *testing.T) {
 			defer close(stop)
 			var wg sync.WaitGroup
 			epoch := time.Now()
-			startAudioSender(&wg, conn, nil, stop, testPeer, senderTestEncoder{}, nil, 160, epoch, mic)
+			startAudioSender(&wg, conn, nil, stop, testPeer, senderTestEncoder{}, nil, 160, epoch, mic, nil)
 			for i := 0; i < 4; i++ {
 				sample := uint64(i * 160)
 				at := epoch.Add(time.Duration(i*20) * time.Millisecond)
@@ -180,7 +180,7 @@ func TestBlockedTransportDoesNotBlockCaptureProcessing(t *testing.T) {
 	var wg sync.WaitGroup
 	epoch := time.Now()
 	encoded := make(chan []int16, 256)
-	startAudioSender(&wg, conn, nil, stop, testPeer, senderTestEncoder{encoded}, nil, 160, epoch, mic)
+	startAudioSender(&wg, conn, nil, stop, testPeer, senderTestEncoder{encoded}, nil, 160, epoch, mic, nil)
 	mic <- device.AudioCaptureFrame{Samples: make([]int16, 160), CapturedAt: epoch}
 	select {
 	case <-conn.entered:
