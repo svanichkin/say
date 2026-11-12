@@ -149,6 +149,17 @@ func initGlyphTables() {
 	})
 }
 
+// GlyphPattern returns the 4x8 shape of a glyph (bit 31 is the top left
+// pixel, rows of 4 follow each other), for drawing the cells as pixels.
+func GlyphPattern(codePoint int) (pattern uint32, ok bool) {
+	for _, bm := range bitmaps {
+		if bm.codePoint == codePoint {
+			return bm.pattern, true
+		}
+	}
+	return 0, false
+}
+
 func GlyphCodepoints() []int {
 	initGlyphTables()
 	return glyphCodepoints

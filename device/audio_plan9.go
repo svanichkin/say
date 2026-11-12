@@ -202,3 +202,7 @@ func StartMicrophoneStream(ctx context.Context, sampleRate, channels int) (<-cha
 	}()
 	return out, nil
 }
+
+// RingMarginMs: Plan 9 plays from goroutines into /dev/audio, whose kernel
+// buffer is the margin (see ring.go elsewhere).
+const RingMarginMs = 0

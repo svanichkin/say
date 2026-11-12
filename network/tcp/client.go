@@ -105,6 +105,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
 	notePeer(peer)
+	askPeerLog(conn) // DEBUG-TEMP
 
 	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, keepaliveInterval, keepaliveTimeout, true, pacer.active)
 	defer stopKeepalive()
@@ -126,6 +127,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 				log.Printf("[media] failed to start: %v", err)
 			} else if sess != nil {
 				defer sess.Stop()
+				defer hangupWhenMediaEnds(sess, conn)()
 				log.Printf("[media] started (outgoing) → %s", raddr.String())
 			}
 		}

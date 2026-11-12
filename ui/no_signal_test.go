@@ -32,7 +32,7 @@ func TestPanesShowNoSignalNoiseThenTestCard(t *testing.T) {
 	if writeChatPane(&out, frame, start.Add(4*time.Second), remoteFrameType, "NO SIGNAL NET", start.Add(4*time.Second), 2, 2, vs.peerSlot) {
 		t.Fatal("pane with a fresh frame is idle")
 	}
-	if strings.Contains(out.String(), noSignalLabel) {
+	if strings.Contains(out.String(), noSignalLabel()) {
 		t.Fatal("NO SIGNAL shown over a live frame")
 	}
 	// Frames stop: idle again after frameFreezeThreshold.

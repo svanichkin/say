@@ -63,6 +63,33 @@ func PeerLatencySnapshot() time.Duration {
 	return peerLatency
 }
 
+// Routes to the peer, shown next to the ping.
+const (
+	PathDirect = "P2P" // nothing between us: a direct link or the local network
+	PathMesh   = "YGG" // through other Yggdrasil nodes
+)
+
+var peerPath string
+
+// UpdatePeerPath sets the route the call takes (PathDirect, PathMesh, or ""
+// when there is no call).
+func UpdatePeerPath(path string) {
+	netRateMu.Lock()
+	changed := peerPath != path
+	peerPath = path
+	netRateMu.Unlock()
+	if changed {
+		RequestRedraw()
+	}
+}
+
+// PeerPathSnapshot is the route the call takes ("" when unknown).
+func PeerPathSnapshot() string {
+	netRateMu.RLock()
+	defer netRateMu.RUnlock()
+	return peerPath
+}
+
 // UpdateRxAudioLoss records the estimated fraction of missing incoming audio frames.
 func UpdateRxAudioLoss(loss float64) {
 	if loss < 0 {
@@ -104,9 +131,11 @@ func clampLoss(loss float64) float64 {
 // UpdateRxVideoLoss records the fraction of incoming video frames that were
 // lost or could not be decoded; it is reported to the peer in pongs.
 func UpdateRxVideoLoss(loss float64) {
+	now := time.Now()
 	netRateMu.Lock()
-	rxVideoLoss, rxVideoLossUpdatedAt = clampLoss(loss), time.Now()
+	rxVideoLoss, rxVideoLossUpdatedAt = clampLoss(loss), now
 	netRateMu.Unlock()
+	noteVideoLoss(clampLoss(loss), now)
 }
 
 // RxVideoLossSnapshot returns the latest incoming video loss and its sample time.

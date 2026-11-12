@@ -44,9 +44,39 @@ func (fc *framedConn) WriteFrame(t byte, payload []byte) error {
 	if fc == nil {
 		return fmt.Errorf("framedConn is nil")
 	}
+	t0 := time.Now() // DEBUG-TEMP: where a slow ping or pong loses its time
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	return writeFrame(fc.Conn, t, payload)
+	t1 := time.Now()
+	err := writeFrame(fc.Conn, t, payload)
+	if d := time.Since(t0); d > 5*time.Millisecond { // DEBUG-TEMP
+		log.Printf("[debug] stream: writing a %s frame (%d B) took %v: %v waiting for the stream, %v writing",
+			frameName(t), len(payload), d.Round(time.Millisecond), t1.Sub(t0).Round(time.Millisecond), time.Since(t1).Round(time.Millisecond))
+	}
+	return err
+}
+
+// frameName names a control frame type in the log (DEBUG-TEMP).
+func frameName(t byte) string {
+	switch t {
+	case framePing:
+		return "ping"
+	case framePong:
+		return "pong"
+	case frameChat:
+		return "chat"
+	case frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
+		return "file"
+	case frameBye:
+		return "bye"
+	case frameKeyframe:
+		return "keyframe"
+	case frameTermSize:
+		return "termsize"
+	case frameLogWant, frameLog:
+		return "log"
+	}
+	return fmt.Sprintf("0x%02x", t)
 }
 
 // writeFrame encodes and writes a single framed message as:
@@ -125,17 +155,44 @@ type controlSession struct {
 // Reads block without deadlines; the session ends when the connection is
 // closed (by stop, a keepalive timeout or the peer).
 func serveControlFrames(br *bufio.Reader, s controlSession) {
+	// DEBUG-TEMP: how the control stream went, logged when it ends.
+	started, last := time.Now(), time.Now()
+	counts := map[byte]int{}
+	end := func(why string) {
+		log.Printf("[debug] control stream with %s ended after %v: %s; last frame %v before; frames %v",
+			s.peerLabel, time.Since(started).Round(time.Millisecond), why, time.Since(last).Round(time.Millisecond), counts)
+	}
+	var handling time.Time // DEBUG-TEMP: a slow handler holds up the pongs behind it
+	var handlingType byte
 	for {
+		if !handling.IsZero() { // DEBUG-TEMP
+			if d := time.Since(handling); d > 5*time.Millisecond {
+				log.Printf("[debug] stream: handling a %s frame from %s took %v", frameName(handlingType), s.peerLabel, d.Round(time.Millisecond))
+			}
+			handling = time.Time{}
+		}
 		t, payload, err := readFrame(br)
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
 				log.Printf("[p2p] readFrame error from %s: %v", s.peerLabel, err)
 			}
+			end(fmt.Sprintf("read: %v", err)) // DEBUG-TEMP
 			return
 		}
+		if gap := time.Since(last); gap > 3*time.Second { // DEBUG-TEMP
+			log.Printf("[debug] control stream from %s was silent for %v", s.peerLabel, gap.Round(time.Millisecond))
+		}
+		last = time.Now()
+		counts[t]++
+		handling, handlingType = time.Now(), t // DEBUG-TEMP: checked at the top of the loop
 		switch t {
+		case frameLogWant: // DEBUG-TEMP
+			sendLog(s.conn, s.peerLabel)
+		case frameLog: // DEBUG-TEMP
+			receiveLog(payload)
 		case frameBye:
 			log.Printf("[p2p] %s hung up", s.peerLabel)
+			end("the peer hung up") // DEBUG-TEMP
 			return
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
 			handleChatFrame(s.conn, t, payload, s.incoming)

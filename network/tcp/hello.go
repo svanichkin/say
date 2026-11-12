@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"log"
 	"strconv"
 	"strings"
@@ -150,16 +151,26 @@ func (e *IncompatibleError) Error() string {
 
 // IncompatibleText explains an incompatible peer to the user.
 func IncompatibleText(peer PeerInfo) string {
+	return incompatibleText(peer, lang.T)
+}
+
+// incompatibleText says it with t: in the user's language (lang.T) or in
+// English for the log (lang.En).
+func incompatibleText(peer PeerInfo, t func(lang.Key, ...any) string) string {
 	app := peer.App
 	if app == "" {
-		app = "an older version"
+		app = t(lang.OlderVersion)
 	}
 	ours := LocalApp()
 	if ours == "" {
-		ours = "this version"
+		ours = t(lang.ThisVersion)
 	}
-	return fmt.Sprintf("Incompatible versions: the peer runs Say %s (protocol %d), you run Say %s (protocol %d). Update both sides to the same version.",
-		app, peer.Proto, ours, ProtocolVersion)
+	return strings.Join([]string{
+		t(lang.Mismatch),
+		t(lang.PeerRuns, app, peer.Proto),
+		t(lang.YouRun, ours, ProtocolVersion),
+		t(lang.PatchBoth),
+	}, "\n")
 }
 
 // notePeer tells the user in the chat about a peer from before protocol
@@ -167,7 +178,7 @@ func IncompatibleText(peer PeerInfo) string {
 func notePeer(peer PeerInfo) {
 	if peer.Legacy {
 		log.Printf("[p2p] the peer runs an older Say without version info (protocol 1)")
-		ui.AddChatMessage("The peer runs an older Say version. Voice works only if both sides use the same -audio-codec; update both sides to the same version.", false)
+		ui.AddChatMessage(lang.T(lang.LegacyPeer), false)
 		return
 	}
 	log.Printf("[p2p] peer runs Say %s (protocol %d), sends voice as %s", peer.App, peer.Proto, peer.AudioCodec)

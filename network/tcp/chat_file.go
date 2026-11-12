@@ -3,6 +3,7 @@ package tcp
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"io"
 	"log"
 	"net"
@@ -230,7 +231,7 @@ func encodeFileResult(id uint32, status byte, msg string) []byte {
 func installChatActions(conn net.Conn, pacer *adaptiveFilePacer) {
 	ui.SetChatActions(func(text string) {
 		if err := writeFrameSafe(conn, frameChat, []byte(text)); err != nil {
-			ui.AddChatMessage("Message send failed: "+err.Error(), false)
+			ui.AddChatMessage(lang.T(lang.MsgFailed, err.Error()), false)
 			return
 		}
 	}, func(path string) { sendFile(conn, path, pacer) })
@@ -248,7 +249,7 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 		}
 	}
 	fail := func(id uint32, name, msg string) {
-		ui.FinishReceive("File receive failed: " + name + ": " + msg)
+		ui.FinishReceive(lang.T(lang.RxFailed, name, msg))
 		reply(id, fileResultFailed, msg)
 	}
 	switch t {
@@ -339,7 +340,7 @@ func handleChatFrame(conn net.Conn, t byte, payload []byte, incoming **incomingF
 			fail(f.id, f.name, err.Error())
 			return
 		}
-		ui.FinishReceive("Received " + filepath.Base(dest) + " (" + ui.TransferSummary(f.received, time.Since(f.began)) + "), saved to Downloads")
+		ui.FinishReceive(lang.T(lang.Received, filepath.Base(dest), ui.TransferSummary(f.received, time.Since(f.began))))
 		reply(f.id, fileResultSaved, "")
 	}
 }
@@ -350,7 +351,7 @@ func abortIncoming(incoming **incomingFile) {
 	if *incoming == nil {
 		return
 	}
-	ui.FinishReceive("File receive interrupted: " + (*incoming).name)
+	ui.FinishReceive(lang.T(lang.RxInterrupted, (*incoming).name))
 	closeIncoming(incoming)
 }
 
@@ -378,13 +379,13 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 
 	f, err := os.Open(path)
 	if err != nil {
-		finish(0, "File send failed: "+name+": "+err.Error())
+		finish(0, lang.T(lang.TxFailed, name, err.Error()))
 		return
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		finish(0, "File send failed: "+name+": only regular files can be sent")
+		finish(0, lang.T(lang.TxFailed, name, lang.T(lang.NotRegular)))
 		return
 	}
 	size = info.Size()
@@ -403,14 +404,14 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 	binary.BigEndian.PutUint16(start[12:14], uint16(len(name)))
 	copy(start[14:], name)
 	if err := writeFrameSafe(conn, frameFileStart, start); err != nil {
-		finish(0, "File send failed: "+name+": "+err.Error())
+		finish(0, lang.T(lang.TxFailed, name, err.Error()))
 		return
 	}
 	ui.SetTransferProgress(name, 0, size)
 	began := time.Now()
 	// sentSummary is the final chat entry: size, average speed and time.
 	sentSummary := func() string {
-		return "Sent " + name + " (" + ui.TransferSummary(size, time.Since(began)) + ")"
+		return lang.T(lang.Sent, name, ui.TransferSummary(size, time.Since(began)))
 	}
 
 	buf := make([]byte, fileChunkBytes)
@@ -420,7 +421,7 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 		select {
 		case res := <-results:
 			if !res.saved {
-				finish(sent, "File send failed: "+name+": peer: "+res.msg)
+				finish(sent, lang.T(lang.TxFailed, name, lang.T(lang.PeerSaid, res.msg)))
 				return
 			}
 		default:
@@ -432,7 +433,7 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 			binary.BigEndian.PutUint64(chunk[4:12], uint64(sent))
 			copy(chunk[12:], buf[:n])
 			if err := writeFrameSafe(conn, frameFileChunk, chunk); err != nil {
-				finish(sent, "File send failed: "+name+": "+err.Error())
+				finish(sent, lang.T(lang.TxFailed, name, err.Error()))
 				return
 			}
 			sent += int64(n)
@@ -443,27 +444,27 @@ func sendFile(conn net.Conn, path string, pacer *adaptiveFilePacer) {
 			break
 		}
 		if readErr != nil {
-			finish(sent, "File send failed: "+name+": "+readErr.Error())
+			finish(sent, lang.T(lang.TxFailed, name, readErr.Error()))
 			return
 		}
 	}
 	end := make([]byte, 4)
 	binary.BigEndian.PutUint32(end, id)
 	if err := writeFrameSafe(conn, frameFileEnd, end); err != nil {
-		finish(sent, "File send failed: "+name+": "+err.Error())
+		finish(sent, lang.T(lang.TxFailed, name, err.Error()))
 		return
 	}
 
-	ui.SetTransferStatus("Waiting for " + name + " confirmation…")
+	ui.SetTransferStatus(lang.T(lang.AwaitConfirm, name))
 	select {
 	case res := <-results:
 		if res.saved {
 			finish(sent, sentSummary())
 		} else {
-			finish(sent, "File send failed: "+name+": peer: "+res.msg)
+			finish(sent, lang.T(lang.TxFailed, name, lang.T(lang.PeerSaid, res.msg)))
 		}
 	case <-time.After(fileResultTimeout):
-		finish(sent, sentSummary()+", but the peer did not confirm saving it")
+		finish(sent, lang.T(lang.Unconfirmed, sentSummary()))
 	}
 }
 

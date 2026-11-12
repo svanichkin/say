@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/device"
+	"github.com/svanichkin/say/lang"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
+	"log"
 	"math"
 	"math/rand"
 	"strconv"
@@ -21,8 +23,23 @@ import (
 // termCellWidthToHeight is the assumed width/height ratio of a terminal cell.
 // It must match the codec, which maps every cell to a 4×8 pixel block.
 const termCellWidthToHeight = 0.5
-const termBorder = 1
-const termSeparator = 1
+
+// termBorder and termSeparator are the margins round the canvas and
+// between the video panes, in cells. The window (SetPixelMode) widens them:
+// its pane frames stick out with plates, brackets and circuit lines.
+var (
+	termBorder    = 1
+	termSeparator = 1
+)
+
+// termSide and termGap are the same margins across: left and right of the
+// canvas and between the panes side by side, in columns. The terminal keeps
+// them equal to the ones above; the window gives them more air.
+var (
+	termSide = 1
+	termGap  = 1
+)
+
 const frameFreezeThreshold = 1200 * time.Millisecond
 const testCardDelay = 3 * time.Second
 const (
@@ -140,8 +157,9 @@ type statusClickRect struct {
 	endCol   int
 }
 
+// A copyable status has a button under it; once pressed it says so for a
+// while.
 const (
-	statusCopyAckMessage    = "Copied to clipboard"
 	statusCopyFeedbackDelay = 2 * time.Second
 )
 
@@ -149,9 +167,8 @@ var statusClickState struct {
 	sync.Mutex
 	active      bool
 	baseMessage string
-	ackMessage  string
+	copied      bool
 	clipboard   string
-	revertAfter time.Duration
 	areas       []statusClickRect
 	timer       *time.Timer
 }
@@ -270,7 +287,8 @@ func SetStatusMessage(msg string) {
 	setStatusMessageInternal(msg, false)
 }
 
-// SetCopyableStatus shows the provided message and makes it clickable so the text is copied via OSC-52.
+// SetCopyableStatus shows the provided message with a button under it that
+// copies clipboard (OSC 52).
 func SetCopyableStatus(msg, clipboard string) {
 	trimmedMsg := strings.TrimSpace(msg)
 	if trimmedMsg == "" || strings.TrimSpace(clipboard) == "" {
@@ -311,10 +329,10 @@ func enableStatusClick(msg, clipboard string) {
 	}
 	statusClickState.active = true
 	statusClickState.baseMessage = msg
-	statusClickState.ackMessage = statusCopyAckMessage
+	statusClickState.copied = false
 	statusClickState.clipboard = trimmedClip
-	statusClickState.revertAfter = statusCopyFeedbackDelay
 	statusClickState.areas = nil
+	RequestRedraw()
 }
 
 func resetStatusClickState() {
@@ -326,35 +344,34 @@ func resetStatusClickState() {
 	}
 	statusClickState.active = false
 	statusClickState.baseMessage = ""
-	statusClickState.ackMessage = ""
+	statusClickState.copied = false
 	statusClickState.clipboard = ""
 	statusClickState.areas = nil
 }
 
-func statusClickMessageMatches(msg string) bool {
+// statusCopyButton is the button's label when msg is the copyable status
+// ("" when it is not).
+func statusCopyButton(msg string) string {
 	trimmed := strings.TrimSpace(msg)
 	statusClickState.Lock()
 	defer statusClickState.Unlock()
-	if !statusClickState.active || trimmed == "" {
-		return false
+	if !statusClickState.active || trimmed == "" || trimmed != statusClickState.baseMessage {
+		return ""
 	}
-	return trimmed == statusClickState.baseMessage || trimmed == statusClickState.ackMessage
+	if statusClickState.copied {
+		return lang.T(lang.Copied)
+	}
+	return lang.T(lang.Copy)
 }
 
-func statusClickUpdateAreas(msg string, rects []statusClickRect) {
-	trimmed := strings.TrimSpace(msg)
+func statusClickUpdateAreas(rects []statusClickRect) {
 	statusClickState.Lock()
 	defer statusClickState.Unlock()
 	if !statusClickState.active {
 		statusClickState.areas = nil
 		return
 	}
-	if trimmed != statusClickState.baseMessage && trimmed != statusClickState.ackMessage {
-		statusClickState.areas = nil
-		return
-	}
-	statusClickState.areas = statusClickState.areas[:0]
-	statusClickState.areas = append(statusClickState.areas, rects...)
+	statusClickState.areas = append(statusClickState.areas[:0], rects...)
 }
 
 func statusClickClearAreas() {
@@ -363,6 +380,8 @@ func statusClickClearAreas() {
 	statusClickState.Unlock()
 }
 
+// statusClickHandlePoint copies the status when the click is on its button,
+// and the button says Copied for a while.
 func statusClickHandlePoint(col, row int) bool {
 	statusClickState.Lock()
 	if !statusClickState.active || len(statusClickState.areas) == 0 {
@@ -381,27 +400,23 @@ func statusClickHandlePoint(col, row int) bool {
 		return false
 	}
 	clipboard := statusClickState.clipboard
-	ack := statusClickState.ackMessage
-	base := statusClickState.baseMessage
-	delay := statusClickState.revertAfter
-	if delay <= 0 {
-		delay = statusCopyFeedbackDelay
-	}
+	statusClickState.copied = true
 	if statusClickState.timer != nil {
 		statusClickState.timer.Stop()
 	}
-	statusClickState.timer = time.AfterFunc(delay, func() {
-		setStatusMessageInternal(base, true)
+	statusClickState.timer = time.AfterFunc(statusCopyFeedbackDelay, func() {
 		statusClickState.Lock()
+		statusClickState.copied = false
 		statusClickState.timer = nil
 		statusClickState.Unlock()
+		RequestRedraw()
 	})
 	statusClickState.Unlock()
 
 	if clipboard != "" {
 		device.CopyToClipboard(clipboard)
 	}
-	setStatusMessageInternal(ack, true)
+	RequestRedraw()
 	return true
 }
 
@@ -497,10 +512,10 @@ func EnsureRenderer(ctx context.Context) {
 		ctx = context.Background()
 	}
 	termRendererOnce.Do(func() {
-		startMouseTracker(ctx)
-		if _, err := startTermImgRenderer(ctx); err != nil {
-			logs.LogV("[term] ensure renderer failed: %v", err)
+		if !pixelMode {
+			startMouseTracker(ctx)
 		}
+		startTermImgRenderer(ctx)
 	})
 }
 
@@ -735,7 +750,8 @@ func subscribeViewportSize() (int, chan ViewportSize, ViewportSize, bool) {
 func CurrentViewport() (ViewportSize, bool) {
 	if cols, rows, err := device.GetTermSize(); err == nil && cols > 0 && rows > 0 {
 		if slots, ok := calcViewportSlots(cols, rows); ok {
-			return ViewportSize{Cols: slots.peerSlot.cols, Rows: slots.peerSlot.rows}, true
+			c, r := detailSize(slots.peerSlot.cols, slots.peerSlot.rows)
+			return ViewportSize{Cols: c, Rows: r}, true
 		}
 	}
 	viewportMu.Lock()
@@ -758,7 +774,8 @@ func NewViewportFeed(ctx context.Context) ViewportSizeFeed {
 	if !hasInitial {
 		if cols, rows, err := device.GetTermSize(); err == nil && cols > 0 && rows > 0 {
 			if slots, ok := calcViewportSlots(cols, rows); ok {
-				initial = ViewportSize{Cols: slots.peerSlot.cols, Rows: slots.peerSlot.rows}
+				c, r := detailSize(slots.peerSlot.cols, slots.peerSlot.rows)
+				initial = ViewportSize{Cols: c, Rows: r}
 				hasInitial = true
 			}
 		}
@@ -866,14 +883,40 @@ func setSelfTermSize(cols, rows int) (peerCols, peerRows int, ok bool) {
 		if selfViewport.orient == 'V' {
 			layout = "vertical"
 		}
-		logs.LogV("[term] self window %dx%d, %s slot %dx%d cells (~%dx%d px)",
-			cols, rows, layout,
-			selfViewport.selfSlot.cols, selfViewport.selfSlot.rows,
-			selfViewport.selfSlot.cols*4, selfViewport.selfSlot.rows*8)
-		return selfViewport.peerSlot.cols, selfViewport.peerSlot.rows, true
+		// Logged when it changes: it is asked for on every frame drawn.
+		if key := [4]int{cols, rows, selfViewport.selfSlot.cols, selfViewport.selfSlot.rows}; key != lastSelfLogged.Swap(key) {
+			logs.LogV("[term] self window %dx%d, %s slot %dx%d cells (~%dx%d px)",
+				cols, rows, layout,
+				selfViewport.selfSlot.cols, selfViewport.selfSlot.rows,
+				selfViewport.selfSlot.cols*4, selfViewport.selfSlot.rows*8)
+		}
+		peerCols, peerRows := detailSize(selfViewport.peerSlot.cols, selfViewport.peerSlot.rows)
+		return peerCols, peerRows, true
 	}
-	logs.LogV("[term] self window %dx%d", cols, rows)
+	if key := [4]int{cols, rows}; key != lastSelfLogged.Swap(key) {
+		logs.LogV("[term] self window %dx%d", cols, rows)
+	}
 	return 0, 0, false
+}
+
+// lastScreenLogged is what the screen showed when last logged (DEBUG-TEMP).
+var lastScreenLogged atomic.Value
+
+// lastSelfLogged is the window size and slot last logged.
+var lastSelfLogged swapKey
+
+type swapKey struct {
+	sync.Mutex
+	v [4]int
+}
+
+// Swap stores v and returns what was there.
+func (k *swapKey) Swap(v [4]int) [4]int {
+	k.Lock()
+	defer k.Unlock()
+	old := k.v
+	k.v = v
+	return old
 }
 
 // SelfSlot returns the current viewport slot dimensions for the local terminal.
@@ -883,7 +926,8 @@ func SelfSlot() (cols, rows int, ok bool) {
 	if selfViewport.selfSlot.cols <= 0 || selfViewport.selfSlot.rows <= 0 {
 		return 0, 0, false
 	}
-	return selfViewport.selfSlot.cols, selfViewport.selfSlot.rows, true
+	cols, rows = detailSize(selfViewport.selfSlot.cols, selfViewport.selfSlot.rows)
+	return cols, rows, true
 }
 
 // PeerSlot returns the cached viewport slot dimensions learned from the remote peer.
@@ -1028,10 +1072,21 @@ func renderTermFrames() {
 		broadcastViewportSize(peerCols, peerRows)
 	}
 	var data string
+	kind := "call"
 	if ChatConnected() {
 		data = renderChatScreen(cols, rows)
+		if data == "" {
+			// The call does not fit: say so, rather than leave whatever was
+			// on the screen before (the call goes on, its sound too).
+			kind = "call (too small)"
+			data = renderConnectionScreen(cols, rows, lang.T(lang.LinkActive)+"\n"+lang.T(lang.TooSmall))
+		}
 	} else {
+		kind = "status: " + currentStatusMessage()
 		data = renderConnectionScreen(cols, rows, currentStatusMessage())
+	}
+	if lastScreenLogged.Swap(kind) != kind { // DEBUG-TEMP: what the screen shows, when it changes
+		log.Printf("[debug] screen %dx%d: %s", cols, rows, kind)
 	}
 	if data != "" {
 		enqueueFrame(&device.TerminalFrame{Data: data})
@@ -1059,7 +1114,7 @@ func beginScreen(kind byte, cols, rows int) bool {
 // The video and chat layout is shown only after the TCP session handshake.
 func renderConnectionScreen(cols, rows int, status string) string {
 	if strings.TrimSpace(status) == "" {
-		status = "Waiting for connection…"
+		status = lang.T(lang.Standby) + "\n" + lang.T(lang.AwaitSignal)
 	}
 	beginScreen(screenStatus, cols, rows)
 	paneCache.reset()
@@ -1076,15 +1131,30 @@ func renderChatScreen(cols, rows int) string {
 	if !ok {
 		return ""
 	}
-	canvasLeft, canvasTop := termBorder+1, termBorder+1
-	canvasCols := cols - 2*termBorder
-	videoGroupCols := vs.selfSlot.cols + termSeparator + vs.peerSlot.cols
+	canvasLeft, canvasTop := termSide+1, termBorder+1
+	canvasCols := cols - 2*termSide
+	videoGroupCols := vs.selfSlot.cols + termGap + vs.peerSlot.cols
 	videoLeft := canvasLeft + max(0, (canvasCols-videoGroupCols)/2)
 	videoCaptionRow := canvasTop + vs.selfSlot.rows
+	if pixelMode {
+		videoCaptionRow++ // a row for the bottom of the panes' frames
+	}
 	chatTop := videoCaptionRow + 1 + termSeparator
 	inputRow := rows - termBorder
-	chatBottom := inputRow - 1 - termSeparator
+	if pixelMode {
+		inputRow-- // room under the chat's frame for its plates
+	}
+	gap := termSeparator
+	if pixelMode {
+		gap = 1 // the chat and its input share a frame in the window
+	}
+	chatBottom := inputRow - 1 - gap
 	chatRows := chatBottom - chatTop + 1
+	// The conversation's columns: in the window, inside its frame.
+	chatLeft, chatCols := canvasLeft, canvasCols
+	if pixelMode {
+		chatLeft, chatCols = canvasLeft+2, canvasCols-4
+	}
 	if chatRows < 1 {
 		return ""
 	}
@@ -1126,9 +1196,9 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	sepCol := videoLeft + vs.selfSlot.cols
-	peerLeft := sepCol + termSeparator
+	peerLeft := sepCol + termGap
 	for r := canvasTop; r <= canvasTop+vs.selfSlot.rows; r++ {
-		lineAt(r, sepCol).WriteString(strings.Repeat(" ", termSeparator))
+		lineAt(r, sepCol).WriteString(strings.Repeat(" ", termGap))
 	}
 	canvasBlank := strings.Repeat(" ", canvasCols)
 	for i := 0; i < termSeparator; i++ {
@@ -1137,17 +1207,18 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	now := time.Now()
-	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
-	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel+" NET", now, canvasTop, peerLeft, vs.peerSlot)
+	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel()+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
+	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel()+" NET", now, canvasTop, peerLeft, vs.peerSlot)
 	// Animate the noise while a pane has no signal.
 	updateNoiseAnimation(localIdle || remoteIdle)
 
 	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
 	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
+	pathLabel := PeerPathSnapshot()
 	localCaption := currentFPSLabel(localFrameType) + " " + buildRateLabel("TX", '↑', txAudio, txVideo)
 	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
-	if latencyLabel != "" {
-		remoteCaption += " " + latencyLabel
+	if latencyLabel != "" && !pixelMode { // the window shows it between the panes
+		remoteCaption += " " + joinLabels(pathLabel, latencyLabel)
 	}
 	// A click mutes the sound only (mediactrl); the video goes on.
 	if !mediactrl.CaptureEnabled() {
@@ -1156,8 +1227,28 @@ func renderChatScreen(cols, rows int) string {
 	if !mediactrl.PlaybackEnabled() {
 		remoteCaption = "MUTED " + remoteCaption
 	}
-	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption)
-	writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption)
+	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
+	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
+	if pixelMode {
+		// One bracketed line under both panes: a block at each outer end,
+		// the line running from caption to ping to caption.
+		// The ping may spread past the gap, up to a column short of each
+		// caption; when the route's name does not fit, the ping goes alone.
+		spread := max(0, min(sepCol-selfText[1]-1, peerText[0]-1-(sepCol+termGap)))
+		if selfText[1] == 0 || peerText[0] == 0 {
+			spread = 0
+		}
+		ping := latencyLabel
+		if latencyLabel != "" && pathLabel != "" {
+			if full := joinLabels(pathLabel, latencyLabel); displayWidth(full) <= termGap+2*spread {
+				ping = full
+			}
+		}
+		extra := min(spread, max(0, (displayWidth(ping)-termGap+1)/2))
+		pingText := writeGapPing(lines.at(videoCaptionRow), videoCaptionRow, sepCol-extra, termGap+2*extra, ping)
+		rel := func(sp [2]int) [2]int { return [2]int{sp[0] - videoLeft, sp[1] - videoLeft} }
+		writePixelBracket(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, videoGroupCols, rel(selfText), rel(pingText), rel(peerText))
+	}
 
 	chatState.RLock()
 	messages := append([]ChatMessage(nil), chatState.messages...)
@@ -1170,7 +1261,7 @@ func renderChatScreen(cols, rows int) string {
 	}
 	var chat []chatLine
 	for i := len(messages) - 1; i >= 0 && len(chat) < chatRows; i-- {
-		wrapped := wrapWidth(sanitizeLine(messages[i].Text), canvasCols)
+		wrapped := wrapWidth(sanitizeLine(messages[i].Text), chatCols)
 		block := make([]chatLine, 0, len(wrapped))
 		for _, l := range wrapped {
 			block = append(block, chatLine{text: l, local: messages[i].Local})
@@ -1190,25 +1281,46 @@ func renderChatScreen(cols, rows int) string {
 		l := chat[i]
 		// Default terminal colours: fixed light colours were unreadable on a
 		// light terminal background. Sides tell the speakers apart.
-		col := canvasLeft
+		col := chatLeft
 		if !l.local {
-			col += max(0, canvasCols-displayWidth(l.text))
+			col += max(0, chatCols-displayWidth(l.text))
 		}
 		writeCursorTo(b, row, col)
-		b.WriteString(l.text)
+		if pixelMode { // the window colours the speakers
+			self, peer := Accents()
+			if l.local {
+				b.WriteString(accentSGR(self))
+			} else {
+				b.WriteString(accentSGR(peer))
+			}
+			b.WriteString(l.text + "\x1b[0m")
+		} else {
+			b.WriteString(l.text)
+		}
 	}
 
 	cursor := " "
 	if inputCursorVisible(time.Now()) {
 		cursor = "▏"
+		if pixelMode {
+			cursor = "█"
+		}
 	}
 	// Keep the end of a long input visible, with room for the cursor.
-	line := tailWidth(sanitizeLine(input), canvasCols-1) + cursor
+	line := tailWidth(sanitizeLine(input), chatCols-1) + cursor
 	b := lineAt(inputRow, 1)
 	b.WriteString("\x1b[2K")
-	writeCursorTo(b, inputRow, canvasLeft)
+	writeCursorTo(b, inputRow, chatLeft)
+	if pixelMode {
+		self, _ := Accents()
+		line = accentSGR(self) + line + "\x1b[0m"
+	}
 	b.WriteString(line)
 
+	if pixelMode {
+		// The frame takes a row above the chat and one below the input.
+		writePixelChat(&out, chatTop-1, canvasLeft, canvasCols, inputRow-chatTop+3)
+	}
 	lines.flush(&out, &paneCache)
 	return out.String()
 }
@@ -1224,25 +1336,60 @@ func sanitizeLine(s string) string {
 }
 
 // writeVideoCaption draws the info bar under a video pane across its full width.
-func writeVideoCaption(out *strings.Builder, row, left, width int, caption string) {
+// writeGapPing writes the round trip to the peer in the gap between the
+// panes' captions (the window), centred, in the brackets' orange; the gap is
+// cleared when there is none yet. It returns the columns the text spans
+// (1-based, [from, to)): empty without a ping.
+func writeGapPing(out *strings.Builder, row, left, width int, ping string) (span [2]int) {
 	if out == nil || row <= 0 || left <= 0 || width <= 0 {
-		return
+		return span
 	}
-	caption = truncateWidth(sanitizeLine(caption), width)
-	pad := width - displayWidth(caption)
+	ping = truncateWidth(sanitizeLine(ping), width)
+	pad := width - displayWidth(ping)
+	fmt.Fprintf(out, "\x1b[%d;%dH\x1b[49m\x1b[38;2;255;140;0m%s%s%s\x1b[0m", row, left,
+		strings.Repeat(" ", pad/2), ping, strings.Repeat(" ", pad-pad/2))
+	return [2]int{left + pad/2, left + pad/2 + displayWidth(ping)}
+}
+
+// writeVideoCaption writes a pane's caption under it, centred: on the
+// panel's colours in a terminal; in the window in its owner's accent (the
+// peer's for remote), on the window's black.
+// It returns the columns the text spans (1-based, [from, to)).
+func writeVideoCaption(out *strings.Builder, row, left, width int, caption string, remote bool) (span [2]int) {
+	if out == nil || row <= 0 || left <= 0 || width <= 0 {
+		return span
+	}
+	// In the window the caption is on a bracketed line (drawn there, from
+	// a mark): a line up to the text, a block at the outer end. They need
+	// three columns on each side.
+	room := width
+	if pixelMode && width >= 7 {
+		room = width - 6
+	}
+	caption = truncateWidth(sanitizeLine(caption), room)
+	pad := max(0, width-displayWidth(caption))
 	leftPad := pad / 2
-	out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, left) + panelColors())
+	colors := panelColors()
+	if pixelMode {
+		self, peer := Accents()
+		colors = "\x1b[49m" + accentSGR(self)
+		if remote {
+			colors = "\x1b[49m" + accentSGR(peer)
+		}
+	}
+	out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, left) + colors)
 	out.WriteString(strings.Repeat(" ", leftPad))
 	out.WriteString(caption)
 	out.WriteString(strings.Repeat(" ", pad-leftPad))
 	out.WriteString("\x1b[0m")
+	return [2]int{left + leftPad, left + leftPad + displayWidth(caption)}
 }
 
 // writeChatPane fills a video slot: the frame when available (centered and
 // clipped to the slot), otherwise a blank pane with a placeholder label.
 // noSignalLabel marks a pane without live video, as in v0.1.3; the pane name
 // (CAM or NET) follows it. The caption below keeps showing the link stats.
-const noSignalLabel = "NO SIGNAL"
+func noSignalLabel() string { return lang.T(lang.NoSignal) }
 
 // writeChatPane fills a video slot with the frame (centered and clipped to
 // the slot). Without a frame yet, or when frames stopped for longer than
@@ -1251,15 +1398,19 @@ const noSignalLabel = "NO SIGNAL"
 func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.Time, frameType, label string, now time.Time, top, left int, slot slotSize) bool {
 	idle := frame == nil || (!updatedAt.IsZero() && now.Sub(updatedAt) > frameFreezeThreshold)
 	if idle {
+		cols, rows := detailSize(slot.cols, slot.rows)
 		if updateIdlePatternSlot(frameType, true, now) {
-			frame = testCardTextFrame(slot.cols, slot.rows)
+			frame = testCardTextFrame(cols, rows)
 		} else {
-			frame = noiseTextFrame(slot.cols, slot.rows)
+			frame = noiseTextFrame(cols, rows)
 		}
 	} else {
 		updateIdlePatternSlot(frameType, false, now)
 	}
-	if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
+	if pixelMode {
+		// The window draws the frame itself, fitted to the pane.
+		writePixelPane(out, frame, top, left, slot.cols, slot.rows, frameType == remoteFrameType)
+	} else if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
 		writeTextFrameRegion(out, frame, top, left, 0, 0, frame.Cols, frame.Rows, &paneCache)
 	} else {
 		// The peer may still be encoding for a previous slot size: blank the
@@ -1403,18 +1554,6 @@ func testCardTextFrame(cols, rows int) *codec.TextFrame {
 		}
 	}
 
-	drawVerticalLine := func(x int, color [3]byte) {
-		if x < 0 || x >= cols {
-			return
-		}
-		for r := 0; r < rows; r++ {
-			idx := r*cols + x
-			glyphs[idx] = patternGlyphVertical
-			setCellColor(bg, idx, testCardBackground)
-			setCellColor(fg, idx, color)
-		}
-	}
-
 	fillBars := func(y0, h int, palette [][3]byte) {
 		if len(palette) == 0 || h <= 0 {
 			return
@@ -1460,7 +1599,6 @@ func testCardTextFrame(cols, rows int) *codec.TextFrame {
 
 	drawHorizontalLine(midStart, testCardSeparator)
 	drawHorizontalLine(bottomStart, testCardSeparator)
-	drawVerticalLine(cols/2, testCardSeparator)
 
 	centerBoxWidth := max(2, cols/6)
 	centerBoxHeight := max(1, midHeight/2)
@@ -1787,9 +1925,55 @@ func buildStatusScreen(cols, rows int, message string) string {
 		canvasRows = rows
 	}
 
-	lines := strings.Split(msg, "\n")
-	for i := range lines {
-		lines[i] = truncateWidth(strings.TrimSpace(lines[i]), canvasCols)
+	shown := msg
+	if pixelMode {
+		shown = statusHeading(msg)
+		// The text fits inside its frame, which leaves the side margins
+		// and its own padding.
+		canvasCols = max(1, cols-2*termSide-2*statusPadCols)
+	}
+	// Too long a line is cut in the terminal and wrapped in the window.
+	var lines []string
+	for _, l := range strings.Split(shown, "\n") {
+		l = strings.TrimSpace(l)
+		if !pixelMode {
+			lines = append(lines, truncateWidth(l, canvasCols))
+			continue
+		}
+		wrapped := wrapWidth(l, canvasCols)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		lines = append(lines, wrapped...)
+	}
+
+	// A copyable status has its button a line below it: [ Copy ] in the
+	// terminal, bracketed in the window, as wide for Copied as for Copy.
+	label := statusCopyButton(msg)
+	buttonLine, buttonCols := -1, 0
+	if label != "" {
+		inner := max(displayWidth(lang.T(lang.Copy)), displayWidth(lang.T(lang.Copied)))
+		pad := (inner - displayWidth(label)) / 2
+		label = strings.Repeat(" ", pad) + label + strings.Repeat(" ", inner-displayWidth(label)-pad)
+		if pixelMode {
+			label = "  " + label + "  "
+		} else {
+			label = "[ " + label + " ]"
+		}
+		buttonCols = displayWidth(label)
+		lines = append(lines, "", label)
+		buttonLine = len(lines) - 1
+	}
+
+	// The lines go one under another from the same column, the block of
+	// them centred.
+	blockCols := 0
+	for _, l := range lines {
+		blockCols = max(blockCols, min(displayWidth(l), canvasCols))
+	}
+	blockLeft := termBorder + 1 + max(0, (canvasCols-blockCols)/2)
+	if pixelMode { // centred in the window, as its frame is
+		blockLeft = 1 + max(0, (cols-blockCols)/2)
 	}
 
 	startRow := termBorder + 1 + max(0, (canvasRows-len(lines))/2)
@@ -1800,37 +1984,42 @@ func buildStatusScreen(cols, rows int, message string) string {
 	var out strings.Builder
 	writeFramePrefix(&out, true)
 	appendBorderClear(&out, cols, rows)
+	if pixelMode {
+		writePixelStatusFrame(&out, blockCols, len(lines), startRow, cols, rows)
+	}
 
-	trackClicks := statusClickMessageMatches(msg)
 	var clickRects []statusClickRect
-
 	for i, line := range lines {
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		row := startRow + i
 		if row > rows-termBorder {
 			break
 		}
-		width := displayWidth(line)
-		if width > canvasCols {
+		if displayWidth(line) > canvasCols {
 			line = truncateWidth(line, canvasCols)
-			width = displayWidth(line)
 		}
-		startCol := termBorder + 1 + max(0, (canvasCols-width)/2)
-		out.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", row, startCol, line))
-		if trackClicks {
+		out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, blockLeft))
+		if pixelMode {
+			out.WriteString(accentSGR(BrickColour(ChatAccent()))) // its bricks' colour
+		}
+		out.WriteString(line)
+		if i == buttonLine {
+			if pixelMode {
+				writePixelBracket(&out, row, blockLeft, buttonCols, [2]int{2, buttonCols - 2})
+			}
 			clickRects = append(clickRects, statusClickRect{
 				row:      row,
-				startCol: startCol,
-				endCol:   startCol + width - 1,
+				startCol: blockLeft,
+				endCol:   blockLeft + buttonCols - 1,
 			})
 		}
 	}
 	out.WriteString("\x1b[0m")
 
-	if trackClicks {
-		statusClickUpdateAreas(msg, clickRects)
+	if len(clickRects) > 0 {
+		statusClickUpdateAreas(clickRects)
 	} else {
 		statusClickClearAreas()
 	}
@@ -2154,6 +2343,21 @@ func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64)
 	return fmt.Sprintf("%c %s", direction, label)
 }
 
+// joinLabels joins the non-empty labels with a space.
+func joinLabels(labels ...string) string {
+	out := ""
+	for _, l := range labels {
+		if l == "" {
+			continue
+		}
+		if out != "" {
+			out += " "
+		}
+		out += l
+	}
+	return out
+}
+
 func buildLatencyLabel(latency time.Duration) string {
 	if latency <= 0 {
 		return ""
@@ -2203,12 +2407,8 @@ func writeStatusOverlay(sb *strings.Builder, bottomRow, startCol, frameCols, fra
 	if label == "" {
 		return
 	}
-	runes := []rune(label)
-	if len(runes) > frameCols {
-		runes = runes[:frameCols]
-	}
-	width := len(runes)
-	pad := frameCols - width
+	label = truncateWidth(label, frameCols)
+	pad := max(0, frameCols-displayWidth(label))
 	leftPad := pad / 2
 	rightPad := pad - leftPad
 	row := bottomRow
@@ -2217,7 +2417,7 @@ func writeStatusOverlay(sb *strings.Builder, bottomRow, startCol, frameCols, fra
 	if leftPad > 0 {
 		sb.WriteString(strings.Repeat(" ", leftPad))
 	}
-	sb.WriteString(string(runes))
+	sb.WriteString(label)
 	if rightPad > 0 {
 		sb.WriteString(strings.Repeat(" ", rightPad))
 	}
@@ -2268,17 +2468,14 @@ type viewportSlots struct {
 // the max drawable area (in character cells) for a single view when two panes
 // are shown side by side (horizontal) or stacked (vertical).
 func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
-	border := termBorder
-	separator := termSeparator
-
-	width := cols - 2*border
-	height := rows - 2*border
+	width := cols - 2*termSide
+	height := rows - 2*termBorder
 	if width <= 0 || height <= 0 {
 		return
 	}
 
 	vs.orient = 'H'
-	availableCols := width - separator
+	availableCols := width - termGap
 	if availableCols < 4 {
 		return
 	}
@@ -2288,7 +2485,15 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	// a pane has twice as many columns as rows. Keep at least three rows for
 	// chat history, plus the caption, separators and the input row.
 	paneCols := min(min(leftCols, rightCols), codec.MaxFrameCols)
-	paneRows := min(height-7, codec.MaxFrameRows)
+	// What the call screen puts under the panes (renderChatScreen): the
+	// caption, the separator, three rows of chat, the input. The window has
+	// a row more under the panes' frames, a wider separator and a row under
+	// the chat's frame.
+	reserved := 7
+	if pixelMode {
+		reserved += 1 + (termSeparator - 1) + 1
+	}
+	paneRows := min(height-reserved, codec.MaxFrameRows)
 	if fromCols := int(math.Round(float64(paneCols) * termCellWidthToHeight)); fromCols < paneRows {
 		paneRows = fromCols
 	} else {

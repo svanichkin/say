@@ -41,6 +41,9 @@ type Transport interface {
 	// IsLocalPeer reports whether host is reachable over the local network
 	// (directly peered by LAN discovery, or a loopback/private address).
 	IsLocalPeer(host string) bool
+	// IsDirectPeer reports whether host is reached with no node in
+	// between: a direct link through the NATs or the local network.
+	IsDirectPeer(host string) bool
 	// StartDirect tries to link to the peer at host directly, through the
 	// NATs, and keeps the link until stop is called. A no-op where the
 	// transport has no such thing or it is off.

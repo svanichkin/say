@@ -1,6 +1,9 @@
 package device
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // PlaybackQueue carries decoded PCM from the network receiver to the speaker.
 // It tracks how many samples are waiting to be played (queued frames plus the
@@ -53,6 +56,8 @@ func (q *PlaybackQueue) DropOldest() bool {
 	case frame := <-q.ch:
 		q.samples.Add(-int64(len(frame.Samples)))
 		q.gap.Store(true)
+		queueDrops.Add(1)                                                                                             // DEBUG-TEMP
+		tracePlay(PlayEvent{Kind: PlayDropped, Index: frame.MediaIndex, At: time.Now(), Samples: len(frame.Samples)}) // DEBUG-TEMP
 		return true
 	default:
 		return false

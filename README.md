@@ -42,10 +42,19 @@ external Yggdrasil daemon or web stack.
   AMR-NB, the peer sends Opus.").
 - **System voice processing** (`-sysaudio`, on by default on macOS and
   Windows): the system cancels echo, suppresses noise and controls gain.
+- **The system knows it is a call.** On Windows Say plays and records on
+  the default devices for calls (Settings, Sound) as a communications
+  stream, so Windows lowers other sounds while it plays; on macOS the voice
+  unit lowers other apps' sound by voice activity, as FaceTime does
+  (macOS 14 and later); on Linux the streams have PulseAudio's and
+  PipeWire's phone role (`media.role=phone`).
+- **Sound keeps playing while Say is busy.** The system's audio thread only
+  moves samples through lock-free rings; Say's goroutines fill and empty
+  them on threads raised to the priority the system gives audio.
 - **Protocol versions.** The handshake carries the protocol version and the
   Say version of each side. A peer that cannot talk to ours is refused with a
-  message naming both versions ("Incompatible versions: … Update both sides
-  to the same version."). A peer from before versioned handshakes (v1.0.0)
+  message naming both versions ("PROTOCOL MISMATCH … Patch both sides to
+  the same version"). A peer from before versioned handshakes (v1.0.0)
   is still accepted; the chat then notes that voice works only with the same
   `-audio-codec` on both sides.
 - Acoustic echo cancellation with a reference delay estimated from the requested
@@ -342,6 +351,8 @@ codec on both sides). Relevant CLI switches:
 - `-camera /dev/videoN` – use this camera device only (Linux). Without it every `/dev/video*` capture node is tried in turn. Use it when a phone or board exposes several nodes, for example a `v4l2loopback` device that another program (such as a PinePhone camera service) fills: `-camera /dev/video0`.
 - `-colors 16|truecolor` – colour output. `16` uses only the 16 ANSI colours (8 for backgrounds), with dithering, for terminals without 24-bit colour such as Plan 9's `vt`; it is the default on Plan 9, `truecolor` elsewhere.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
+- `-lang <code>` – the language Say speaks to you (`-lang ru`, `-lang ja`, …). Without it Say takes the first of the system's preferred languages that it knows, else English. It knows en, ru, uk, be, kk, uz, az, ka, hy, de, fr, es, pt, it, nl, pl, cs, sk, sl, hr, sr, bg, ro, hu, fi, sv, nb, da, et, lv, lt, el, tr, id, ms, vi, zh, zh-Hant, ja and ko.
+- `-gui` – a window instead of the terminal (macOS and Windows for now); `-text` – the terminal. With neither, Say asks at start which one, where the window can be shown and Say was started in a terminal. The window draws the same interface with the system's monospace font: video panes and the chat in neon HUD frames (their shapes follow each person's address), glints running along them, a hazard-striped border. Cmd+ and Cmd- (Ctrl on Windows) ask the peer for a finer or coarser picture; while the video comes in clean, the window asks for one step finer by itself and steps back on loss.
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
 - `-nodirect` – no direct calls. By default a call goes directly between the two machines, without public Yggdrasil peers in between: they connect through their NATs (UDP hole punching, as WebRTC does) for lower latency and fewer delay spikes and drop-outs, and fall back to the Yggdrasil route when the direct link does not get through or turns out worse. Each side then sees the other's public IP address, which Yggdrasil otherwise hides, and Say asks public STUN servers (Google, Cloudflare, Sipnet) for its own. With `-nodirect` on either side the call stays on its Yggdrasil route and the IP addresses stay hidden.
 - `-nowt` – Windows: stay in the classic console. Started by a double click in a console of its own, Say reopens itself in Windows Terminal when it is installed: the classic console has no font fallback, so it shows the picture's block and line characters as boxes.
@@ -364,7 +375,7 @@ codec on both sides). Relevant CLI switches:
 - `-version` – print version and exit.
 - `-donate` – print donation information and exit.
 - `-support` – print support link and exit.
-- Color filters: `-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-purple`, `-pink`, `-gray`, `-bw` – apply a tinted (or neutral) monochrome filter to the local/remote viewports (purely visual, codec stream stays untouched). Use at most one flag; if several are present the last one wins.
+- Color filters: `-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-purple`, `-pink`, `-gray`, `-bw` – apply a tinted (or neutral) monochrome filter to the local/remote viewports (purely visual, codec stream stays untouched). Use at most one flag; if several are present the last one wins. In the window (`-gui`), `-bw` shows each pane in its owner's colour instead: ours in our accent, the peer's in theirs.
 
 When media is disabled on both ends, Say falls back to a simple line‑based text
 bridge over the established TCP session.

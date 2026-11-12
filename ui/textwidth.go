@@ -23,7 +23,13 @@ func truncateWidth(s string, limit int) string {
 	if displayWidth(s) <= limit {
 		return s
 	}
-	head, _ := splitAtWidth(s, limit-1)
+	// The ellipsis takes a cell in a terminal, more in the pixel window.
+	ellipsis := displayWidth("…")
+	if limit < ellipsis {
+		head, _ := splitAtWidth(s, limit)
+		return head
+	}
+	head, _ := splitAtWidth(s, limit-ellipsis)
 	return head + "…"
 }
 

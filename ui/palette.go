@@ -38,6 +38,9 @@ func defaultColorMode() ColorMode {
 // SetColorMode applies -colors: "16" (also "ansi", "8"), "truecolor" (also
 // "24bit"), or "" / "auto" for the platform default (16 colours on Plan 9).
 func SetColorMode(key string) {
+	if pixelMode {
+		return // the pixel window shows every colour
+	}
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "16", "8", "ansi":
 		colorMode.Store(int32(ColorANSI16))

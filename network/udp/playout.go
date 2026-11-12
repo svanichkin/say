@@ -25,13 +25,20 @@ type audioPlayout struct {
 	out          *device.PlaybackQueue
 	scratch      []int16
 
-	started       bool   // nextIndex is valid
-	nextIndex     uint16 // media index of the next slot handed to the speaker
-	pending       []queuedPacket
-	ready         bool // jitter buffer primed; frames go straight to the speaker
-	pre           []device.PlaybackFrame
-	preSample     int
-	concealed     int // consecutive concealed slots
+	started    bool   // nextIndex is valid
+	nextIndex  uint16 // media index of the next slot handed to the speaker
+	pending    []queuedPacket
+	ready      bool // jitter buffer primed; frames go straight to the speaker
+	pre        []device.PlaybackFrame
+	preSample  int
+	concealed  int        // consecutive concealed slots
+	soundLevel levelMeter // DEBUG-TEMP: what is played, logged each second
+	// The whole delay (reorder buffer and queue) over a window, and what of
+	// it is to be shed by skipping missing slots (see skipLag).
+	lagWinStart   time.Time
+	lagWinMin     int  // samples
+	lagExcess     int  // samples
+	skipped       bool // a slot was skipped: the next frame does not continue the last
 	lastAt        time.Time
 	primeDeadline time.Time
 
@@ -78,14 +85,24 @@ type queuedPacket struct {
 	payload []byte
 }
 
+// playoutRingMarginMs is device.RingMarginMs: the device plays from a ring
+// that goroutines fill, so the playout keeps that much more queued than
+// the device's period. (Tests of a speaker that takes straight from the
+// queue set it to 0.)
+var playoutRingMarginMs = device.RingMarginMs
+
 func newAudioPlayout(dec audioDecoder, frameSamples int, out *device.PlaybackQueue) *audioPlayout {
+	startVoiceTrace() // DEBUG-TEMP
 	return &audioPlayout{
 		dec:          dec,
 		frameSamples: frameSamples,
 		out:          out,
 		scratch:      make([]int16, frameSamples),
 		lossWindow:   time.Now(),
-		lowWater:     frameSamples * audioPlayoutLowFrames,
+		soundLevel:   levelMeter{name: "peer's voice, as played"}, // DEBUG-TEMP
+		// One device period, and the margin the device's ring needs to
+		// play on while Go is held up (playoutRingMarginMs).
+		lowWater:     frameSamples*audioPlayoutLowFrames + audioSampleRate*playoutRingMarginMs/1000,
 		lead:         audioBufferLeadFrames,
 		baseLead:     audioBufferLeadFrames,
 		maxQueued:    frameSamples * audioQueueMaxFrames,
@@ -114,6 +131,7 @@ func (p *audioPlayout) rebuffer() {
 	p.ready = false
 	p.pre, p.preSample = p.pre[:0], 0
 	p.primeDeadline = time.Time{}
+	p.lagWinStart, p.lagWinMin, p.lagExcess = time.Time{}, 0, 0
 }
 
 func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
@@ -156,6 +174,9 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		switch d := receivedGap; {
 		case d > 0:
 			p.recordLoss(d, p.lastSID, now)
+			if missing := audioPacketsExpected(d, p.lastSID) - 1; missing > 0 { // DEBUG-TEMP
+				logs.LogV("[debug] voice: %d packets lost before index %d (%d ms without audio)", missing, index, d*audioFrameMillis/audioFrameTicks)
+			}
 			p.lastIndex, p.lastSID = index, isSID
 		case d < 0 && p.lossMissing > 0:
 			p.lossMissing-- // a reordered packet was counted as missing
@@ -172,6 +193,7 @@ func (p *audioPlayout) onPacket(index uint16, payload []byte, now time.Time) {
 		// A long silence or outage: restart at the live edge.
 		// Compare received packets too: during DTX, nextIndex can lag behind
 		// perfectly regular SID updates while their playout slots are not due.
+		logs.LogV("[debug] voice: outage of %d ms, playback restarts at the live edge", receivedGap*audioFrameMillis/audioFrameTicks) // DEBUG-TEMP
 		p.pending = p.pending[:0]
 		p.out.Clear()
 		p.rebuffer()
@@ -218,6 +240,7 @@ const (
 // onLate handles a packet that arrived after its slot was concealed: the
 // playback clock (which video follows) holds while the extra audio plays.
 func (p *audioPlayout) onLate(now time.Time, index uint16, payload []byte) {
+	traceVoice(index, "arrived after its slot was made up") // DEBUG-TEMP
 	p.lastLate = now
 	if !p.ready {
 		return
@@ -274,7 +297,8 @@ func (p *audioPlayout) insert(pkt queuedPacket) {
 	for i > 0 {
 		prev := mediaIndexDelta(p.pending[i-1].index, p.nextIndex)
 		if prev == rel {
-			return // duplicate
+			traceVoice(pkt.index, "duplicate in the reorder buffer") // DEBUG-TEMP
+			return                                                   // duplicate
 		}
 		if prev < rel {
 			break
@@ -294,7 +318,8 @@ func (p *audioPlayout) pump(now time.Time) {
 		rel := mediaIndexDelta(head.index, p.nextIndex)
 		switch {
 		case rel < -audioFrameTicks/2:
-			p.pending = p.pending[1:] // its slot was concealed meanwhile
+			traceVoice(head.index, "not played: its slot was made up meanwhile") // DEBUG-TEMP
+			p.pending = p.pending[1:]                                            // its slot was concealed meanwhile
 		case rel <= audioFrameTicks/2:
 			p.pending = p.pending[1:]
 			p.nextIndex = head.index // absorb timestamp rounding
@@ -303,12 +328,68 @@ func (p *audioPlayout) pump(now time.Time) {
 			if !p.slotDue(now) {
 				return
 			}
+			if p.skipLag(now) {
+				continue
+			}
 			if !p.conceal() {
 				// Concealment budget spent: continue at the waiting packet.
+				logs.LogV("[debug] voice: %d slots concealed in a row, skipping to index %d", p.concealed, head.index) // DEBUG-TEMP
 				p.nextIndex = head.index
 			}
 		}
 	}
+}
+
+// lag is the whole delay ahead of the next slot: the frames waiting in the
+// reorder buffer up to the newest received, and the queue.
+func (p *audioPlayout) lag() int {
+	behind := 0
+	if len(p.pending) > 0 {
+		behind = int(max(0, mediaIndexDelta(p.pending[len(p.pending)-1].index, p.nextIndex))) * p.frameSamples / audioFrameTicks
+	}
+	return behind + p.out.QueuedSamples()
+}
+
+// skipLag drops a missing slot that is due instead of concealing it while
+// the whole delay has stayed over the target for a window (1 s, its lowest
+// point). The extra delay is left by a stall: the playback clock fell
+// behind the sender's and the queue-only catch-up (push) misses it, since
+// in pauses (DTX) the delay waits in the reorder buffer, not in the queue.
+// A missing slot is a pause or a lost frame: skipping it is not heard, and
+// the clock comes back to the sender's within a few seconds of pauses.
+func (p *audioPlayout) skipLag(now time.Time) bool {
+	if !p.ready {
+		return false
+	}
+	target := max(p.lead*p.frameSamples, p.lowWater+p.frameSamples)
+	lag := p.lag()
+	if p.lagWinStart.IsZero() || lag < p.lagWinMin {
+		p.lagWinMin = lag
+	}
+	if p.lagWinStart.IsZero() {
+		p.lagWinStart = now
+	}
+	if now.Sub(p.lagWinStart) >= audioCatchUpWindowFrames*audioFrameMillis*time.Millisecond {
+		if excess := p.lagWinMin - target; excess >= audioCatchUpStartFrames*p.frameSamples {
+			if p.lagExcess == 0 {
+				logs.LogV("[voice/udp] %d ms behind the sender: skipping pauses to catch up", excess*1000/audioSampleRate)
+			}
+			p.lagExcess = excess
+		}
+		p.lagWinStart, p.lagWinMin = now, lag
+	}
+	if p.lagExcess < p.frameSamples {
+		return false
+	}
+	index := p.nextIndex
+	p.takeMissed(index) // a packet for it arriving after all is late
+	p.missed[p.missedHead] = missedSlot{index: index, valid: true}
+	p.missedHead = (p.missedHead + 1) % len(p.missed)
+	p.nextIndex = advanceMediaIndex(index, audioFrameTicks)
+	p.lagExcess -= p.frameSamples
+	p.skipped = true
+	traceVoice(index, "skipped: a missing slot, catching up (%d ms behind)", (p.lagExcess+p.frameSamples)*1000/audioSampleRate) // DEBUG-TEMP
+	return true
 }
 
 // slotDue reports whether a missing slot must be concealed now.
@@ -349,6 +430,7 @@ func (p *audioPlayout) onTickAt(now time.Time) {
 	if !p.conceal() && p.out.QueuedSamples() == 0 {
 		// The peer stopped sending (muted, paused or gone). Prime the buffer
 		// again before resuming so speech does not start with an underrun.
+		logs.LogV("[debug] voice: nothing to play (the peer's audio stopped), buffering again") // DEBUG-TEMP
 		p.rebuffer()
 	}
 }
@@ -362,6 +444,8 @@ func (p *audioPlayout) decode(payload []byte) {
 		return
 	}
 	p.concealed = 0
+	p.soundLevel.add(p.scratch[:min(written, p.frameSamples)], true)                                       // DEBUG-TEMP
+	traceVoiceDecoded(p.nextIndex, p.scratch[:min(written, p.frameSamples)], p.out.QueuedSamples(), false) // DEBUG-TEMP
 	p.push(p.scratch[:min(written, p.frameSamples)])
 }
 
@@ -375,11 +459,13 @@ func (p *audioPlayout) conceal() bool {
 	p.missed[p.missedHead] = missedSlot{index: p.nextIndex, valid: true}
 	p.missedHead = (p.missedHead + 1) % len(p.missed)
 	p.concealed++
+	p.soundLevel.conceal() // DEBUG-TEMP
 	written, err := p.dec.Conceal(p.scratch)
 	if err != nil || written <= 0 {
 		clear(p.scratch)
 		written = p.frameSamples
 	}
+	traceVoiceDecoded(p.nextIndex, p.scratch[:min(written, p.frameSamples)], p.out.QueuedSamples(), true) // DEBUG-TEMP
 	p.push(p.scratch[:min(written, p.frameSamples)])
 	return true
 }
@@ -388,6 +474,8 @@ func (p *audioPlayout) conceal() bool {
 func (p *audioPlayout) push(pcm []int16) {
 	samples := make([]int16, p.frameSamples)
 	copy(samples, pcm)
+	discontinuous := p.skipped // a slot before it was skipped (skipLag)
+	p.skipped = false
 	index := p.nextIndex
 	p.nextIndex = advanceMediaIndex(p.nextIndex, audioFrameTicks)
 	if p.ready && p.catchUp == 0 {
@@ -418,13 +506,16 @@ func (p *audioPlayout) push(pcm []int16) {
 		} else {
 			p.level = 0
 			if excess >= len(samples) && isQuiet(samples) {
+				traceVoice(index, "skipped: a quiet frame, catching up (%d ms over)", excess*1000/audioSampleRate) // DEBUG-TEMP
 				p.catchUp -= len(samples)
+				p.skipped = p.skipped || discontinuous // the next frame does not continue the last either
 				return
 			}
 			cut := min(excess, max(1, len(samples)*audioCatchUpPermille/1000))
+			traceVoice(index, "shortened by %d samples, catching up", cut) // DEBUG-TEMP
 			p.catchUp -= cut
 			samples = resizePCM(samples, len(samples)-cut)
-			p.out.Push(device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples})
+			p.out.Push(device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples, Discontinuous: discontinuous})
 			return
 		}
 	}
@@ -450,7 +541,7 @@ func (p *audioPlayout) push(pcm []int16) {
 			samples = resizePCM(samples, len(samples)+delta)
 		}
 	}
-	frame := device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples}
+	frame := device.PlaybackFrame{Samples: samples, MediaIndex: index, MediaSamples: p.frameSamples, Discontinuous: discontinuous}
 
 	if !p.ready {
 		p.pre = append(p.pre, frame)

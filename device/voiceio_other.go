@@ -14,9 +14,15 @@ type VoiceIO struct{}
 const VoiceIOSupported = false
 
 // StartVoiceIO is not available on this platform yet.
-func StartVoiceIO(sampleRate int, onInput func(samples []int16), onOutput func(out []int16)) (*VoiceIO, error) {
+func StartVoiceIO(sampleRate int, mic bool) (*VoiceIO, error) {
 	return nil, errors.New("system voice processing is not supported on this platform")
 }
+
+// ReadMic has nothing to give.
+func (vio *VoiceIO) ReadMic(buf []int16) (int, time.Time) { return 0, time.Time{} }
+
+// Write takes nothing.
+func (vio *VoiceIO) Write(samples []int16) int { return 0 }
 
 // Close does nothing.
 func (vio *VoiceIO) Close() {}

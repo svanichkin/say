@@ -5,18 +5,17 @@ package device
 /*
 #cgo LDFLAGS: -framework AudioToolbox -framework CoreAudio
 #include <AudioToolbox/AudioToolbox.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
+#include "sayring.h"
 
-extern void goVoiceInput(uintptr_t handle, int16_t *samples, UInt32 frames);
-extern void goVoiceOutput(uintptr_t handle, int16_t *samples, UInt32 frames);
-
+// The unit's real-time thread only moves samples through a sayRing (see
+// sayring.h); it never runs Go.
 typedef struct {
 	AudioUnit unit;
-	uintptr_t handle;
 	int16_t *inBuf;
 	UInt32 inCap;
+	int mic; // keep microphone blocks
+	int advancedDucking; // the system lowers other sound by voice activity
+	sayRing *ring;
 } sayVoiceIO;
 
 static OSStatus sayVoiceInputCB(void *ref, AudioUnitRenderActionFlags *flags,
@@ -34,7 +33,9 @@ static OSStatus sayVoiceInputCB(void *ref, AudioUnitRenderActionFlags *flags,
 	if (st != noErr) {
 		return st;
 	}
-	goVoiceInput(v->handle, v->inBuf, bl.mBuffers[0].mDataByteSize / 2);
+	if (v->mic) {
+		sayRingMicPut(v->ring, v->inBuf, bl.mBuffers[0].mDataByteSize / 2, sayRingNow());
+	}
 	return noErr;
 }
 
@@ -42,7 +43,7 @@ static OSStatus sayVoiceRenderCB(void *ref, AudioUnitRenderActionFlags *flags,
 	const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *io) {
 	sayVoiceIO *v = (sayVoiceIO *)ref;
 	for (UInt32 i = 0; i < io->mNumberBuffers; i++) {
-		goVoiceOutput(v->handle, (int16_t *)io->mBuffers[i].mData, io->mBuffers[i].mDataByteSize / 2);
+		sayRingFill(v->ring, (int16_t *)io->mBuffers[i].mData, io->mBuffers[i].mDataByteSize / 2);
 	}
 	return noErr;
 }
@@ -99,6 +100,16 @@ static OSStatus sayVoiceOpen(sayVoiceIO *v, double rate, int *step) {
 
 	v->inCap = 8192;
 	v->inBuf = calloc(v->inCap, sizeof(int16_t));
+
+	// Other apps' sound is lowered while a call runs, as FaceTime does it:
+	// the system's ducking, more while someone speaks and less in pauses
+	// (macOS 14; before, the unit's fixed ducking). Not a failure if the
+	// system lacks it.
+	if (__builtin_available(macOS 14.0, *)) {
+		AUVoiceIOOtherAudioDuckingConfiguration duck = {true, kAUVoiceIOOtherAudioDuckingLevelDefault};
+		v->advancedDucking = AudioUnitSetProperty(v->unit, kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
+			kAudioUnitScope_Global, 0, &duck, sizeof(duck)) == noErr;
+	}
 	*step = 9;
 	st = AudioUnitInitialize(v->unit);
 	if (st) return st;
@@ -163,6 +174,12 @@ static void sayVoiceQuery(sayVoiceIO *v, int input, sayVoiceLatency *out) {
 	AudioUnitGetProperty(v->unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0, &out->unitLatency, &size);
 }
 
+static void sayVoiceStop(sayVoiceIO *v) {
+	if (v->unit) {
+		AudioOutputUnitStop(v->unit);
+	}
+}
+
 static void sayVoiceClose(sayVoiceIO *v) {
 	if (v->unit) {
 		AudioOutputUnitStop(v->unit);
@@ -178,7 +195,6 @@ import "C"
 
 import (
 	"fmt"
-	"runtime/cgo"
 	"sync"
 	"time"
 	"unsafe"
@@ -186,27 +202,31 @@ import (
 
 // VoiceIO is the system's voice processing audio unit (VoiceProcessingIO on
 // macOS, as used by FaceTime): one device for microphone and speaker, with
-// the system's echo cancellation, noise suppression and gain control.
+// the system's echo cancellation, noise suppression and gain control. Its
+// real-time thread only moves samples through ring (sayring.h); goroutines
+// read and write that.
 type VoiceIO struct {
-	v        *C.sayVoiceIO
-	handle   cgo.Handle
-	onInput  func(samples []int16)
-	onOutput func(out []int16)
-	once     sync.Once
+	v    *C.sayVoiceIO
+	ring *nativeRing
+	once sync.Once
 }
 
 // VoiceIOSupported reports whether this platform has a system voice unit.
 const VoiceIOSupported = true
 
-// StartVoiceIO opens the system voice unit at sampleRate (mono, 16-bit).
-// onInput receives processed microphone blocks (the slice is reused after
-// the call returns); onOutput must fill out with the samples to play. Both
-// run on the system's real-time audio thread.
-func StartVoiceIO(sampleRate int, onInput func(samples []int16), onOutput func(out []int16)) (*VoiceIO, error) {
-	vio := &VoiceIO{onInput: onInput, onOutput: onOutput}
+// StartVoiceIO opens the system voice unit at sampleRate (mono, 16-bit),
+// keeping microphone blocks for ReadMic when mic is set.
+func StartVoiceIO(sampleRate int, mic bool) (*VoiceIO, error) {
+	ring, err := newNativeRing(sampleRate, 1)
+	if err != nil {
+		return nil, err
+	}
+	vio := &VoiceIO{ring: ring}
 	vio.v = (*C.sayVoiceIO)(C.calloc(1, C.size_t(unsafe.Sizeof(C.sayVoiceIO{}))))
-	vio.handle = cgo.NewHandle(vio)
-	vio.v.handle = C.uintptr_t(vio.handle)
+	vio.v.ring = (*C.sayRing)(ring.ptr())
+	if mic {
+		vio.v.mic = 1
+	}
 	var step C.int
 	if st := C.sayVoiceOpen(vio.v, C.double(sampleRate), &step); st != 0 {
 		vio.Close()
@@ -214,6 +234,15 @@ func StartVoiceIO(sampleRate int, onInput func(samples []int16), onOutput func(o
 	}
 	return vio, nil
 }
+
+// AdvancedDucking reports whether the system lowers other apps' sound by
+// the call's voice activity (else by its fixed amount).
+func (vio *VoiceIO) AdvancedDucking() bool { return vio.v.advancedDucking != 0 }
+
+// ReadMic, Write, State: see nativeRing.
+func (vio *VoiceIO) ReadMic(buf []int16) (int, time.Time) { return vio.ring.ReadMic(buf) }
+func (vio *VoiceIO) Write(samples []int16) int            { return vio.ring.Write(samples) }
+func (vio *VoiceIO) State() RingState                     { return vio.ring.State() }
 
 // VoiceLatency is one direction's latency of the system voice unit, as
 // CoreAudio reports it.
@@ -267,6 +296,9 @@ func (vio *VoiceIO) Latency(input bool) VoiceLatency {
 	}
 }
 
+// Stop stops the unit; State still works until Close.
+func (vio *VoiceIO) Stop() { C.sayVoiceStop(vio.v) }
+
 // Close stops the unit and releases it.
 func (vio *VoiceIO) Close() {
 	if vio == nil {
@@ -275,25 +307,6 @@ func (vio *VoiceIO) Close() {
 	vio.once.Do(func() {
 		C.sayVoiceClose(vio.v)
 		C.free(unsafe.Pointer(vio.v))
-		vio.handle.Delete()
+		vio.ring.free()
 	})
-}
-
-//export goVoiceInput
-func goVoiceInput(handle C.uintptr_t, samples *C.int16_t, frames C.UInt32) {
-	vio := cgo.Handle(handle).Value().(*VoiceIO)
-	if vio.onInput != nil && frames > 0 {
-		vio.onInput(unsafe.Slice((*int16)(unsafe.Pointer(samples)), int(frames)))
-	}
-}
-
-//export goVoiceOutput
-func goVoiceOutput(handle C.uintptr_t, samples *C.int16_t, frames C.UInt32) {
-	out := unsafe.Slice((*int16)(unsafe.Pointer(samples)), int(frames))
-	vio := cgo.Handle(handle).Value().(*VoiceIO)
-	if vio.onOutput == nil {
-		clear(out)
-		return
-	}
-	vio.onOutput(out)
 }

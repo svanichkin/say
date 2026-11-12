@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"log"
 	"net"
 	"sort"
@@ -236,6 +237,10 @@ func advanceMediaIndex(index uint16, ticks int32) uint16 {
 	return uint16((int32(index) + ticks) & int32(mediaIndexMask))
 }
 
+// peerSizeWait is how long video waits for the peer to say what size it
+// shows it at, before it goes at the size we show the peer's at.
+const peerSizeWait = 3 * time.Second
+
 // dataSession represents a running UDP voice session that may also multiplex
 // optional video frames over the same PacketConn.
 type dataSession struct {
@@ -386,7 +391,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 			case err != nil:
 				log.Printf("[audio] the peer sends %q, which this version cannot decode: %v", peerCodec, err)
 				rxCodec = peerCodec
-				ui.AddChatMessage(fmt.Sprintf("The peer sends voice as %s, which this Say version cannot decode. Update both sides to the same version.", peerCodec), false)
+				ui.AddChatMessage(lang.T(lang.UnknownCodec, peerCodec), false)
 			case peerFrame != frameSamples:
 				return nil, fmt.Errorf("peer codec %s uses %d-sample frames, ours %d", peerCodec, peerFrame, frameSamples)
 			default:
@@ -395,7 +400,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 		}
 		log.Printf("[audio] sending voice as %s, receiving %s", audioCodec, rxCodec)
 		if rxCodec != audioCodec {
-			ui.AddChatMessage(fmt.Sprintf("Voice: you send %s, the peer sends %s.", audioCodecLabel(audioCodec), audioCodecLabel(rxCodec)), false)
+			ui.AddChatMessage(lang.T(lang.Codecs, audioCodecLabel(audioCodec), audioCodecLabel(rxCodec)), false)
 		}
 		audioSpeakerOut = device.NewPlaybackQueue(audioBufferMaxFrames)
 		audioNetIn = make(chan []byte, audioBufferMaxFrames)
@@ -594,6 +599,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			lastLossReport time.Time
 			lastForcedKey  time.Time
 			lastVideoSent  time.Time // the last datagram (see SetSkipEmpty)
+			sendingStarted = time.Now()
+			guessedSize    bool // the peer's size is ours for it (see peerSizeWait)
 			skippedFrames  int
 			videoSeq       byte
 			// adapted to the peer's video loss: colour first, then hold, then fps
@@ -689,6 +696,20 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 				selfCols, selfRows, selfOK := ui.SelfSlot()
 				peerCols, peerRows, peerOK := ui.PeerSlot()
+				if !peerOK && selfOK && time.Since(sendingStarted) >= peerSizeWait {
+					// The peer has not said what size it shows our video at
+					// (it could not tell, or an older build failed to): send
+					// it at the size we show its video at, rather than
+					// nothing.
+					peerCols, peerRows, peerOK = selfCols, selfRows, true
+					if !guessedSize {
+						log.Printf("[video/udp] the peer has not said what size it shows our video at: sending %dx%d", peerCols, peerRows)
+						guessedSize = true
+					}
+				} else if peerOK && guessedSize {
+					log.Printf("[video/udp] the peer asks for %dx%d now", peerCols, peerRows)
+					guessedSize = false
+				}
 				var addr *net.UDPAddr
 				if peerOK {
 					addr = getPeer()
@@ -805,6 +826,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					if n > mediaHeaderBytes {
 						sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
 					}
+					_, sentIndex, _ := decodeMediaHeader(header[:])                                                                                               // DEBUG-TEMP
+					logs.LogV("[trace] video #%d (frame %d) sent: %d B, %d voice frames from #%d inside", sentIndex, videoSeq-1, n, len(voiceFrames), voiceFirst) // DEBUG-TEMP
 				}
 			}
 		}
@@ -870,6 +893,7 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 			deadlineSetter = ds
 		}
 
+		lastRx := time.Now() // DEBUG-TEMP: gaps in what the peer sends
 		for {
 			select {
 			case <-stopCh:
@@ -897,9 +921,14 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 					setPeer(ua)
 				} else if !ua.IP.Equal(cur.IP) || ua.Port != cur.Port {
 					// Ignore packets from unexpected peers.
+					logs.LogV("[debug] udp: ignored %d bytes from %s (the peer is %s)", n, ua, cur) // DEBUG-TEMP
 					continue
 				}
 			}
+			if gap := time.Since(lastRx); gap > time.Second { // DEBUG-TEMP
+				log.Printf("[debug] udp: the peer's packets back after %v without any", gap.Round(time.Millisecond))
+			}
+			lastRx = time.Now()
 
 			if n < mediaHeaderBytes+1 {
 				continue
@@ -924,6 +953,7 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 					continue
 				}
 				for k, frame := range frames {
+					traceVoiceRx(advanceMediaIndex(index, int32(k)*audioFrameTicks), "voice", len(frame)) // DEBUG-TEMP
 					queueAudioFrame(netAudioIn, advanceMediaIndex(index, int32(k)*audioFrameTicks), frame)
 				}
 
@@ -941,6 +971,7 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 					for k, frame := range voiceFrames {
 						rxAudioBytes += uint64(len(frame))
 						if netAudioIn != nil {
+							traceVoiceRx(advanceMediaIndex(voiceFirst, int32(k)*audioFrameTicks), "video", len(frame)) // DEBUG-TEMP
 							queueAudioFrame(netAudioIn, advanceMediaIndex(voiceFirst, int32(k)*audioFrameTicks), frame)
 						}
 					}
@@ -989,13 +1020,13 @@ func queueAudioFrame(netAudioIn chan []byte, index uint16, frame []byte) {
 	}
 	select {
 	case <-netAudioIn:
-		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped oldest)")
+		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped oldest; voice #%d queued)", index)
 	default:
 	}
 	select {
 	case netAudioIn <- pkt:
 	default:
-		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped newest)")
+		logs.LogV("[voice/udp] drop rx audio frame (queue full, dropped newest: voice #%d)", index)
 	}
 }
 
@@ -1022,6 +1053,7 @@ func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		device.AudioThread() // it feeds the speaker: see device.AudioThread
 		ui.UpdateRxAudioLoss(0)
 		playout := newAudioPlayout(dec, frameSamples, speakerOut)
 		// Well below one 20 ms frame, so a slot is concealed before the
@@ -1068,6 +1100,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		type timedFrame struct {
 			index uint16
 			frame *codec.TextFrame
+			at    time.Time // DEBUG-TEMP: when it was decoded
 		}
 		queue := make([]timedFrame, 0, videoMaxQueuedFrames)
 		lastFrameAt := time.Time{}
@@ -1126,7 +1159,16 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			if len(queue) == 0 {
 				return
 			}
+			// DEBUG-TEMP: the newest is shown, the older ones are passed over.
+			showNewest := func(why string) {
+				for _, f := range queue[:len(queue)-1] {
+					logs.LogV("[trace] video #%d passed over (%s)", f.index, why)
+				}
+				last := queue[len(queue)-1]
+				logs.LogV("[trace] video #%d shown %d ms after it was decoded (%s)", last.index, time.Since(last.at).Milliseconds(), why)
+			}
 			if playbackIndex == nil {
+				showNewest("no sound to keep in step with") // DEBUG-TEMP
 				display(queue[len(queue)-1].frame)
 				queue = queue[:0]
 				return
@@ -1143,6 +1185,15 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			// frame instead of holding video until audio resumes.
 			if !ok || now.Sub(lastPlaybackMove) > videoAudioClockStall ||
 				mediaIndexDelta(queue[0].index, current) > videoMaxLeadTicks {
+				// DEBUG-TEMP: why the picture goes without the sound.
+				switch {
+				case !ok:
+					showNewest("the sound clock is not running")
+				case now.Sub(lastPlaybackMove) > videoAudioClockStall:
+					showNewest(fmt.Sprintf("the sound clock stood still %d ms", now.Sub(lastPlaybackMove).Milliseconds()))
+				default:
+					showNewest(fmt.Sprintf("%d ms ahead of the sound", mediaIndexDelta(queue[0].index, current)*int32(mediaTickDuration/time.Millisecond)))
+				}
 				display(queue[len(queue)-1].frame)
 				queue = queue[:0]
 				return
@@ -1157,6 +1208,9 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				return
 			}
 			candidate := queue[selected]
+			for _, f := range queue[:selected] { // DEBUG-TEMP
+				logs.LogV("[trace] video #%d passed over (a newer frame is due)", f.index)
+			}
 			queue = append(queue[:0], queue[selected+1:]...)
 			// Allow for network transit delay reported by the TCP ping, while
 			// still dropping frames that are too old to be useful for sync.
@@ -1165,10 +1219,13 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				staleLimit = videoMaxStaleThreshold
 			}
 			staleTicks := int32((staleLimit + mediaTickDuration - 1) / mediaTickDuration)
+			behind := mediaIndexDelta(current, candidate.index) * int32(mediaTickDuration/time.Millisecond) // DEBUG-TEMP
 			if mediaIndexDelta(current, candidate.index) <= staleTicks {
+				logs.LogV("[trace] video #%d shown in step with the sound (%d ms behind it, %d ms after decoding)", candidate.index, behind, time.Since(candidate.at).Milliseconds()) // DEBUG-TEMP
 				display(candidate.frame)
 			} else {
-				loss.late(1) // arrived after its sound had played
+				logs.LogV("[trace] video #%d not shown: %d ms behind the sound (limit %v)", candidate.index, behind, staleLimit) // DEBUG-TEMP
+				loss.late(1)                                                                                                     // arrived after its sound had played
 			}
 		}
 
@@ -1201,15 +1258,18 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				}
 				lastFrameAt = now
 				seq := pkt[mediaIndexBytes]
+				logs.LogV("[trace] video #%d (frame %d) arrived, %d B", index, seq, len(pkt)-mediaIndexBytes-videoSeqBytes) // DEBUG-TEMP
 				loss.observe(seq, now)
 				loss.report(now)
 				if haveSeq {
 					switch gap := seq - lastSeq; {
 					case gap == 0 || gap > 128:
-						continue // duplicate or stale: its turn has passed
+						logs.LogV("[trace] video #%d (frame %d) dropped: a duplicate or older than frame %d", index, seq, lastSeq) // DEBUG-TEMP
+						continue                                                                                                   // duplicate or stale: its turn has passed
 					case gap != 1:
 						// A frame is missing: change-only frames have no base
 						// until the next full frame.
+						logs.LogV("[trace] video frames %d..%d missing: the picture waits for a full frame", lastSeq+1, seq-1) // DEBUG-TEMP
 						decoder.ResetBase()
 						requestKeyframe(now)
 					}
@@ -1217,6 +1277,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				haveSeq, lastSeq = true, seq
 				tv, err := decoder.Decode(pkt[mediaIndexBytes+videoSeqBytes:])
 				if err != nil {
+					logs.LogV("[trace] video #%d (frame %d) not decoded: %v", index, seq, err) // DEBUG-TEMP
 					requestKeyframe(now)
 					if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
 						loss.failed()
@@ -1226,7 +1287,7 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				}
 
 				newestIndex, haveNewest = index, true
-				queue = append(queue, timedFrame{index: index, frame: tv})
+				queue = append(queue, timedFrame{index: index, frame: tv, at: time.Now()})
 				sort.Slice(queue, func(i, j int) bool {
 					return mediaIndexDelta(queue[i].index, queue[j].index) < 0
 				})
@@ -1235,6 +1296,9 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				// must hold more than that span of frames.
 				if len(queue) > videoMaxQueuedFrames {
 					loss.late(len(queue) - videoMaxQueuedFrames)
+					for _, f := range queue[:len(queue)-videoMaxQueuedFrames] { // DEBUG-TEMP
+						logs.LogV("[trace] video #%d dropped: too many frames waiting for the sound", f.index)
+					}
 					queue = queue[len(queue)-videoMaxQueuedFrames:]
 					logs.LogV("[video/udp] drop stale queued frame")
 				}

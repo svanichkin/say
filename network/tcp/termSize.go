@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/svanichkin/say/codec"
+	"github.com/svanichkin/say/logs"
 )
 
 // TermSize describes a viewport request in character cells.
@@ -112,6 +113,7 @@ func startTermSizeSender(
 			return
 		}
 		last = TermSize{Cols: cols, Rows: rows}
+		logs.LogV("[term] asking the peer for %dx%d cells", cols, rows)
 		payload, ok := encodeTermSizeFrame(cols, rows)
 		if !ok {
 			return

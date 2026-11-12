@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"log"
 	"net"
 	"strings"
@@ -110,7 +111,7 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	logs.LogV("[p2p] call from %s (%s)", friendLabel, hostOnly)
 
 	if !compatible(peer) {
-		log.Printf("[p2p] rejected call from %s (%s): %s", friendLabel, hostOnly, IncompatibleText(peer))
+		log.Printf("[p2p] rejected call from %s (%s): %s", friendLabel, hostOnly, strings.ReplaceAll(incompatibleText(peer, lang.En), "\n", " · "))
 		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		fmt.Fprint(conn, helloLine(incompatibleReply, conf.HostnameOr("me")))
 		return
@@ -142,6 +143,7 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 			log.Printf("[media] start incoming failed: %v", err)
 		} else if sess != nil {
 			defer sess.Stop()
+			defer hangupWhenMediaEnds(sess, conn)()
 			log.Printf("[media] started (incoming, learning peer)")
 		}
 	} else {

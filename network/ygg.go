@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ygg "github.com/svanichkin/ygg"
@@ -68,6 +69,9 @@ func newYggTransport(verbose bool, cfgPath string) (Transport, error) {
 	ygg.SetLAN(lanEnabled, lanPassword)
 	ygg.SetDirect(directEnabled)
 	ygg.SetConnectivityHandler(func(connected bool) {
+		if yggConnected.Swap(connected) != connected { // DEBUG-TEMP
+			log.Printf("[debug] ygg: connected to the network: %v", connected)
+		}
 		if connected {
 			t.readyOnce.Do(func() {
 				close(t.readyCh)
@@ -116,7 +120,10 @@ func (t *yggTransport) ListenUDP(port int) (net.PacketConn, error) {
 	if err == nil && t.node != nil && t.node.Net != nil {
 		// The netstack exists once a socket is open.
 		st := t.node.Net.Stack
-		t.statsOnce.Do(func() { go logNetstackDrops(st, t.statsStop) })
+		t.statsOnce.Do(func() {
+			go logNetstackDrops(st, t.statsStop)
+			go watchPeers(t.node.Core, t.statsStop) // DEBUG-TEMP
+		})
 	}
 	return pc, err
 }
@@ -186,6 +193,19 @@ func (t *yggTransport) Close() error {
 // IsLocalPeer reports whether host is a direct Yggdrasil peer connected over
 // a local address, which is how LAN discovery (multicast) peers appear.
 func (t *yggTransport) IsLocalPeer(host string) bool {
+	return t.peeredWith(host, func(uri string) bool { return isLocalIP(uriHostIP(uri)) })
+}
+
+// IsDirectPeer reports whether host is one of the node's own Yggdrasil
+// peers (a direct link through the NATs, or LAN discovery): the traffic
+// then goes straight to it, through no other node.
+func (t *yggTransport) IsDirectPeer(host string) bool {
+	return t.peeredWith(host, func(string) bool { return true })
+}
+
+// peeredWith reports whether host is an up Yggdrasil peer whose link URI
+// passes ok.
+func (t *yggTransport) peeredWith(host string, ok func(uri string) bool) bool {
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	if ip == nil || t.node == nil || t.node.Core == nil {
 		return false
@@ -194,9 +214,16 @@ func (t *yggTransport) IsLocalPeer(host string) bool {
 		if !p.Up || len(p.Key) == 0 {
 			continue
 		}
-		if net.IP(address.AddrForKey(p.Key)[:]).Equal(ip) && isLocalIP(uriHostIP(p.URI)) {
+		if net.IP(address.AddrForKey(p.Key)[:]).Equal(ip) && ok(p.URI) {
 			return true
 		}
 	}
 	return false
 }
+
+// yggConnected is whether the node has peers (DEBUG-TEMP).
+var yggConnected atomic.Bool
+
+// Connected reports whether the Yggdrasil node has peers (DEBUG-TEMP: for
+// the call health log).
+func Connected() bool { return yggConnected.Load() }

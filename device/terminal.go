@@ -18,6 +18,28 @@ type TerminalFrame struct {
 	Data string
 }
 
+// screenOut, when set, receives the terminal output instead of stdout: the
+// pixel window draws it (see SetScreen). screenSize reports its size in
+// cells, which changes as the window is resized.
+var (
+	screenOut  io.Writer
+	screenSize func() (cols, rows int)
+)
+
+// SetScreen sends the terminal output to w, a screen whose size in cells
+// size reports, instead of stdout. Call it before the renderer starts.
+func SetScreen(w io.Writer, size func() (cols, rows int)) {
+	screenOut, screenSize = w, size
+}
+
+// out is where terminal output goes.
+func out() io.Writer {
+	if screenOut != nil {
+		return screenOut
+	}
+	return os.Stdout
+}
+
 // Terminal represents a running terminal output device.
 type Terminal struct {
 	done chan struct{}
@@ -37,8 +59,10 @@ func StartTerminal(frameIn <-chan *TerminalFrame, stopCh <-chan struct{}, onStop
 
 	go func() {
 		defer close(t.done)
-		enterAltScreen()
-		defer exitAltScreen()
+		if screenOut == nil {
+			enterAltScreen()
+			defer exitAltScreen()
+		}
 
 		for {
 			select {
@@ -58,10 +82,10 @@ func StartTerminal(frameIn <-chan *TerminalFrame, stopCh <-chan struct{}, onStop
 					continue
 				}
 				BeginSyncOutput()
-				fmt.Print(frame.Data)
+				fmt.Fprint(out(), frame.Data)
 				EndSyncOutput()
 				if q := terminalQueryAfterFrame(); q != "" {
-					fmt.Print(q)
+					fmt.Fprint(out(), q)
 				}
 			}
 		}
@@ -80,14 +104,14 @@ func (t *Terminal) Done() <-chan struct{} {
 
 // BeginSyncOutput enables synchronized output mode (OSC 2026) on terminals that support it.
 func BeginSyncOutput() {
-	if supportsSyncOutput {
+	if supportsSyncOutput && screenOut == nil {
 		fmt.Print("\x1b[?2026h")
 	}
 }
 
 // EndSyncOutput disables synchronized output mode.
 func EndSyncOutput() {
-	if supportsSyncOutput {
+	if supportsSyncOutput && screenOut == nil {
 		fmt.Print("\x1b[?2026l")
 	}
 }
@@ -111,6 +135,10 @@ func exitAltScreen() {
 
 // GetTermSize queries the current terminal size in character cells using stdout.
 func GetTermSize() (cols, rows int, err error) {
+	if screenOut != nil {
+		cols, rows = screenSize()
+		return cols, rows, nil
+	}
 	return termSize()
 }
 
@@ -147,7 +175,7 @@ func copyViaPlatformClipboard(text string) error {
 	case "darwin":
 		return runClipboardCommand(text, "pbcopy")
 	case "windows":
-		return runClipboardCommandWithArgs(text, "cmd", "/c", "clip")
+		return setClipboard(text)
 	case "plan9":
 		return os.WriteFile("/dev/snarf", []byte(text), 0)
 	default:

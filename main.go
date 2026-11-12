@@ -1,26 +1,33 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/gui"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/network"
 	tcpsignal "github.com/svanichkin/say/network/tcp"
 	udptransport "github.com/svanichkin/say/network/udp"
 	"github.com/svanichkin/say/ui"
+	"golang.org/x/term"
 )
 
 var version = "dev"
@@ -29,10 +36,141 @@ const donateMonero = "Monero: 41uoDd1PNKm7j4LaBHHZ77ZPbEwEJzaRHhjEqFtKLZeWjd4sNf
 const support = "Say support: https://github.com/svanichkin/say"
 
 func main() {
+	lang.Init(os.Args[1:])
+	crashLog := keepCrashes()
+	run := run
+	if chooseGUI(os.Args[1:]) {
+		// The pixel window takes the main thread; Say runs beside it and
+		// draws into it as into a terminal.
+		ui.SetPixelMode()
+		app := run
+		run = func() error {
+			return gui.Run(app, gui.Input{
+				Key: ui.KeyInput, Paste: ui.PasteInput, Click: ui.ClickAt, Interrupt: ui.Interrupt,
+				Resized: ui.RequestRedraw, Detail: ui.SetVideoDetail,
+				Frame: ui.PixelFrame, FrameRGB: ui.FrameRGB,
+				Accents: ui.Accents, Chat: ui.ChatAccent, Brick: ui.BrickColour, Mono: ui.AccentMono, Seeds: ui.FrameSeeds, Latency: ui.PeerLatencySnapshot,
+			})
+		}
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "[say] %v\n", err)
+		showError(lang.T(lang.Stopped, err, crashLog))
 		os.Exit(1)
 	}
+}
+
+// keepCrashes sends what the Go runtime prints when Say crashes to a file
+// too (say-crash.log in the configuration directory): started from
+// Explorer with the window there is no console to show it. It returns the
+// file's path.
+func keepCrashes() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "say", "say-crash.log")
+	if os.MkdirAll(filepath.Dir(path), 0o755) != nil {
+		return ""
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return ""
+	}
+	if debug.SetCrashOutput(f, debug.CrashOptions{}) != nil {
+		f.Close()
+		return ""
+	}
+	f.Close() // SetCrashOutput keeps its own handle
+	return path
+}
+
+// chooseGUI decides between the window and the terminal before anything
+// starts (the window has to be set up first; the arguments are parsed
+// properly later). -gui and -text decide; with neither, where the window
+// can be shown and Say runs in a terminal, it asks. The answer is added to
+// the arguments, so that a relaunch in Windows Terminal does not ask again.
+func chooseGUI(args []string) bool {
+	switch {
+	case flagGiven(args, "gui", "gui=true", "gui=1", "gui=on"):
+		return true
+	case flagGiven(args, "text", "gui=false", "gui=0", "gui=off"):
+		return false
+	case !gui.Available() || flagGiven(args, "version", "donate", "support", "help", "h"):
+		return false
+	case !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())):
+		return false
+	}
+	window, asked := askModeDialog() // Windows, started from Explorer
+	if !asked {
+		fmt.Print(lang.T(lang.AskMode))
+		window = askModeKey()
+		if window {
+			fmt.Println("GUI")
+		} else {
+			fmt.Println("TUI")
+		}
+	}
+	if !window {
+		os.Args = append(os.Args, "-text")
+		return false
+	}
+	os.Args = append(os.Args, "-gui")
+	hideConsole() // Windows: the console it was started in is not needed
+	return true
+}
+
+// askModeKey takes the answer as a single key, without Enter: g (or Enter)
+// for the window, t for the terminal; the same keys on a Russian layout
+// (п, е) too. Other keys are ignored; Ctrl+C quits. Where the terminal
+// cannot read single keys, a line is read instead.
+func askModeKey() (window bool) {
+	fd := int(os.Stdin.Fd())
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "t", "tui", "text", "т", "е":
+			return false
+		}
+		return true
+	}
+	defer term.Restore(fd, old)
+	buf := make([]byte, 8)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil || n == 0 {
+			return true
+		}
+		r, _ := utf8.DecodeRune(buf[:n])
+		switch unicode.ToLower(r) {
+		case 'g', 'п', '\r', '\n':
+			return true
+		case 't', 'е', 'т':
+			return false
+		case 3: // Ctrl+C
+			term.Restore(fd, old)
+			fmt.Println()
+			os.Exit(130)
+		}
+	}
+}
+
+// flagGiven reports whether one of the flags (without dashes) is among the
+// arguments.
+func flagGiven(args []string, names ...string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		a = strings.ToLower(strings.TrimLeft(a, "-"))
+		for _, n := range names {
+			if a == n {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func run() (err error) {
@@ -54,7 +192,7 @@ func run() (err error) {
 		printSupportInfo()
 		return nil
 	}
-	if !opts.NoWT && relaunchInWindowsTerminal() {
+	if !opts.NoWT && !opts.GUI && relaunchInWindowsTerminal() {
 		return nil // Say goes on in a Windows Terminal window
 	}
 
@@ -82,8 +220,12 @@ func run() (err error) {
 	if logWriter != nil {
 		logOutput = io.MultiWriter(os.Stderr, logWriter)
 	}
-	log.SetOutput(logOutput)
+	log.SetOutput(logs.Tap(logOutput)) // DEBUG-TEMP: Tap keeps lines for the peer
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	if logWriter != nil && logErr == nil { // DEBUG-TEMP: the peer's log, beside ours
+		logs.SetPeerLogPath(strings.TrimSuffix(logPath, ".log") + "-peer.log")
+		log.Printf("[debug] %s %s, boot %s, %s/%s, args %q", role, appVersion(), logs.BootID, runtime.GOOS, runtime.GOARCH, os.Args[1:])
+	}
 	if logWriter != nil && logErr == nil {
 		fmt.Fprintf(os.Stderr, "[say] logs: %s\n", logPath)
 	} else if logErr != nil {
@@ -92,6 +234,7 @@ func run() (err error) {
 
 	appCtx, appCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer appCancel()
+	ui.SetInterrupt(appCancel) // Ctrl+C and the window's close button: no signal needed (Windows has none)
 
 	viewportFeed := ui.NewViewportFeed(appCtx)
 	defer viewportFeed.Stop()
@@ -119,9 +262,9 @@ func run() (err error) {
 		},
 	}
 
-	initialStatus := "Server starting…"
+	initialStatus := lang.T(lang.BootServer)
 	if opts.Mode == conf.ModeClient {
-		initialStatus = "Client starting…"
+		initialStatus = lang.T(lang.BootClient)
 	}
 
 	udptransport.Configure(true, true)
@@ -136,14 +279,14 @@ func run() (err error) {
 	ui.SetColorMode(opts.Colors)
 	ui.EnsureRenderer(appCtx)
 	if logWriter != nil {
-		log.SetOutput(logWriter)
+		log.SetOutput(logs.Tap(logWriter)) // DEBUG-TEMP: Tap keeps lines for the peer
 	} else {
-		log.SetOutput(io.Discard)
+		log.SetOutput(logs.Tap(io.Discard))
 	}
 	ui.SetStatusMessage(initialStatus)
 	defer func() {
 		if err != nil {
-			ui.SetStatusMessage("Error: " + err.Error())
+			ui.SetStatusMessage(lang.T(lang.Failure) + "\n" + err.Error())
 		} else {
 			ui.SetStatusMessage("")
 		}
@@ -155,9 +298,9 @@ func run() (err error) {
 	}
 	defer transport.Close()
 	if transport.Kind() == network.TransportYggdrasil {
-		ui.SetStatusMessage("Connecting to Ygg network…")
+		ui.SetStatusMessage(lang.T(lang.JackIn) + "\n" + lang.T(lang.YggMesh))
 	} else {
-		ui.SetStatusMessage("Preparing TCP/UDP transport…")
+		ui.SetStatusMessage(lang.T(lang.JackIn) + "\n" + lang.T(lang.RawLink))
 	}
 	if err := transport.WaitReady(appCtx, 30*time.Second); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -166,6 +309,7 @@ func run() (err error) {
 		return err
 	}
 	localAddr := strings.TrimSpace(transport.LocalAddr())
+	ui.SetAccentAddresses(localAddr, "") // the window's colour for us
 	if localAddr != "" {
 		logs.LogV("[p2p] online %s", network.PrettyAddr(localAddr, opts.ListenPort))
 	} else {
@@ -174,9 +318,9 @@ func run() (err error) {
 	if opts.DialAddr == "" {
 		if localAddr != "" {
 			hint := formatSayHint(opts.Transport, localAddr, opts.ListenPort)
-			ui.SetCopyableStatus(hint, hint)
+			ui.SetCopyableStatus(lang.T(lang.NodeOnline)+"\n"+hint+"\n"+lang.T(lang.HandOver), hint)
 		} else if opts.Transport == network.TransportPlain {
-			ui.SetStatusMessage(fmt.Sprintf("Plain TCP/UDP transport ready on port %d", opts.ListenPort))
+			ui.SetStatusMessage(lang.T(lang.NodeOnline) + "\n" + lang.T(lang.RawLink) + "\n" + lang.T(lang.Listening, opts.ListenPort))
 		}
 	}
 
@@ -198,6 +342,8 @@ func run() (err error) {
 			// changes last one call). Where the peer is only matters for
 			// the log: a LAN peer means multicast found a direct link.
 			udptransport.ResetAudioSettings()
+			ui.SetAccentAddresses(localAddr, peerHost)
+			ui.ResetDetailBoost() // a new call earns the finer detail afresh
 			if transport.IsLocalPeer(peerHost) {
 				log.Printf("[p2p] peer %s is in the local network (direct link)", peerHost)
 			} else {
@@ -209,6 +355,8 @@ func run() (err error) {
 			if err != nil {
 				return nil, err
 			}
+			go logCallHealth(peerHost, sess.Done()) // DEBUG-TEMP
+			go showPeerPath(transport, peerHost, sess.Done())
 			if remote == nil {
 				return sess, nil
 			}
@@ -435,9 +583,9 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 		}
 
 		if attempt == 1 {
-			ui.SetStatusMessage(fmt.Sprintf("Dialing %s…", target))
+			ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.Punching))
 		} else {
-			ui.SetStatusMessage(fmt.Sprintf("Re-dialing %s (attempt %d)…", target, attempt))
+			ui.SetStatusMessage(lang.T(lang.Redial) + "\n" + target + "\n" + lang.T(lang.Attempt, attempt))
 		}
 
 		// The dial and the handshake have their own timeouts (up to 10 s
@@ -454,6 +602,7 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			dialed <- dialResult{stop, done, err}
 		}()
 		var res dialResult
+		dialStarted := time.Now() // DEBUG-TEMP
 		select {
 		case <-ctx.Done():
 			go func() {
@@ -466,8 +615,10 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 		}
 		stopClient, connDone, err := res.stop, res.done, res.err
 		if err == nil {
-			ui.SetStatusMessage(fmt.Sprintf("Connected to %s", target))
+			ui.SetStatusMessage(lang.T(lang.Uplink) + "\n" + target + "\n" + lang.T(lang.Handshake))
 			log.Printf("[p2p] dial established to %s", target)
+			log.Printf("[debug] redial: attempt %d connected in %v", attempt, time.Since(dialStarted).Round(time.Millisecond)) // DEBUG-TEMP
+			established := time.Now()                                                                                          // DEBUG-TEMP
 			delay = initialDelay
 			attempt = 1
 
@@ -478,7 +629,9 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			case <-connDone:
 				stopClient()
 				log.Printf("[p2p] connection to %s lost", target)
-				ui.SetStatusMessage(fmt.Sprintf("Connection lost. Re-dialing %s…", target))
+				// DEBUG-TEMP: why is in the "control stream ... ended" line just before.
+				log.Printf("[debug] redial: the call lasted %v; dialing again now", time.Since(established).Round(time.Millisecond))
+				ui.SetStatusMessage(lang.T(lang.SignalLost) + "\n" + target + "\n" + lang.T(lang.Rerouting))
 				continue
 			}
 		}
@@ -492,10 +645,11 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 		}
 		if errors.Is(err, tcpsignal.ErrPeerBusy) {
 			log.Printf("[p2p] %s is busy with another call", target)
-			ui.SetStatusMessage(fmt.Sprintf("%s is busy with another call\nRetrying in %ds…", target, int(delay.Seconds())))
+			ui.SetStatusMessage(lang.T(lang.LineBusy) + "\n" + target + "\n" + lang.T(lang.BusyRetry, int(delay.Seconds())))
 		} else {
 			log.Printf("[p2p] dial failed: %v", err)
-			ui.SetStatusMessage(fmt.Sprintf("Dial failed: %v\nRetrying in %ds…", err, int(delay.Seconds())))
+			log.Printf("[debug] redial: attempt %d failed after %v; next in %v", attempt, time.Since(dialStarted).Round(time.Millisecond), delay) // DEBUG-TEMP
+			ui.SetStatusMessage(lang.T(lang.NoCarrier) + "\n" + target + "\n" + err.Error() + "\n" + lang.T(lang.Retry, int(delay.Seconds())))
 		}
 
 		timer := time.NewTimer(delay)
@@ -579,7 +733,63 @@ func printSupportInfo() {
 	fmt.Println(support)
 }
 
+// showPeerPath shows next to the ping which way the call goes, P2P or
+// through Yggdrasil, until the media session ends. A direct link comes and
+// goes during a call, so it is looked at every second.
+func showPeerPath(transport network.Transport, peer string, done <-chan struct{}) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	last := ""
+	for {
+		path := ui.PathMesh
+		if transport.IsDirectPeer(peer) {
+			path = ui.PathDirect
+		}
+		if path != last {
+			log.Printf("[p2p] the call goes %s to %s", path, peer)
+			last = path
+		}
+		ui.UpdatePeerPath(path)
+		select {
+		case <-done:
+			ui.UpdatePeerPath("")
+			return
+		case <-tick.C:
+		}
+	}
+}
+
 // directSession is a call's media session together with its direct link.
+// logCallHealth logs the call's state every few seconds until the media
+// session ends, and how long it lasted. DEBUG-TEMP: remove once calls are
+// reliable.
+func logCallHealth(peer string, done <-chan struct{}) {
+	started := time.Now()
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			log.Printf("[debug] media with %s stopped after %v", peer, time.Since(started).Round(time.Second))
+			return
+		case <-tick.C:
+			txA, txV, rxA, rxV := ui.NetRateSnapshot()
+			rxVL, rxVAt := ui.RxVideoLossSnapshot()
+			peerVL, peerVAt := ui.PeerVideoLossSnapshot()
+			rxAL, rxAAt := ui.RxAudioLossSnapshot()
+			age := func(t time.Time) string {
+				if t.IsZero() {
+					return "never"
+				}
+				return time.Since(t).Round(time.Second).String() + " ago"
+			}
+			log.Printf("[debug] health %s +%v: rtt %v; tx audio %.1f video %.1f kB/s; rx audio %.1f video %.1f kB/s; rx video loss %.0f%% (%s), peer's of ours %.0f%% (%s), rx audio loss %.0f%% (%s); ygg %v",
+				peer, time.Since(started).Round(time.Second), ui.PeerLatencySnapshot(), txA, txV, rxA, rxV,
+				rxVL*100, age(rxVAt), peerVL*100, age(peerVAt), rxAL*100, age(rxAAt), network.Connected())
+		}
+	}
+}
+
 type directSession struct {
 	tcpsignal.MediaSession
 	stopDirect func()

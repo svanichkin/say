@@ -480,3 +480,92 @@ func (d quietDecoder) DecodeFrame(p []byte, dst []int16) (int, error) {
 }
 func (d quietDecoder) Conceal(dst []int16) (int, error) { return d.DecodeFrame(nil, dst) }
 func (quietDecoder) IsDTXFrame([]byte) bool             { return false }
+
+// A stall that leaves the playback clock far behind the sender's (here: a
+// second of audio arrives at once) is shed within seconds of speech with
+// pauses (DTX), even when every one-second window of the queue holds a
+// pause, so the queue alone never shows the delay.
+func TestStallBacklogIsShedInPauses(t *testing.T) {
+	const frame = 160
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	now := time.Now()
+	idx := uint16(1000)
+	send := func(n int, silent bool) {
+		for range n {
+			payload := []byte{1, 0}
+			if silent {
+				payload[1] = 'S'
+			}
+			p.onPacket(idx, payload, now)
+			idx = advanceMediaIndex(idx, audioFrameTicks)
+		}
+	}
+	step := func() {
+		p.onTickAt(now)
+		q.TakeFrame()
+		now = now.Add(20 * time.Millisecond)
+	}
+	// Start, then a second's backlog at once.
+	for range 20 {
+		send(1, false)
+		step()
+	}
+	send(50, false)
+	// Speech in bursts of 15 frames, then a pause of 25 slots with a
+	// silence update every 8 (DTX), as the peer sends; 20 ms a slot.
+	for cycle := 0; cycle < 15; cycle++ {
+		for range 15 {
+			send(1, false)
+			step()
+		}
+		for k := range 25 {
+			if k%8 == 0 {
+				send(1, true)
+			} else {
+				idx = advanceMediaIndex(idx, audioFrameTicks) // not sent
+			}
+			step()
+		}
+	}
+	if lag := p.lag() * 1000 / audioSampleRate; lag > 300 {
+		t.Fatalf("still %d ms behind the sender after 15 s of speech with pauses", lag)
+	}
+}
+
+// With a device ring, the playout keeps the ring's margin queued beyond
+// the device's period, also through silence (comfort noise made up ahead),
+// so the device plays on while the goroutines filling the ring are late.
+func TestPlayoutKeepsTheRingMargin(t *testing.T) {
+	playoutRingMarginMs = 40
+	defer func() { playoutRingMarginMs = 0 }()
+	const frame = 160
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	margin := audioSampleRate * 40 / 1000
+	now := time.Now()
+	for i := 0; i < 10; i++ { // speech primes the buffer
+		p.onPacket(uint16(i*audioFrameTicks)&mediaIndexMask, []byte{byte(i), 0}, now)
+		p.onTickAt(now)
+		now = now.Add(20 * time.Millisecond)
+	}
+	// Then silence (DTX): a silence frame every 8 slots, the slots between
+	// made up; the device takes 20 ms each step.
+	for step := 0; step < 100; step++ {
+		if i := 10 + step; i%8 == 0 {
+			p.onPacket(uint16(i*audioFrameTicks)&mediaIndexMask, []byte{byte(i), 0}, now)
+		}
+		p.onTickAt(now)
+		if got := q.QueuedSamples(); got < margin {
+			t.Fatalf("step %d: %d samples queued, below the ring margin %d", step, got, margin)
+		}
+		for need := frame; need > 0; {
+			f, ok := q.TakeFrame()
+			if !ok {
+				t.Fatalf("step %d: underrun", step)
+			}
+			need -= len(f.Samples)
+		}
+		now = now.Add(20 * time.Millisecond)
+	}
+}

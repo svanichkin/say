@@ -68,8 +68,10 @@ type queueRenderer struct {
 	pendingLength       int
 	pendingMediaSamples int
 	declick             crossfade
-	lastOut             int16 // last sample written to the device
-	starved             bool  // the previous callback ran out of audio
+	lastOut             int16     // last sample written to the device
+	starved             bool      // the previous callback ran out of audio
+	stats               playStats // DEBUG-TEMP
+	drySamples          int       // DEBUG-TEMP: silence since the queue ran dry
 }
 
 // render fills out completely with the next queued audio (silence after it
@@ -84,6 +86,11 @@ func (r *queueRenderer) render(out []int16) {
 	for filled < len(out) {
 		if len(r.pending) == 0 {
 			if frame, gap, ok := r.in.pop(); ok && frame.Samples != nil {
+				if r.drySamples > 0 { // DEBUG-TEMP
+					tracePlay(PlayEvent{Kind: PlayDry, Index: r.pendingIndex, At: time.Now(), Samples: r.drySamples / r.channels})
+					r.drySamples = 0
+				}
+				tracePlay(PlayEvent{Kind: PlayStarted, Index: frame.MediaIndex, At: time.Now(), Samples: len(frame.Samples) / r.channels}) // DEBUG-TEMP
 				r.pending = frame.Samples
 				r.pendingIndex = frame.MediaIndex
 				r.pendingSamples = 0
@@ -102,6 +109,8 @@ func (r *queueRenderer) render(out []int16) {
 		}
 		if len(r.pending) == 0 {
 			// Underrun: ramp the last sample down instead of stepping to zero.
+			r.stats.note(len(out), out[:filled], len(out)-filled) // DEBUG-TEMP
+			r.drySamples += len(out) - filled                     // DEBUG-TEMP
 			r.declick.fadeOut(out[filled:], r.lastOut)
 			r.lastOut = 0
 			r.starved = true
@@ -119,6 +128,7 @@ func (r *queueRenderer) render(out []int16) {
 			speaker.playbackSet.Store(true)
 		}
 	}
+	r.stats.note(len(out), out, 0) // DEBUG-TEMP
 }
 
 // release returns the unplayed rest of the current frame to the queue's

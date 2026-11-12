@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"io/fs"
 	"net"
 	"os"
@@ -273,6 +274,7 @@ type AppOptions struct {
 	NoLAN       bool
 	NoWT        bool // -nowt: stay in the console Windows started us in
 	NoDirect    bool // -nodirect: no direct links through the NATs, calls stay on Yggdrasil routes
+	GUI         bool // -gui: a pixel window instead of the terminal
 	NoMic       bool
 	SysAudio    bool // the system voice processing (default on macOS and Windows)
 	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
@@ -311,6 +313,12 @@ func ParseCLI() (*AppOptions, error) {
 		// is the default where Say has it: macOS and Windows.
 		// -sysaudio=false opts out.
 		SysAudio: runtime.GOOS == "darwin" || runtime.GOOS == "windows",
+	}
+	// DEBUG-TEMP: Windows logs at debug level without flags (-log=false
+	// turns it off), so that a remote user's drops can be traced. Remove
+	// once calls are reliable.
+	if runtime.GOOS == "windows" {
+		opts.LogEnabled, opts.LogDebug, opts.Verbose = true, true, true
 	}
 
 	rawArgs := compactArgs(os.Args[1:])
@@ -838,7 +846,25 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.NoLAN = boolVal
+		case "gui":
+			boolVal := true
+			if hasValue && value != "" {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return fmt.Errorf("invalid value for -gui: %q", value)
+				}
+				boolVal = parsed
+			}
+			opts.GUI = boolVal
+		case "text":
+			opts.GUI = false // the terminal: the window is not asked about
+		case "lang":
+			// Picked at start (lang.Init); here it is only checked.
+			if _, ok := lang.Match(value); !hasValue || !ok {
+				return fmt.Errorf("-lang takes one of: %s", strings.Join(lang.Supported(), ", "))
+			}
 		case "nodirect":
+
 			boolVal := true
 			if hasValue && value != "" {
 				parsed, err := strconv.ParseBool(value)
@@ -923,7 +949,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera", "colors":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera", "colors", "lang":
 		return true
 	default:
 		return false

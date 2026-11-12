@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/svanichkin/say/device"
@@ -247,14 +248,14 @@ func viewportForPoint(col, row int) viewportID {
 	if !ok {
 		return viewportNone
 	}
-	canvasCols := ts.Cols - 2*termBorder
+	canvasCols := ts.Cols - 2*termSide
 	canvasRows := ts.Rows - 2*termBorder
 	if canvasCols <= 0 || canvasRows <= 0 {
 		return viewportNone
 	}
 	canvasTop := termBorder + 1
 
-	if col < termBorder+1 || col >= termBorder+1+canvasCols || row < canvasTop || row >= canvasTop+canvasRows {
+	if col < termSide+1 || col >= termSide+1+canvasCols || row < canvasTop || row >= canvasTop+canvasRows {
 		return viewportNone
 	}
 
@@ -279,8 +280,8 @@ func viewportForPoint(col, row int) viewportID {
 	if row >= canvasTop+slots.selfSlot.rows {
 		return viewportNone
 	}
-	groupCols := slots.selfSlot.cols + termSeparator + slots.peerSlot.cols
-	videoLeft := termBorder + 1 + max(0, (ts.Cols-2*termBorder-groupCols)/2)
+	groupCols := slots.selfSlot.cols + termGap + slots.peerSlot.cols
+	videoLeft := termSide + 1 + max(0, (ts.Cols-2*termSide-groupCols)/2)
 	if slots.selfSlot.cols <= 0 || slots.peerSlot.cols <= 0 {
 		return viewportNone
 	}
@@ -290,7 +291,7 @@ func viewportForPoint(col, row int) viewportID {
 		}
 		return viewportNone
 	}
-	peerLeft := videoLeft + slots.selfSlot.cols + termSeparator
+	peerLeft := videoLeft + slots.selfSlot.cols + termGap
 	if col >= peerLeft && col < peerLeft+slots.peerSlot.cols {
 		if remote != nil {
 			return viewportPeer
@@ -301,8 +302,27 @@ func viewportForPoint(col, row int) viewportID {
 
 // interruptSelf stops Say as an interrupt from the terminal would: the raw
 // mode some systems need for keys also turns off the terminal's own interrupt.
+// With a stop installed (SetInterrupt) it calls that: Windows cannot send a
+// process an interrupt, so the signal did nothing there (the window's close
+// button and Ctrl+C left Say running).
 func interruptSelf() {
+	if stop := interruptStop.Load(); stop != nil {
+		(*stop)()
+		return
+	}
 	if p, err := os.FindProcess(os.Getpid()); err == nil {
 		_ = p.Signal(os.Interrupt)
 	}
+}
+
+var interruptStop atomic.Pointer[func()]
+
+// SetInterrupt installs how Say is stopped as by an interrupt: what Ctrl+C
+// and the window's close button do.
+func SetInterrupt(stop func()) {
+	if stop == nil {
+		interruptStop.Store(nil)
+		return
+	}
+	interruptStop.Store(&stop)
 }

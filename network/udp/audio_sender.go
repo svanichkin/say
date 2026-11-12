@@ -45,6 +45,7 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		device.AudioThread() // see device.AudioThread
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
 		last := time.Now()
@@ -61,6 +62,11 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				return true
 			}
 			n, err := pc.WriteTo(data, addr)
+			if _, first, ok := decodeMediaHeader(data); ok && err == nil { // DEBUG-TEMP
+				if frames, ferr := splitAudioBundle(data[mediaHeaderBytes:]); ferr == nil {
+					logs.LogV("[trace] voice datagram sent: #%d..%d frames %d, %d B", first, advanceMediaIndex(first, int32(len(frames)-1)*audioFrameTicks), len(frames), n)
+				}
+			}
 			if err != nil {
 				if !isFatalSendError(err) {
 					sendErrLog.report("voice", err)
@@ -128,11 +134,13 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}()
 	go func() {
 		defer wg.Done()
+		device.AudioThread() // see device.AudioThread
 		defer close(packets)
 		if aec != nil && aec.trace != nil {
 			defer aec.trace.close()
 		}
 		var pcmBuf []int16
+		micLevel := levelMeter{name: "mic, as sent"} // DEBUG-TEMP
 		var pcmStartAt time.Time
 		var expectedSample uint64
 		var timelineValid bool
@@ -199,6 +207,8 @@ func startAudioSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 							}
 							return
 						}
+						micLevel.add(pcm, written > audioSIDMaxBytes)                                                                                                 // DEBUG-TEMP
+						logs.LogV("[trace] voice #%d encoded: %d B (%s), %s", mediaIndex(mediaEpoch, pcmStartAt), written, speechOrSilence(written), frameLevel(pcm)) // DEBUG-TEMP
 						if written > 0 {
 							header := encodeMediaHeader(mediaKindAudio, mediaIndex(mediaEpoch, pcmStartAt))
 							data := make([]byte, mediaHeaderBytes+written)

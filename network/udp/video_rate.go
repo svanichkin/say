@@ -1,6 +1,7 @@
 package udp
 
 import (
+	"github.com/svanichkin/say/logs"
 	"time"
 
 	"github.com/svanichkin/say/ui"
@@ -52,6 +53,9 @@ func (m *videoLossMeter) observe(seq byte, now time.Time) {
 	case gap > 128:
 		return // reordered or stale: already counted as missing
 	}
+	if gap > 1 { // DEBUG-TEMP
+		logs.LogV("[debug] video: %d frames lost (between %d and %d)", gap-1, m.last, seq)
+	}
 	m.last = seq
 	m.expected += gap
 	m.lost += gap - 1
@@ -59,6 +63,7 @@ func (m *videoLossMeter) observe(seq byte, now time.Time) {
 
 // failed counts a received frame that could not be decoded as lost.
 func (m *videoLossMeter) failed() {
+	logs.LogV("[debug] video: a frame could not be decoded") // DEBUG-TEMP
 	m.lost++
 }
 
@@ -69,6 +74,9 @@ func (m *videoLossMeter) failed() {
 // are not counted: the path delivers unevenly, and a smaller stream does not
 // change that.
 func (m *videoLossMeter) late(n int) {
+	if n > 0 { // DEBUG-TEMP
+		logs.LogV("[debug] video: %d frames too late to show", n)
+	}
 	m.lost += max(0, n)
 }
 

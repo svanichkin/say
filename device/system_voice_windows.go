@@ -3,7 +3,7 @@
 package device
 
 /*
-#cgo LDFLAGS: -lole32 -lmsdmo -lstrmiids -ldmoguids -lwmcodecdspuuid -luuid -lpropsys
+#cgo LDFLAGS: -lavrt -lole32 -lmsdmo -lstrmiids -ldmoguids -lwmcodecdspuuid -luuid -lpropsys
 #define COBJMACROS
 #include <windows.h>
 #include <objbase.h>
@@ -13,11 +13,53 @@ package device
 #include <mmreg.h>
 #include <propsys.h>
 #include <wmcodecdsp.h>
+#include <mmdeviceapi.h>
+#include <wchar.h>
 #include <string.h>
+#include <avrt.h>
+#include "sayring.h"
 
 // Property keys of the Voice Capture DSP (wmcodecdsp.h in the Windows SDK;
 // missing from mingw-w64). Same GUID, different property ids.
 static const PROPERTYKEY sayPK_SystemMode = {{0x6f52c567, 0x0360, 0x4bd2, {0x96, 0x17, 0xcc, 0xbf, 0x14, 0x21, 0xc9, 0x39}}, 2};
+static const PROPERTYKEY sayPK_DeviceIndexes = {{0x6f52c567, 0x0360, 0x4bd2, {0x96, 0x17, 0xcc, 0xbf, 0x14, 0x21, 0xc9, 0x39}}, 4};
+
+static const CLSID sayCLSID_MMDeviceEnumerator = {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
+static const IID sayIID_IMMDeviceEnumerator = {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
+
+// sayCallEndpoint is the index, among the active endpoints of flow (the
+// DSP's device indexes), of the default device for calls
+// (eCommunications); -1 if none.
+static int sayCallEndpoint(IMMDeviceEnumerator *en, EDataFlow flow) {
+	IMMDevice *def = NULL;
+	LPWSTR defID = NULL;
+	int idx = -1;
+	if (FAILED(IMMDeviceEnumerator_GetDefaultAudioEndpoint(en, flow, eCommunications, &def))) {
+		return -1;
+	}
+	if (SUCCEEDED(IMMDevice_GetId(def, &defID))) {
+		IMMDeviceCollection *col = NULL;
+		if (SUCCEEDED(IMMDeviceEnumerator_EnumAudioEndpoints(en, flow, DEVICE_STATE_ACTIVE, &col))) {
+			UINT n = 0;
+			IMMDeviceCollection_GetCount(col, &n);
+			for (UINT i = 0; i < n && idx < 0; i++) {
+				IMMDevice *d = NULL;
+				LPWSTR id = NULL;
+				if (SUCCEEDED(IMMDeviceCollection_Item(col, i, &d))) {
+					if (SUCCEEDED(IMMDevice_GetId(d, &id))) {
+						if (wcscmp(id, defID) == 0) idx = (int)i;
+						CoTaskMemFree(id);
+					}
+					IMMDevice_Release(d);
+				}
+			}
+			IMMDeviceCollection_Release(col);
+		}
+		CoTaskMemFree(defID);
+	}
+	IMMDevice_Release(def);
+	return idx;
+}
 
 // sayBuffer is a minimal IMediaBuffer over memory owned by sayAEC.
 typedef struct {
@@ -65,6 +107,7 @@ typedef struct {
 	IPropertyStore *props;
 	sayBuffer buf;
 	int comInit; // CoInitializeEx succeeded and must be undone
+	int render, capture; // the devices for calls it uses (-1: the default)
 } sayAEC;
 
 // sayAECOpen creates the Voice Capture DSP in source mode (it opens the
@@ -94,6 +137,26 @@ static HRESULT sayAECOpen(sayAEC *a, int rate, int *step) {
 	*step = 4;
 	hr = IPropertyStore_SetValue(a->props, &sayPK_SystemMode, &pv);
 	if (FAILED(hr)) return hr;
+
+	// The devices for calls, the speaker's too (miniaudio plays on the
+	// default device for calls): the DSP cancels the echo of what plays on
+	// its render device. Where they cannot be found the DSP takes its
+	// defaults.
+	a->render = a->capture = -1;
+	IMMDeviceEnumerator *en = NULL;
+	if (SUCCEEDED(CoCreateInstance(&sayCLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &sayIID_IMMDeviceEnumerator, (void **)&en))) {
+		a->render = sayCallEndpoint(en, eRender);
+		a->capture = sayCallEndpoint(en, eCapture);
+		IMMDeviceEnumerator_Release(en);
+	}
+	if (a->render >= 0 && a->capture >= 0) {
+		PropVariantInit(&pv);
+		pv.vt = VT_I4;
+		pv.lVal = (LONG)(((unsigned long)a->render << 16) | ((unsigned long)a->capture & 0xffff));
+		if (FAILED(IPropertyStore_SetValue(a->props, &sayPK_DeviceIndexes, &pv))) {
+			a->render = a->capture = -1;
+		}
+	}
 
 	DMO_MEDIA_TYPE mt;
 	memset(&mt, 0, sizeof(mt));
@@ -172,13 +235,98 @@ static void sayAECClose(sayAEC *a) {
 		a->comInit = 0;
 	}
 }
+
+// The DSP is read on a thread of its own, in C, at the priority Windows
+// gives audio (MMCSS "Audio"), into a sayRing: a Go thread can be held up
+// by the Go scheduler, and the DSP drops what is not read in time. COM
+// objects stay on the thread that created them, so it opens the DSP too.
+typedef struct {
+	sayRing *ring;
+	int rate;
+	volatile LONG quit;
+	HANDLE thread, ready;
+	HRESULT openHR;
+	int openStep;
+	int render, capture; // the DSP's devices (sayAEC)
+	volatile LONG lastErr, errors; // ProcessOutput failures, for the log
+} sayAECThread;
+
+static DWORD WINAPI sayAECLoop(LPVOID p) {
+	sayAECThread *t = (sayAECThread *)p;
+	sayAEC a;
+	int step = 0;
+	HRESULT hr = sayAECOpen(&a, t->rate, &step);
+	t->openHR = hr;
+	t->openStep = step;
+	t->render = a.render;
+	t->capture = a.capture;
+	SetEvent(t->ready);
+	if (hr != 0) {
+		sayAECClose(&a);
+		return 0;
+	}
+	DWORD task = 0;
+	HANDLE mm = AvSetMmThreadCharacteristicsW(L"Audio", &task);
+	short *buf = (short *)malloc(t->rate * sizeof(short)); // up to one second per read
+	while (buf && !InterlockedCompareExchange(&t->quit, 0, 0)) {
+		Sleep(10); // the DSP works in 10 ms frames
+		for (;;) {
+			int more = 0;
+			HRESULT h = 0;
+			int n = sayAECRead(&a, buf, t->rate, &more, &h);
+			if (h != 0 && h != 1) { // 1: S_FALSE, no data yet
+				InterlockedExchange(&t->lastErr, (LONG)h);
+				InterlockedIncrement(&t->errors);
+			}
+			if (n > 0) {
+				sayRingMicPut(t->ring, buf, (uint32_t)n, sayRingNow());
+			}
+			if (!more) break;
+		}
+	}
+	free(buf);
+	if (mm) AvRevertMmThreadCharacteristics(mm);
+	sayAECClose(&a);
+	return 0;
+}
+
+// sayAECStart opens the DSP on its thread; it returns the HRESULT and the
+// step of sayAECOpen.
+static HRESULT sayAECStart(sayAECThread *t, int *step) {
+	t->ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+	t->thread = CreateThread(NULL, 0, sayAECLoop, t, 0, NULL);
+	if (!t->thread) {
+		*step = 0;
+		CloseHandle(t->ready);
+		return HRESULT_FROM_WIN32(GetLastError());
+	}
+	WaitForSingleObject(t->ready, INFINITE);
+	*step = t->openStep;
+	if (t->openHR != 0) {
+		WaitForSingleObject(t->thread, INFINITE);
+		CloseHandle(t->thread);
+		CloseHandle(t->ready);
+	}
+	return t->openHR;
+}
+
+static void sayAECStop(sayAECThread *t) {
+	InterlockedExchange(&t->quit, 1);
+	WaitForSingleObject(t->thread, INFINITE);
+	CloseHandle(t->thread);
+	CloseHandle(t->ready);
+}
+
+static LONG sayAECErrors(sayAECThread *t, LONG *last) {
+	*last = InterlockedCompareExchange(&t->lastErr, 0, 0);
+	return InterlockedCompareExchange(&t->errors, 0, 0);
+}
 */
 import "C"
 
 import (
 	"fmt"
 	"log"
-	"runtime"
 	"time"
 	"unsafe"
 )
@@ -199,33 +347,33 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick, periodSamples, periods in
 		return speaker, nil, nil
 	}
 
+	ring, err := newNativeRing(sampleRate, 1)
+	if err != nil {
+		speaker.Close()
+		return nil, nil, err
+	}
+	t := (*C.sayAECThread)(C.calloc(1, C.size_t(unsafe.Sizeof(C.sayAECThread{}))))
+	t.ring = (*C.sayRing)(ring.ptr())
+	t.rate = C.int(sampleRate)
+	var step C.int
+	if hr := C.sayAECStart(t, &step); hr != 0 {
+		C.free(unsafe.Pointer(t))
+		ring.free()
+		speaker.Close()
+		return nil, nil, fmt.Errorf("voice capture DSP: step %d failed with HRESULT 0x%08x", int(step), uint32(hr))
+	}
+
 	micOut := make(chan AudioCaptureFrame, 48)
-	ready := make(chan error, 1)
+	capture := &systemVoiceCapture{sampleRate: sampleRate, frameSize: max(1, sampleRate/50), out: micOut}
 	quit := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer close(micOut)
-		// COM objects stay on the thread that created them.
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		a := (*C.sayAEC)(C.calloc(1, C.size_t(unsafe.Sizeof(C.sayAEC{}))))
-		defer C.free(unsafe.Pointer(a))
-		var step C.int
-		if hr := C.sayAECOpen(a, C.int(sampleRate), &step); hr != 0 {
-			C.sayAECClose(a)
-			ready <- fmt.Errorf("voice capture DSP: step %d failed with HRESULT 0x%08x", int(step), uint32(hr))
-			return
-		}
-		defer C.sayAECClose(a)
-		ready <- nil
-
-		buf := make([]int16, sampleRate) // up to one second per read
-		var firstSample uint64
-		var captureEpoch time.Time
-		var lastErr C.HRESULT
-		tick := time.NewTicker(10 * time.Millisecond) // the DSP works in 10 ms frames
+		pumpMic(ring, capture, quit)
+	}()
+	go func() { // the DSP's failures, as they change
+		var seen C.LONG
+		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
 		for {
 			select {
@@ -233,53 +381,26 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick, periodSamples, periods in
 				return
 			case <-tick.C:
 			}
-			for {
-				var more C.int
-				var hr C.HRESULT
-				n := int(C.sayAECRead(a, (*C.short)(unsafe.Pointer(&buf[0])), C.int(len(buf)), &more, &hr))
-				if hr != 0 && hr != 1 && hr != lastErr { // 1: S_FALSE, no data yet
-					log.Printf("[audio] voice capture DSP: ProcessOutput HRESULT 0x%08x", uint32(hr))
-				}
-				lastErr = hr
-				if n > 0 {
-					if captureEpoch.IsZero() {
-						captureEpoch = time.Now().Add(-time.Duration(n) * time.Second / time.Duration(sampleRate))
-					}
-					frame := AudioCaptureFrame{
-						Samples:     append([]int16(nil), buf[:n]...),
-						CapturedAt:  captureEpoch.Add(time.Duration(firstSample) * time.Second / time.Duration(sampleRate)),
-						FirstSample: firstSample,
-					}
-					firstSample += uint64(n)
-					select {
-					case micOut <- frame:
-					default:
-						select {
-						case <-micOut:
-						default:
-						}
-						select {
-						case micOut <- frame:
-						default:
-						}
-					}
-				}
-				if more == 0 {
-					break
-				}
+			var last C.LONG
+			if n := C.sayAECErrors(t, &last); n != seen {
+				log.Printf("[audio] voice capture DSP: ProcessOutput HRESULT 0x%08x (%d failures)", uint32(last), int(n))
+				seen = n
 			}
 		}
 	}()
-	if err := <-ready; err != nil {
-		<-done
-		speaker.Close()
-		return nil, nil, err
+	devices := "the default devices"
+	if t.render >= 0 {
+		devices = fmt.Sprintf("the devices for calls (render #%d, capture #%d)", int(t.render), int(t.capture))
 	}
-	log.Printf("[audio] system voice: Windows Voice Capture DSP (echo cancellation, noise suppression, gain control) on the default microphone; speaker %d ms x %d",
-		periodSamples*1000/sampleRate, periods)
+	log.Printf("[audio] system voice: Windows Voice Capture DSP (echo cancellation, noise suppression, gain control) on %s; speaker %d ms x %d, a call's stream on the default device for calls",
+		devices, periodSamples*1000/sampleRate, periods)
 	speaker.closeDevice = func() {
+		C.sayAECStop(t)
 		close(quit)
 		<-done
+		C.free(unsafe.Pointer(t))
+		ring.free()
+		close(micOut)
 	}
 	return speaker, micOut, nil
 }

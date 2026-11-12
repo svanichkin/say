@@ -81,6 +81,9 @@ func detectPlainLocalAddr() string {
 // StartDirect does nothing: plain transport connects directly anyway.
 func (t *plainTransport) StartDirect(string) func() { return func() {} }
 
+// IsDirectPeer is always true: plain transport talks to the peer's address.
+func (t *plainTransport) IsDirectPeer(string) bool { return true }
+
 func (t *plainTransport) IsLocalPeer(host string) bool {
 	return isLocalIP(net.ParseIP(strings.Trim(host, "[]")))
 }

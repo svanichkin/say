@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"github.com/svanichkin/say/lang"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -112,12 +113,20 @@ func progressText(verb, name string, done, total int64, rate *transferRate) stri
 // cursorBlinkPeriod is one on or off phase of the input cursor.
 const cursorBlinkPeriod = 530 * time.Millisecond
 
+// blinkEpoch is where the cursor's blink counts from until something is
+// typed: from the zero time the span overflows and stays put, and the
+// cursor would not blink.
+var blinkEpoch = time.Now()
+
 // inputCursorVisible reports the blink phase of the input cursor at now.
 func inputCursorVisible(now time.Time) bool {
 	chatState.RLock()
-	since := now.Sub(chatState.typedAt)
+	from := chatState.typedAt
 	chatState.RUnlock()
-	return (since/cursorBlinkPeriod)%2 == 0
+	if from.IsZero() {
+		from = blinkEpoch
+	}
+	return (now.Sub(from)/cursorBlinkPeriod)%2 == 0
 }
 
 func chatKey(r rune) {
@@ -153,7 +162,7 @@ func chatKey(r rune) {
 				AddChatMessage(text, true)
 				return
 			}
-			chatState.messages = append(chatState.messages, ChatMessage{Text: "Not connected", Local: false})
+			chatState.messages = append(chatState.messages, ChatMessage{Text: lang.T(lang.NotConnected), Local: false})
 		}
 	case 0x7f, 0x08:
 		if chatState.input != "" {
@@ -204,7 +213,7 @@ func chatPaste(s string) {
 // time: otherwise it notes that in the chat and returns false.
 func startSendingLocked(path string) bool {
 	if chatState.sending.active {
-		appendMessageLocked(ChatMessage{Text: "Wait until the current file is sent: " + filepath.Base(path), Local: true})
+		appendMessageLocked(ChatMessage{Text: lang.T(lang.WaitFile, filepath.Base(path)), Local: true})
 		return false
 	}
 	chatState.sending = liveEntry{active: true}
@@ -215,7 +224,7 @@ func startSendingLocked(path string) bool {
 // entry on our side.
 func SetTransferProgress(name string, sent, total int64) {
 	chatState.Lock()
-	setLiveLocked(&chatState.sending, true, progressText("Sending", name, sent, total, &chatState.sending.rate))
+	setLiveLocked(&chatState.sending, true, progressText(lang.T(lang.Sending), name, sent, total, &chatState.sending.rate))
 	chatState.Unlock()
 	RequestRedraw()
 }
@@ -244,7 +253,7 @@ func FinishTransfer(text string) {
 func SetReceiveProgress(name string, received, total int64) {
 	chatState.Lock()
 	chatState.receiving.active = true
-	setLiveLocked(&chatState.receiving, false, progressText("Receiving", name, received, total, &chatState.receiving.rate))
+	setLiveLocked(&chatState.receiving, false, progressText(lang.T(lang.Receiving), name, received, total, &chatState.receiving.rate))
 	chatState.Unlock()
 	RequestRedraw()
 }

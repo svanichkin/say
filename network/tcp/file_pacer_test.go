@@ -43,7 +43,7 @@ func TestFilePacerBacksOffOnQueueAndLoss(t *testing.T) {
 		t.Fatalf("queue over target: rate %.0f, want %.0f", p.rate, start*fileRateDecrease)
 	}
 	before := p.rate
-	now = now.Add(time.Second) // past the hold of the last decrease
+	now = now.Add(time.Second)                                  // past the hold of the last decrease
 	probe(p, now, fileProbeInterval, 30*time.Millisecond, 0.03) // media loss
 	if p.rate != before*fileRateDecrease {
 		t.Fatalf("media loss: rate %.0f, want %.0f", p.rate, before*fileRateDecrease)

@@ -1,9 +1,10 @@
+//go:build darwin
+
 package device
 
 import (
 	"math"
 	"os"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,35 +20,47 @@ func TestVoiceIOProbe(t *testing.T) {
 	if !VoiceIOSupported {
 		t.Skip("no system voice unit on this platform")
 	}
-	var inFrames, outFrames, inCalls, outCalls, inPeak atomic.Int64
-	var maxIn, maxOut atomic.Int64
-	phase := 0.0
-	vio, err := StartVoiceIO(8000, func(s []int16) {
-		inCalls.Add(1)
-		inFrames.Add(int64(len(s)))
-		maxIn.Store(max(maxIn.Load(), int64(len(s))))
-		for _, v := range s {
-			inPeak.Store(max(inPeak.Load(), int64(math.Abs(float64(v)))))
-		}
-	}, func(out []int16) {
-		outCalls.Add(1)
-		outFrames.Add(int64(len(out)))
-		maxOut.Store(max(maxOut.Load(), int64(len(out))))
-		for i := range out { // a quiet 440 Hz tone
-			out[i] = int16(500 * math.Sin(phase))
-			phase += 2 * math.Pi * 440 / 8000
-		}
-	})
+	var inFrames, inBlocks, maxIn, inPeak int64
+	vio, err := StartVoiceIO(8000, true)
 	if err != nil {
 		t.Skipf("voice unit unavailable: %v", err)
 	}
-	time.Sleep(2 * time.Second)
+	// The unit's thread only moves samples through its rings: a goroutine
+	// fills the output with a quiet 440 Hz tone and empties the input.
+	phase := 0.0
+	tone := make([]int16, 80)
+	buf := make([]int16, 1024)
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		for st := vio.State(); st.Written-st.Played < 1600; st.Written += 80 {
+			for i := range tone {
+				tone[i] = int16(500 * math.Sin(phase))
+				phase += 2 * math.Pi * 440 / 8000
+			}
+			if vio.Write(tone) < len(tone) {
+				break
+			}
+		}
+		for {
+			n, _ := vio.ReadMic(buf)
+			if n == 0 {
+				break
+			}
+			inBlocks++
+			inFrames += int64(n)
+			maxIn = max(maxIn, int64(n))
+			for _, v := range buf[:n] {
+				inPeak = max(inPeak, int64(math.Abs(float64(v))))
+			}
+		}
+	}
 	t.Logf("output latency %v", vio.Latency(false))
 	t.Logf("input latency %v", vio.Latency(true))
+	st := vio.State()
 	vio.Close()
-	t.Logf("2 s: input %d frames in %d calls (max %d), output %d frames in %d calls (max %d), mic peak %d",
-		inFrames.Load(), inCalls.Load(), maxIn.Load(), outFrames.Load(), outCalls.Load(), maxOut.Load(), inPeak.Load())
-	if inFrames.Load() < 8000 || outFrames.Load() < 8000 {
-		t.Fatalf("too few frames: input %d, output %d (want ~16000 each)", inFrames.Load(), outFrames.Load())
+	t.Logf("2 s: input %d frames in %d blocks (max %d), output %d played in %d callbacks, %d dry; mic peak %d, %d mic samples dropped",
+		inFrames, inBlocks, maxIn, st.Played, st.Callbacks, st.DryCallbacks, inPeak, st.MicDropped)
+	outFrames := int64(st.Played)
+	if inFrames < 8000 || outFrames < 8000 {
+		t.Fatalf("too few frames: input %d, output %d (want ~16000 each)", inFrames, outFrames)
 	}
 }
