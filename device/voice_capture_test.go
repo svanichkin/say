@@ -132,3 +132,16 @@ func TestSystemVoiceCaptureSkipsAPause(t *testing.T) {
 		t.Fatalf("frames before the pause renumbered: %d", frames[4].FirstSample)
 	}
 }
+
+// Sound is stamped when it was spoken: the system's input latency before
+// it reached the capture.
+func TestSystemVoiceCaptureStampsBeforeTheInputLatency(t *testing.T) {
+	now := time.Unix(100, 0)
+	out := make(chan AudioCaptureFrame, 1)
+	c := systemVoiceCapture{sampleRate: 8000, frameSize: 160, out: out, clock: func() time.Time { return now }, latency: 62 * time.Millisecond}
+	c.write(make([]int16, 160)) // 20 ms that ended now
+	f := <-out
+	if want := now.Add(-20*time.Millisecond - 62*time.Millisecond); !f.CapturedAt.Equal(want) {
+		t.Fatalf("stamped %v, want %v (62 ms of input latency before the 20 ms that ended now)", f.CapturedAt.Sub(now), want.Sub(now))
+	}
+}

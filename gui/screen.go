@@ -18,7 +18,7 @@ import (
 // renders, cell by cell:
 //
 //   - a cell has a background and either a character of text (in a
-//     monospaced system font: one cell, two for wide characters) or, for box
+//     monospaced font, Unifont: one cell, two for wide characters) or, for box
 //     drawing and blocks, a 4x8 shape drawn on the cell (cells.go);
 //   - video panes are rectangles of cells showing a frame, marked by the
 //     interface (OSC 5577) and drawn at the frame's own resolution.

@@ -57,6 +57,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/svanichkin/gocam v0.3.0 h1:gSObggiK7kc8salU08TZOPRvkiXz2X0ZOFAoUr/iYRI=
 github.com/svanichkin/gocam v0.3.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
+github.com/svanichkin/gocam v0.4.0 h1:DhiOmhx9/gGKpF0CRPmdyCccpf+TpBkgYpMNnDMSfYo=
+github.com/svanichkin/gocam v0.4.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
 github.com/svanichkin/ygg v0.6.1 h1:kmBhUT2vOvRvp6BRLEhet8FLxqySbKPzc/GLdeCm4rk=
 github.com/svanichkin/ygg v0.6.1/go.mod h1:8ojLiJTZsPTG8obuR/wlXNN4M5lKBosi9ICTsy/14FI=
 github.com/svanichkin/ygg v0.6.2 h1:oG0TiOaeSHjfmYogUuk00QLu76F+ZjxxWVXOLN4Re0M=

@@ -407,7 +407,7 @@ func TestPlayoutDrainsABacklogBelowTheTrim(t *testing.T) {
 		name  string
 		quiet bool
 		limit time.Duration
-	}{{"pauses", true, 3 * time.Second}, {"speech", false, 40 * time.Second}} {
+	}{{"pauses", true, 3 * time.Second}, {"speech", false, 8 * time.Second}} {
 		t.Run(tc.name, func(t *testing.T) {
 			const frame = 160
 			q := device.NewPlaybackQueue(audioBufferMaxFrames)
@@ -530,6 +530,155 @@ func TestStallBacklogIsShedInPauses(t *testing.T) {
 	}
 	if lag := p.lag() * 1000 / audioSampleRate; lag > 300 {
 		t.Fatalf("still %d ms behind the sender after 15 s of speech with pauses", lag)
+	}
+}
+
+// A stall of this side in a pause (DTX) leaves the playback clock behind
+// the sender's while the reorder buffer is mostly empty: the slots after a
+// silence update are not sent at all. The delay shows only as the packets
+// arrive, early for their slots; it is shed within a second of short
+// phrases and pauses, as people talk.
+func TestStallInAPauseIsShed(t *testing.T) {
+	const frame = 160
+	q := device.NewPlaybackQueue(audioBufferMaxFrames)
+	p := newAudioPlayout(fakeDecoder{frame: frame}, frame, q)
+	now := time.Now()
+	idx := uint16(1000)
+	// delay is how long a packet arriving now waits before it plays.
+	var delay []int
+	send := func(silent bool) {
+		if p.ready {
+			ahead := int(max(0, mediaIndexDelta(idx, p.nextIndex))) * frame / audioFrameTicks
+			delay = append(delay, (ahead+q.QueuedSamples())*1000/audioSampleRate)
+		}
+		payload := []byte{1, 0}
+		if silent {
+			payload[1] = 'S'
+		}
+		p.onPacket(idx, payload, now)
+		idx = advanceMediaIndex(idx, audioFrameTicks)
+	}
+	skip := func() { idx = advanceMediaIndex(idx, audioFrameTicks) } // not sent (DTX)
+	step := func() {
+		p.onTickAt(now)
+		q.TakeFrame()
+		now = now.Add(20 * time.Millisecond)
+	}
+	talk := func(cycles int) {
+		for range cycles {
+			for range 8 { // a short phrase, 160 ms
+				send(false)
+				step()
+			}
+			for k := range 16 { // a pause, a silence update every 8 slots
+				if k%8 == 0 {
+					send(true)
+				} else {
+					skip()
+				}
+				step()
+			}
+		}
+	}
+	talk(5)
+	base := delay[len(delay)-1]
+	// This side stalls 300 ms in a pause: nothing runs, the slots go by
+	// unsent, and the sender's clock moves on.
+	for range 15 {
+		skip()
+	}
+	now = now.Add(300 * time.Millisecond)
+	first := len(delay)
+	talk(2) // a second
+	if d := delay[first]; d < base+200 {
+		t.Fatalf("the stall left no delay to shed: %d ms, %d before", d, base)
+	}
+	// Three quarters of the stall's 300 ms shed within a second.
+	if d := delay[len(delay)-1]; d > base+75 {
+		t.Fatalf("%d ms from arrival to playing a second after the stall, %d ms before it (%v after)", d, base, delay[first:])
+	}
+	t.Logf("%d ms after the stall, %d ms a second later; %d ms before it", delay[first], delay[len(delay)-1], base)
+}
+
+// voiceDecoder decodes frame k (payload[0]) to a stretch of one continuous
+// voice at f0, as speech without pauses.
+type voiceDecoder struct {
+	frame int
+	f0    float64
+}
+
+func (d voiceDecoder) DecodeFrame(p []byte, dst []int16) (int, error) {
+	copy(dst, voice(d.f0, int(p[0])*d.frame, d.frame))
+	return d.frame, nil
+}
+func (d voiceDecoder) Conceal(dst []int16) (int, error) { clear(dst[:d.frame]); return d.frame, nil }
+func (voiceDecoder) IsDTXFrame([]byte) bool             { return false }
+
+// A stall of this side in the middle of speech without pauses (the
+// speaker's ring plays silence meanwhile, and the packets that came in
+// are read at once afterwards) is caught up within a few seconds by playing
+// the speech faster, and no frame of it is dropped.
+func TestStallInSpeechIsCaughtUpBySpeedingUp(t *testing.T) {
+	period, periods, lead := audioSpeakerPeriodMs, audioSpeakerPeriods, audioBufferLeadFrames*audioFrameMillis
+	ResetAudioSettings()
+	defer func() { SetSpeakerBuffer(period, periods); SetJitterLead(lead) }()
+	for _, f0 := range []float64{90, 140, 230} {
+		const frame = 160
+		q := device.NewPlaybackQueue(audioBufferMaxFrames)
+		p := newAudioPlayout(voiceDecoder{frame: frame, f0: f0}, frame, q)
+		now := time.Now()
+		k := 0
+		send := func() {
+			p.onPacket(uint16(k*audioFrameTicks)&mediaIndexMask, []byte{byte(k), 0}, now)
+			k++
+		}
+		var lastIndex uint16
+		played, steps, need := 0, 0, 0
+		step := func() {
+			p.onTickAt(now)
+			for need += frame; need > 0; {
+				f, ok := q.TakeFrame()
+				if !ok {
+					if steps < 10 { // still priming
+						need = 0
+						break
+					}
+					t.Fatalf("%v Hz: underrun at step %d", f0, steps)
+				}
+				if played > 0 && f.MediaIndex != advanceMediaIndex(lastIndex, audioFrameTicks) {
+					t.Fatalf("%v Hz: frame %d played after %d: speech was dropped", f0, f.MediaIndex, lastIndex)
+				}
+				lastIndex = f.MediaIndex
+				played++
+				need -= len(f.Samples)
+			}
+			steps++
+			now = now.Add(20 * time.Millisecond)
+		}
+		for range 100 { // 2 s of speech
+			send()
+			step()
+		}
+		before := p.lag()
+		// 400 ms go by with nothing run here; the 20 frames that came in
+		// meanwhile are read at once.
+		now = now.Add(400 * time.Millisecond)
+		for range 20 {
+			send()
+		}
+		took := time.Duration(0)
+		for i := range 500 {
+			send()
+			step()
+			if took == 0 && i > 5 && p.lag() <= before+frame {
+				took = time.Duration(i+1) * 20 * time.Millisecond
+			}
+		}
+		if took == 0 || took > 4*time.Second {
+			t.Fatalf("%v Hz: 400 ms behind after the stall, back in %v (limit 4s); lag now %d ms, before %d ms",
+				f0, took, p.lag()*1000/audioSampleRate, before*1000/audioSampleRate)
+		}
+		t.Logf("%v Hz: 400 ms behind after the stall, caught up in %v", f0, took)
 	}
 }
 

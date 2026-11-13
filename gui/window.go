@@ -101,7 +101,9 @@ type game struct {
 }
 
 // setMetrics sizes the cells and the font for a device scale factor. A cell
-// is a multiple of 4x8 device pixels, so box drawing stays sharp.
+// is a multiple of 8x16 device pixels, so box drawing stays sharp and a
+// Unifont pixel is a whole number of device pixels: rows come out nearest to
+// rowPoints, the smaller size when two are as near (at 150%, say).
 func (g *game) setMetrics(scale float64) {
 	if scale <= 0 {
 		scale = 1
@@ -110,7 +112,7 @@ func (g *game) setMetrics(scale float64) {
 		return
 	}
 	g.scale = scale
-	k := max(1, int(math.Round(rowPoints*scale/cellH)))
+	k := 2 * max(1, int(math.Ceil(rowPoints*scale/(2*cellH)-0.5)))
 	g.cw, g.ch = cellW*k, cellH*k
 	g.font = newFonts(float64(g.cw))
 	g.r.shapes = map[uint32]*ebiten.Image{}

@@ -179,6 +179,25 @@ func writePixelChat(out *strings.Builder, top, left, cols, rows int) {
 	fmt.Fprintf(out, "\x1b]5579;%d;%d;%d;%d\x07", top, left, cols, rows)
 }
 
+// writeChatFrame frames the chat's rect (1-based cells): marked for the
+// window, or drawn in characters in a terminal (at).
+func writeChatFrame(out *strings.Builder, h *hudCanvas, top, left, cols, rows int) {
+	if pixelMode {
+		writePixelChat(out, top, left, cols, rows)
+		return
+	}
+	_, _, seed := FrameSeeds()
+	hudBox(h, top, left, cols, rows, ChatAccent(), seed, false, true)
+}
+
+// outAt is a cellAt writing everything to out.
+func outAt(out *strings.Builder) cellAt {
+	return func(row, col int) *strings.Builder {
+		writeCursorTo(out, row, col)
+		return out
+	}
+}
+
 // statusHeading puts what comes after the first ": " of the first line on
 // the next one: the part before it is the heading ("Dial failed", "Error").
 // Colons with no space after them (an address) do not count.
@@ -201,7 +220,7 @@ const statusPadCols = 4
 // writePixelStatusFrame puts the status lines (say "…", connecting and the
 // like), nLines of them width wide from startRow, in a frame of the chat's
 // kind: some room round the text, and no wider or taller than the window.
-func writePixelStatusFrame(out *strings.Builder, width, nLines, startRow, cols, rows int) {
+func writePixelStatusFrame(out *strings.Builder, h *hudCanvas, width, nLines, startRow, cols, rows int) {
 	const padCols, padRows, minCols = statusPadCols, 1, 30
 	frameCols := min(max(minCols, width+2*padCols), cols-2*termSide)
 	frameRows := min(nLines+2*padRows, rows-2*termBorder)
@@ -210,7 +229,7 @@ func writePixelStatusFrame(out *strings.Builder, width, nLines, startRow, cols, 
 	}
 	left := 1 + (cols-frameCols)/2
 	top := max(1, startRow-padRows)
-	writePixelChat(out, top, left, frameCols, frameRows)
+	writeChatFrame(out, h, top, left, frameCols, frameRows)
 }
 
 // Accents returns our accent colour and the peer's.
@@ -373,6 +392,10 @@ func writePixelPane(out *strings.Builder, frame *codec.TextFrame, top, left, col
 // (0-based columns of the row). The window draws a block at each end and a
 // line between the texts.
 func writePixelBracket(out *strings.Builder, row, left, width int, spans ...[2]int) {
+	if !pixelMode {
+		hudBracket(out, row, left, width, spans...)
+		return
+	}
 	fmt.Fprintf(out, "\x1b]5580;%d;%d;%d", row, left, width)
 	for _, sp := range spans {
 		fmt.Fprintf(out, ";%d;%d", sp[0], sp[1])

@@ -246,7 +246,7 @@ func monochrome(f *codec.TextFrame, total int) bool {
 	return true
 }
 
-// drawText draws each cell's character in the system font, centred in its
+// drawText draws each cell's character in the window's font, centred in its
 // row: a character a cell, as in a terminal. Digits are bold; text in an
 // accent colour glows.
 func (g *game) drawText(dst *ebiten.Image, cols int, cells []Cell) {
@@ -256,17 +256,28 @@ func (g *game) drawText(dst *ebiten.Image, cols int, cells []Cell) {
 		if c.Text == "" || c.Video {
 			continue
 		}
-		face := g.font.Face(c.Text)
-		if len(c.Text) == 1 && c.Text[0] >= '0' && c.Text[0] <= '9' {
-			face = g.font.Bold()
-		}
 		op := &text.DrawOptions{}
 		op.GeoM.Translate(float64(g.ox+(i%cols)*g.cw), float64(g.oy+(i/cols)*g.ch)+top)
 		op.ColorScale.ScaleWithColor(c.Fg)
-		text.Draw(dst, c.Text, face, op)
-		if g.r.glows(c.Fg) {
-			g.glowText(c.Text, face, op, textGlow)
+		bold := 0.0
+		if len(c.Text) == 1 && c.Text[0] >= '0' && c.Text[0] <= '9' {
+			bold = g.font.BoldShift()
 		}
+		g.drawChar(dst, c.Text, op, bold)
+		if g.r.glows(c.Fg) {
+			g.glowText(c.Text, op, bold, textGlow)
+		}
+	}
+}
+
+// drawChar draws s placed by op and, to look bold as bitmap fonts do, again
+// bold pixels to the right (0: not bold).
+func (g *game) drawChar(dst *ebiten.Image, s string, op *text.DrawOptions, bold float64) {
+	text.Draw(dst, s, g.font.Face(), op)
+	if bold > 0 {
+		o := *op
+		o.GeoM.Translate(bold, 0)
+		text.Draw(dst, s, g.font.Face(), &o)
 	}
 }
 
@@ -278,13 +289,13 @@ const textGlow = 0.3
 // layer, thickened by drawing it a little shifted every way, each copy at
 // strength k: thin letters at half the resolution would leave almost
 // nothing to blur.
-func (g *game) glowText(s string, face text.Face, op *text.DrawOptions, k float32) {
+func (g *game) glowText(s string, op *text.DrawOptions, bold float64, k float32) {
 	for _, d := range [][2]float64{{0, 0}, {-0.7, 0}, {0.7, 0}, {0, -0.7}, {0, 0.7}} {
 		o := *op
 		o.ColorScale.Scale(k, k, k, k)
 		o.GeoM.Scale(glowScale, glowScale)
 		o.GeoM.Translate(d[0], d[1])
-		text.Draw(g.r.glow, s, face, &o)
+		g.drawChar(g.r.glow, s, &o, bold*glowScale)
 	}
 }
 

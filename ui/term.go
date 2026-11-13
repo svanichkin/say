@@ -1089,6 +1089,9 @@ func renderTermFrames() {
 		log.Printf("[debug] screen %dx%d: %s", cols, rows, kind)
 	}
 	if data != "" {
+		if termHUD {
+			data = onBlack(data)
+		}
 		enqueueFrame(&device.TerminalFrame{Data: data})
 	}
 }
@@ -1136,23 +1139,23 @@ func renderChatScreen(cols, rows int) string {
 	videoGroupCols := vs.selfSlot.cols + termGap + vs.peerSlot.cols
 	videoLeft := canvasLeft + max(0, (canvasCols-videoGroupCols)/2)
 	videoCaptionRow := canvasTop + vs.selfSlot.rows
-	if pixelMode {
+	if framed() {
 		videoCaptionRow++ // a row for the bottom of the panes' frames
 	}
 	chatTop := videoCaptionRow + 1 + termSeparator
 	inputRow := rows - termBorder
-	if pixelMode {
+	if framed() {
 		inputRow-- // room under the chat's frame for its plates
 	}
 	gap := termSeparator
-	if pixelMode {
+	if framed() {
 		gap = 1 // the chat and its input share a frame in the window
 	}
 	chatBottom := inputRow - 1 - gap
 	chatRows := chatBottom - chatTop + 1
 	// The conversation's columns: in the window, inside its frame.
 	chatLeft, chatCols := canvasLeft, canvasCols
-	if pixelMode {
+	if framed() {
 		chatLeft, chatCols = canvasLeft+2, canvasCols-4
 	}
 	if chatRows < 1 {
@@ -1206,9 +1209,27 @@ func renderChatScreen(cols, rows int) string {
 		lineAt(inputRow-1+i, canvasLeft).WriteString(canvasBlank)
 	}
 
+	// The terminal's frames: known before the video, which leaves their
+	// cells (the panes' cut corners) to them. What the screen showed there
+	// is forgotten, so the video never takes them back by itself.
+	var hud *hudCanvas
+	if termHUD {
+		hud = newHUDCanvas()
+		selfSeed, peerSeed, _ := FrameSeeds()
+		self, peer := Accents()
+		hudBox(hud, canvasTop-1, videoLeft-1, vs.selfSlot.cols+2, vs.selfSlot.rows+2, self, selfSeed, false, false)
+		hudBox(hud, canvasTop-1, peerLeft-1, vs.peerSlot.cols+2, vs.peerSlot.rows+2, peer, peerSeed, true, false)
+		hudWindowBorder(hud, cols, rows)
+		for k := range hud.cells {
+			paneCache.invalidate(k[0], k[1], 1, 1)
+		}
+		hudVideoMask = hud
+	}
+
 	now := time.Now()
 	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel()+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
 	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel()+" NET", now, canvasTop, peerLeft, vs.peerSlot)
+	hudVideoMask = nil
 	// Animate the noise while a pane has no signal.
 	updateNoiseAnimation(localIdle || remoteIdle)
 
@@ -1217,7 +1238,7 @@ func renderChatScreen(cols, rows int) string {
 	pathLabel := PeerPathSnapshot()
 	localCaption := currentFPSLabel(localFrameType) + " " + buildRateLabel("TX", '↑', txAudio, txVideo)
 	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
-	if latencyLabel != "" && !pixelMode { // the window shows it between the panes
+	if latencyLabel != "" && !framed() { // the window shows it between the panes
 		remoteCaption += " " + joinLabels(pathLabel, latencyLabel)
 	}
 	// A click mutes the sound only (mediactrl); the video goes on.
@@ -1229,7 +1250,7 @@ func renderChatScreen(cols, rows int) string {
 	}
 	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
 	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
-	if pixelMode {
+	if framed() {
 		// One bracketed line under both panes: a block at each outer end,
 		// the line running from caption to ping to caption.
 		// The ping may spread past the gap, up to a column short of each
@@ -1286,7 +1307,7 @@ func renderChatScreen(cols, rows int) string {
 			col += max(0, chatCols-displayWidth(l.text))
 		}
 		writeCursorTo(b, row, col)
-		if pixelMode { // the window colours the speakers
+		if framed() { // the window colours the speakers
 			self, peer := Accents()
 			if l.local {
 				b.WriteString(accentSGR(self))
@@ -1302,7 +1323,7 @@ func renderChatScreen(cols, rows int) string {
 	cursor := " "
 	if inputCursorVisible(time.Now()) {
 		cursor = "▏"
-		if pixelMode {
+		if framed() {
 			cursor = "█"
 		}
 	}
@@ -1311,15 +1332,19 @@ func renderChatScreen(cols, rows int) string {
 	b := lineAt(inputRow, 1)
 	b.WriteString("\x1b[2K")
 	writeCursorTo(b, inputRow, chatLeft)
-	if pixelMode {
+	if framed() {
 		self, _ := Accents()
 		line = accentSGR(self) + line + "\x1b[0m"
 	}
 	b.WriteString(line)
 
-	if pixelMode {
+	if framed() {
 		// The frame takes a row above the chat and one below the input.
-		writePixelChat(&out, chatTop-1, canvasLeft, canvasCols, inputRow-chatTop+3)
+		writeChatFrame(&out, hud, chatTop-1, canvasLeft, canvasCols, inputRow-chatTop+3)
+	}
+	if hud != nil {
+		// Written last, over the margins and the rows the chat clears.
+		hud.draw(lineAt)
 	}
 	lines.flush(&out, &paneCache)
 	return out.String()
@@ -1363,14 +1388,14 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 	// a mark): a line up to the text, a block at the outer end. They need
 	// three columns on each side.
 	room := width
-	if pixelMode && width >= 7 {
+	if framed() && width >= 7 {
 		room = width - 6
 	}
 	caption = truncateWidth(sanitizeLine(caption), room)
 	pad := max(0, width-displayWidth(caption))
 	leftPad := pad / 2
 	colors := panelColors()
-	if pixelMode {
+	if framed() {
 		self, peer := Accents()
 		colors = "\x1b[49m" + accentSGR(self)
 		if remote {
@@ -1926,7 +1951,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 	}
 
 	shown := msg
-	if pixelMode {
+	if framed() {
 		shown = statusHeading(msg)
 		// The text fits inside its frame, which leaves the side margins
 		// and its own padding.
@@ -1936,7 +1961,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 	var lines []string
 	for _, l := range strings.Split(shown, "\n") {
 		l = strings.TrimSpace(l)
-		if !pixelMode {
+		if !framed() {
 			lines = append(lines, truncateWidth(l, canvasCols))
 			continue
 		}
@@ -1955,7 +1980,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 		inner := max(displayWidth(lang.T(lang.Copy)), displayWidth(lang.T(lang.Copied)))
 		pad := (inner - displayWidth(label)) / 2
 		label = strings.Repeat(" ", pad) + label + strings.Repeat(" ", inner-displayWidth(label)-pad)
-		if pixelMode {
+		if framed() {
 			label = "  " + label + "  "
 		} else {
 			label = "[ " + label + " ]"
@@ -1972,7 +1997,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 		blockCols = max(blockCols, min(displayWidth(l), canvasCols))
 	}
 	blockLeft := termBorder + 1 + max(0, (canvasCols-blockCols)/2)
-	if pixelMode { // centred in the window, as its frame is
+	if framed() { // centred in the window, as its frame is
 		blockLeft = 1 + max(0, (cols-blockCols)/2)
 	}
 
@@ -1984,8 +2009,13 @@ func buildStatusScreen(cols, rows int, message string) string {
 	var out strings.Builder
 	writeFramePrefix(&out, true)
 	appendBorderClear(&out, cols, rows)
-	if pixelMode {
-		writePixelStatusFrame(&out, blockCols, len(lines), startRow, cols, rows)
+	if framed() {
+		h := newHUDCanvas()
+		writePixelStatusFrame(&out, h, blockCols, len(lines), startRow, cols, rows)
+		if termHUD {
+			hudWindowBorder(h, cols, rows)
+			h.draw(outAt(&out))
+		}
 	}
 
 	var clickRects []statusClickRect
@@ -2001,12 +2031,12 @@ func buildStatusScreen(cols, rows int, message string) string {
 			line = truncateWidth(line, canvasCols)
 		}
 		out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, blockLeft))
-		if pixelMode {
+		if framed() {
 			out.WriteString(accentSGR(BrickColour(ChatAccent()))) // its bricks' colour
 		}
 		out.WriteString(line)
 		if i == buttonLine {
-			if pixelMode {
+			if framed() {
 				writePixelBracket(&out, row, blockLeft, buttonCols, [2]int{2, buttonCols - 2})
 			}
 			clickRects = append(clickRects, statusClickRect{
@@ -2120,6 +2150,9 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 		for c := offCol; c < offCol+visCols; c++ {
 			idx := r*cols + c
 			col := startCol + c - offCol
+			if hudVideoMask.has(row, col) {
+				continue // a frame's cut corner
+			}
 			fg := frame.FgYCbCr[idx*3 : idx*3+3]
 			bg := frame.BgYCbCr[idx*3 : idx*3+3]
 			br, bgCol, bb := ycbcrToRGB(bg[0], bg[1], bg[2])
@@ -2490,7 +2523,7 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	// a row more under the panes' frames, a wider separator and a row under
 	// the chat's frame.
 	reserved := 7
-	if pixelMode {
+	if framed() {
 		reserved += 1 + (termSeparator - 1) + 1
 	}
 	paneRows := min(height-reserved, codec.MaxFrameRows)

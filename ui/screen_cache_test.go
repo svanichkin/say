@@ -210,6 +210,17 @@ func TestPaneDiffWithFlatAreasMatchesFullFrames(t *testing.T) {
 // The whole call screen drawn incrementally over several frames looks
 // exactly like the same screen drawn from scratch.
 func TestChatScreenIncrementalMatchesFullRedraw(t *testing.T) {
+	checkIncrementalMatchesFull(t)
+}
+
+// The same with the terminal's frames, whose cut corners the video leaves.
+func TestFramedChatScreenIncrementalMatchesFullRedraw(t *testing.T) {
+	setTermHUD(true)
+	defer setTermHUD(false)
+	checkIncrementalMatchesFull(t)
+}
+
+func checkIncrementalMatchesFull(t *testing.T) {
 	const cols, rows = 120, 40
 	vs, ok := calcViewportSlots(cols, rows)
 	if !ok {
@@ -242,7 +253,7 @@ func TestChatScreenIncrementalMatchesFullRedraw(t *testing.T) {
 	full.apply(renderChatScreen(cols, rows))
 	for i := range full.cells {
 		row := i/cols + 1
-		if row >= rows-1 { // the input line's cursor blinks with time
+		if row >= rows-termBorder-1 { // the input line's cursor blinks with time
 			continue
 		}
 		if full.cells[i].set && incremental.cells[i] != full.cells[i] {

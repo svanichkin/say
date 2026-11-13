@@ -15,15 +15,22 @@ type systemVoiceCapture struct {
 	out         chan AudioCaptureFrame
 	// clock, if set, is checked against the sample count (see captureGap).
 	clock func() time.Time
+	// latency is how long sound takes from the microphone to write (the
+	// system's input path): the samples are stamped that much earlier, when
+	// they were spoken, as video frames are stamped when they were seen.
+	latency time.Duration
 }
 
 func (c *systemVoiceCapture) write(samples []int16) {
 	if len(samples) == 0 {
 		return
 	}
-	now := time.Now
+	clock := time.Now
 	if c.clock != nil {
-		now = c.clock
+		clock = c.clock
+	}
+	now := func() time.Time { return clock().Add(-c.latency) }
+	if c.clock != nil {
 		next := c.firstSample + uint64(len(c.pending))
 		if gap := captureGap(c.epoch, next, len(samples), c.sampleRate, now()); gap > 0 {
 			// The unit delivered nothing for a while: the samples on hand

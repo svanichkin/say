@@ -53,7 +53,7 @@ func StartSystemVoice(sampleRate, samplesPerMediaTick, periodSamples, periods in
 	var micOut chan AudioCaptureFrame
 	if mic {
 		micOut = make(chan AudioCaptureFrame, 24) // 480 ms of 20 ms codec frames
-		capture := &systemVoiceCapture{sampleRate: sampleRate, frameSize: max(1, sampleRate/50), out: micOut}
+		capture := &systemVoiceCapture{sampleRate: sampleRate, frameSize: max(1, sampleRate/50), out: micOut, latency: in.Total()}
 		wg.Add(1)
 		go func() { defer wg.Done(); pumpMic(vio.ring, capture, quit) }()
 	}

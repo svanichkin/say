@@ -3,13 +3,14 @@ package device
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	gocam "github.com/svanichkin/gocam"
 )
 
-// CameraFrame is an RGB frame with the monotonic time at which camera capture
-// delivered it to this process.
+// CameraFrame is an RGB frame with the time the camera captured it (where
+// the system tells; else when it reached this process).
 type CameraFrame struct {
 	Data          []byte
 	Width, Height int
@@ -31,6 +32,7 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 	out := make(chan CameraFrame, 1)
 	go func() {
 		defer close(out)
+		loggedAge := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -43,7 +45,15 @@ func cameraFrames(ctx context.Context, src <-chan gocam.Frame) <-chan CameraFram
 				if !ok {
 					return
 				}
-				capturedAt := time.Now()
+				// When the camera saw it, where it tells (macOS); else
+				// now, a little late.
+				capturedAt := f.CapturedAt
+				if capturedAt.IsZero() {
+					capturedAt = time.Now()
+				} else if !loggedAge {
+					loggedAge = true
+					log.Printf("[video] the camera's frames come %d ms after it captured them", time.Since(capturedAt).Milliseconds())
+				}
 				frame := CameraFrame{Data: f.Data, Width: f.Width, Height: f.Height, CapturedAt: capturedAt}
 				// Center-crop to CIF aspect and resize to 352x288; gocam
 				// usually delivers exactly that already (its own buffer).

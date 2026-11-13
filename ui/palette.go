@@ -49,6 +49,8 @@ func SetColorMode(key string) {
 	default:
 		colorMode.Store(int32(defaultColorMode()))
 	}
+	// The window's frames, in characters, where the window's colours show.
+	setTermHUD(!ansiColors())
 }
 
 func ansiColors() bool { return ColorMode(colorMode.Load()) == ColorANSI16 }

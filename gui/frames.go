@@ -887,17 +887,17 @@ func (g *game) drawCaption(dst *ebiten.Image, fr paneFrame, c color.RGBA, glow b
 	x := fr.labelX
 	for _, r := range fr.caption {
 		s := string(r)
-		face := g.font.Face(s)
+		bold := 0.0
 		if r >= '0' && r <= '9' {
-			face = g.font.Bold()
+			bold = g.font.BoldShift()
 		}
 		op := &text.DrawOptions{}
 		op.GeoM.Translate(x, top)
 		op.ColorScale.ScaleWithColor(c)
 		if glow {
-			g.glowText(s, face, op, 0.5)
+			g.glowText(s, op, bold, 0.5)
 		} else {
-			text.Draw(dst, s, face, op)
+			g.drawChar(dst, s, op, bold)
 		}
 		x += float64(g.cw)
 	}
