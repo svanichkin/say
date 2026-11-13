@@ -374,3 +374,37 @@ func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
 	wg.Wait()
 	close(out)
 }
+
+// A queue on the way steps the video down as loss does (colour, then
+// detail, then frames), and one between clean and light holds it: no step
+// up while the queue has not drained.
+func TestVideoAdaptsToTheQueue(t *testing.T) {
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	if l := queueVideoLoss(ms(50)); l != 0 {
+		t.Fatalf("a 50 ms queue counts as %.3f loss", l)
+	}
+	if l := queueVideoLoss(ms(8000)); l < videoLossHeavy {
+		t.Fatalf("an 8 s queue counts as %.3f loss, not heavy", l)
+	}
+	const ceiling, base, maxHold = 30, 10, 64
+	a := videoAdapt{fps: ceiling, hold: base}
+	for i := 0; i < 20; i++ {
+		a.update(queueVideoLoss(ms(2000)), ceiling, ceiling, base, maxHold)
+	}
+	if !a.noColour || a.hold != maxHold || a.fps >= ceiling {
+		t.Fatalf("after a long 2 s queue: colour off %v, hold %d, %d fps; want everything stepped down", a.noColour, a.hold, a.fps)
+	}
+	fps, hold := a.fps, a.hold
+	for i := 0; i < 20; i++ {
+		a.update(queueVideoLoss(ms(200)), fps, ceiling, base, maxHold)
+	}
+	if a.fps != fps || a.hold != hold || !a.noColour {
+		t.Fatalf("a 200 ms queue moved the video: %d fps, hold %d, colour off %v", a.fps, a.hold, a.noColour)
+	}
+	for i := 0; i < 200; i++ {
+		a.update(queueVideoLoss(ms(20)), a.fps, ceiling, base, maxHold)
+	}
+	if a.noColour || a.hold != base || a.fps != ceiling {
+		t.Fatalf("a drained queue did not restore the video: colour off %v, hold %d, %d fps", a.noColour, a.hold, a.fps)
+	}
+}

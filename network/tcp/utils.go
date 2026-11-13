@@ -218,6 +218,7 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			}
 			if rtt, loss, ok := s.keepalive.acceptPong(payload); ok {
 				ui.UpdatePeerLatency(rtt)
+				ui.NotePathRTT(rtt)
 				s.pacer.observe(rtt, loss)
 				logs.LogV("[keepalive] pong received: RTT=%s peer audio loss=%.1f%%", rtt, loss*100)
 			}

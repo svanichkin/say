@@ -1338,6 +1338,18 @@ func renderChatScreen(cols, rows int) string {
 	}
 	b.WriteString(line)
 
+	// The version, right under the input: in the window the row under the
+	// chat's frame (whose bottom right keeps clear of its decoration),
+	// otherwise the bottom margin. It ends short of the frame's cut corner.
+	if v := shownVersion(); v != "" && displayWidth(v) <= canvasCols/2 {
+		row, end := rows, canvasLeft+canvasCols-1
+		if framed() {
+			row, end = inputRow+2, canvasLeft+canvasCols-3
+			lineAt(row, canvasLeft).WriteString(canvasBlank)
+		}
+		lineAt(row, end-displayWidth(v)+1).WriteString(versionSGR() + v + "\x1b[0m")
+	}
+
 	if framed() {
 		// The frame takes a row above the chat and one below the input.
 		writeChatFrame(&out, hud, chatTop-1, canvasLeft, canvasCols, inputRow-chatTop+3)

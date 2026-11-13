@@ -27,6 +27,33 @@ const (
 	videoColourCleanReports = 5
 )
 
+// The queue on the way (ui.PathQueue) counts as loss: where the path carries
+// less than is sent, the excess waits and arrives seconds late without being
+// lost (on a direct link nothing is ever lost: it is one reliable stream), and
+// the remedy is the same, a smaller stream.
+const (
+	videoQueueClean = 100 * time.Millisecond // below: no reason to hold back
+	videoQueueLight = 300 * time.Millisecond // light loss: step down
+	videoQueueHeavy = time.Second            // heavy loss
+	// videoQueueEvery: how often a queue alone steps the video down. It
+	// takes a while to drain; stepping every second would overshoot.
+	videoQueueEvery = 2 * time.Second
+)
+
+// queueVideoLoss is the loss a queue counts as. Between clean and light it
+// holds the video where it is (no step up).
+func queueVideoLoss(q time.Duration) float64 {
+	switch {
+	case q >= videoQueueHeavy:
+		return videoLossHeavy
+	case q >= videoQueueLight:
+		return videoLossLight
+	case q >= videoQueueClean:
+		return (videoLossClean + videoLossLight) / 2
+	}
+	return 0
+}
+
 // videoLossMeter measures incoming video loss from the frame counters.
 type videoLossMeter struct {
 	have     bool

@@ -8,16 +8,17 @@ require (
 	github.com/gen2brain/malgo v0.11.27
 	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
 	github.com/hajimehoshi/ebiten/v2 v2.10.5
+	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade
 	github.com/klauspost/compress v1.20.3
 	github.com/rivo/uniseg v0.4.7
 	github.com/svanichkin/gocam v0.4.0
-	github.com/svanichkin/ygg v0.6.3
+	github.com/svanichkin/ygg v0.6.6
 	github.com/thesyncim/gopus v0.2.2
 	github.com/yggdrasil-network/yggdrasil-go v0.5.15
 	golang.org/x/image v0.45.0
-	golang.org/x/sys v0.49.0
-	golang.org/x/term v0.47.0
-	gvisor.dev/gvisor v0.0.0-20261103192924-1ff810cb4f8e
+	golang.org/x/sys v0.50.0
+	golang.org/x/term v0.48.0
+	gvisor.dev/gvisor v0.0.0-20261113203249-327fe3affaa8
 )
 
 require (
@@ -34,15 +35,14 @@ require (
 	github.com/gologme/log v1.3.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/hjson/hjson-go/v4 v4.7.1 // indirect
-	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/quic-go/quic-go v0.65.0 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/exp v0.0.0-20261113113407-e3970619a1a4 // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
 

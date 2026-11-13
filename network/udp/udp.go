@@ -597,6 +597,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		var (
 			ceiling        = videoFPSCeiling()
 			lastLossReport time.Time
+			lastAdapt      time.Time
 			lastForcedKey  time.Time
 			lastVideoSent  time.Time // the last datagram (see SetSkipEmpty)
 			sendingStarted = time.Now()
@@ -642,9 +643,27 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				tEncodeLocal, tEncodeNet = 0, 0
 				lastRateSample = time.Now()
 
-				// Adapt the frame rate to the peer's latest loss report.
-				if loss, at := ui.PeerVideoLossSnapshot(); fpsLimiter != nil && at.After(lastLossReport) {
-					lastLossReport = at
+				// Adapt to the peer's latest loss report, and to the queue on
+				// the way: a growing queue counts as loss, at most every
+				// videoQueueEvery while it lasts (pongs held up behind it
+				// bring no reports).
+				loss, at := ui.PeerVideoLossSnapshot()
+				newReport := at.After(lastLossReport)
+				queue := ui.PathQueue()
+				queueLoss := queueVideoLoss(queue)
+				queueDue := queueLoss >= videoLossLight && time.Since(lastAdapt) >= videoQueueEvery
+				if fpsLimiter != nil && (newReport || queueDue) {
+					if newReport {
+						lastLossReport = at
+					} else {
+						loss = 0
+					}
+					why := fmt.Sprintf("peer video loss %.0f%%", loss*100)
+					if queueLoss > loss {
+						loss = queueLoss
+						why = fmt.Sprintf("a %s queue on the way", queue.Round(10*time.Millisecond))
+					}
+					lastAdapt = time.Now()
 					cells := 0
 					if cols, rows, ok := ui.PeerSlot(); ok {
 						cells = cols * rows
@@ -653,7 +672,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
 					if mono := peer.mono || adapt.noColour; mono != netMono {
 						if mono {
-							logs.LogV("[video/udp] peer video loss %.0f%%: sending without colour", loss*100)
+							logs.LogV("[video/udp] %s: sending without colour", why)
 						} else {
 							logs.LogV("[video/udp] peer video clean: colour back")
 						}
@@ -661,11 +680,11 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						netEncoder.SetBW(mono)
 					}
 					if adapt.hold != prevHold {
-						logs.LogV("[video/udp] peer video loss %.0f%%: cell hold %d -> %d", loss*100, prevHold, adapt.hold)
+						logs.LogV("[video/udp] %s: cell hold %d -> %d", why, prevHold, adapt.hold)
 						netEncoder.SetShapeHold(adapt.hold)
 					}
 					if adapt.fps != prevFPS {
-						logs.LogV("[video/udp] peer video loss %.0f%%: %d -> %d fps", loss*100, prevFPS, adapt.fps)
+						logs.LogV("[video/udp] %s: %d -> %d fps", why, prevFPS, adapt.fps)
 						fpsLimiter.Reset(time.Second / time.Duration(adapt.fps))
 					}
 				}

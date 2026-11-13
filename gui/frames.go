@@ -92,7 +92,8 @@ type tooth struct {
 //     sometimes too;
 //   - teeth: one or two groups of 2 to 4 on free stretches;
 //   - the caption: under the bottom edge on the left, in the middle or on
-//     the right (the chat has none); bottom plates keep clear of it.
+//     the right (the chat has none: the right half of its bottom stays
+//     bare for the version written under it); bottom plates keep clear of it.
 //
 // The same seed gives the same frame throughout a launch, including resizes.
 func generate(seed uint64, chat bool) frameStyle {
@@ -131,7 +132,10 @@ func generate(seed uint64, chat bool) frameStyle {
 	}
 	take := func(s side, a, b float64) { used[s] = append(used[s], [2]float64{a, b}) }
 	st.label = -2
-	if !chat {
+	if chat {
+		// The version is written under the right half of the bottom.
+		take(bottom, 0.5, 1)
+	} else {
 		switch r.IntN(3) {
 		case 0:
 			st.label = 0.04

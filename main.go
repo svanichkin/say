@@ -195,6 +195,13 @@ func run() (err error) {
 	if !opts.NoWT && !opts.GUI && relaunchInWindowsTerminal() {
 		return nil // Say goes on in a Windows Terminal window
 	}
+	// One configuration (one Yggdrasil address) runs once: two copies with
+	// it reset each other's calls.
+	releaseConfig, err := conf.LockConfig(opts.ConfigPath)
+	if err != nil {
+		return err
+	}
+	defer releaseConfig()
 
 	udptransport.SetMaxVideoFPS(opts.MaxVideoFPS)
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
@@ -207,6 +214,7 @@ func run() (err error) {
 	// The handshake tells the peer our version and the codec we send.
 	tcpsignal.SetLocalInfo(appVersion(), opts.AudioCodec)
 	ui.SetVideoFPSLimit(opts.MaxVideoFPS)
+	ui.SetVersion(appVersion())
 
 	role := "server"
 	if opts.Mode == conf.ModeClient {

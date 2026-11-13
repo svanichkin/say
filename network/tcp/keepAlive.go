@@ -42,9 +42,22 @@ func (ka *tcpKeepalive) newPing() []byte {
 			delete(ka.pending, pendingID)
 		}
 	}
+	ui.NotePingsOut(ka.oldestPendingLocked())
 	payload := make([]byte, pingPayloadLen)
 	binary.BigEndian.PutUint64(payload, id)
 	return payload
+}
+
+// oldestPendingLocked is when the oldest unanswered ping was sent (zero:
+// none). ka.mu is held.
+func (ka *tcpKeepalive) oldestPendingLocked() time.Time {
+	var oldest time.Time
+	for _, at := range ka.pending {
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return oldest
 }
 
 func (ka *tcpKeepalive) pongPayload(ping []byte) []byte {
@@ -78,6 +91,14 @@ func (ka *tcpKeepalive) acceptPong(payload []byte) (time.Duration, float64, bool
 	if ok {
 		delete(ka.pending, id)
 		ka.lastPong = time.Now()
+		// Pongs come back in order on the stream: earlier pings still
+		// pending were never answered and must not count as out.
+		for pid, at := range ka.pending {
+			if !at.After(sentAt) {
+				delete(ka.pending, pid)
+			}
+		}
+		ui.NotePingsOut(ka.oldestPendingLocked())
 	}
 	ka.mu.Unlock()
 	if !ok {
@@ -109,6 +130,7 @@ func startTCPKeepalive(ctx context.Context, conn net.Conn, interval, timeout tim
 		timeout = interval * 3
 	}
 
+	ui.ResetPathQueue() // a new call: its own usual round trip
 	ka := &tcpKeepalive{
 		lastPong: time.Now(),
 		timeout:  timeout,
