@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/term"
 )
@@ -124,8 +125,19 @@ func enterAltScreen() {
 	fmt.Print(seq)
 }
 
+// exitSeq is written before the terminal leaves the alternate screen (set
+// by the UI: images it put there to delete, say).
+var exitSeq atomic.Pointer[string]
+
+// SetExitSequence sets what is written before the terminal leaves the
+// alternate screen.
+func SetExitSequence(seq string) { exitSeq.Store(&seq) }
+
 func exitAltScreen() {
 	seq := ""
+	if s := exitSeq.Load(); s != nil {
+		seq += *s
+	}
 	if supportsSyncOutput {
 		seq += "\x1b[?2026l"
 	}

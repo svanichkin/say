@@ -345,7 +345,7 @@ func (g *game) drawBricks(dst *ebiten.Image, panes []Pane) {
 	u := float64(g.cw)
 	var lit, halo shapeBatch
 	for _, p := range panes {
-		ol := g.paneFrame(p).outer
+		ol := g.paneFrame(p).Outer
 		length := outlineLength(ol)
 		if length == 0 {
 			continue

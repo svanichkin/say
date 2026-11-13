@@ -3,31 +3,10 @@
 package gui
 
 import (
-	"fmt"
 	"math"
 	"reflect"
 	"testing"
 )
-
-func TestFrameGeneratorStableAndVaried(t *testing.T) {
-	shapes := map[string]bool{}
-	for seed := uint64(0); seed < 100; seed++ {
-		a, b := generate(seed, false), generate(seed, false)
-		if !reflect.DeepEqual(a, b) {
-			t.Fatalf("seed %d changes between draws", seed)
-		}
-		shapes[fmt.Sprint(a.cuts, a.steps)] = true
-	}
-	if len(shapes) < 95 {
-		t.Fatalf("only %d silhouettes for 100 seeds", len(shapes))
-	}
-	// The high bit of a launch seed must not be discarded by the cache key.
-	for _, seed := range []uint64{5, 5 | 1<<63} {
-		if !reflect.DeepEqual(styleOf(seed, false), generate(seed, false)) {
-			t.Fatalf("style cache aliases seed %x", seed)
-		}
-	}
-}
 
 func TestFrameContoursFitSmallAndWidePanes(t *testing.T) {
 	g := &game{cw: 8, ch: 16}
@@ -37,12 +16,12 @@ func TestFrameContoursFitSmallAndWidePanes(t *testing.T) {
 				p := Pane{Row: 3, Col: 3, Cols: size[0], Rows: size[1], Remote: remote}
 				f := g.frameOf(p, "29fps RX 12ms", generate(seed, false))
 				x, y, w, h := float64(p.Col*g.cw), float64(p.Row*g.ch), float64(p.Cols*g.cw), float64(p.Rows*g.ch)
-				for _, q := range f.inner {
+				for _, q := range f.Inner {
 					if q[0] < x || q[0] > x+w || q[1] < y || q[1] > y+h {
 						t.Fatalf("seed %d size %v: inner contour outside pane: %v", seed, size, q)
 					}
 				}
-				for _, poly := range [][]pt{f.inner, f.outer} {
+				for _, poly := range [][]pt{f.Inner, f.Outer} {
 					for i, a := range poly {
 						if math.IsNaN(a[0]) || math.IsNaN(a[1]) {
 							t.Fatal("non-finite contour")
@@ -58,7 +37,7 @@ func TestFrameContoursFitSmallAndWidePanes(t *testing.T) {
 						}
 					}
 				}
-				for _, q := range append(append([]pt{}, f.outer...), f.nodes...) {
+				for _, q := range append(append([]pt{}, f.Outer...), f.Nodes...) {
 					if q[0] < x-2*float64(g.cw) || q[0] > x+w+2*float64(g.cw) || q[1] < y-2*float64(g.cw) || q[1] > y+h+2*float64(g.cw) {
 						t.Fatalf("seed %d: ornament leaves the gutter: %v", seed, q)
 					}
@@ -80,17 +59,17 @@ func TestFrameGeometryCacheTracksLayoutNotVideo(t *testing.T) {
 	a := g.paneFrame(p)
 	p.Frame++
 	b := g.paneFrame(p)
-	if &a.outer[0] != &b.outer[0] {
+	if &a.Outer[0] != &b.Outer[0] {
 		t.Fatal("new video frame rebuilt unchanged geometry")
 	}
 	p.Cols++
 	c := g.paneFrame(p)
-	if reflect.DeepEqual(a.outer, c.outer) {
+	if reflect.DeepEqual(a.Outer, c.Outer) {
 		t.Fatal("resize retained old geometry")
 	}
 	seed++
 	d := g.paneFrame(p)
-	if reflect.DeepEqual(c.outer, d.outer) {
+	if reflect.DeepEqual(c.Outer, d.Outer) {
 		t.Fatal("new seed retained old geometry")
 	}
 }

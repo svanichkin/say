@@ -187,6 +187,17 @@ func writeChatFrame(out *strings.Builder, h *hudCanvas, top, left, cols, rows in
 		return
 	}
 	_, _, seed := FrameSeeds()
+	if gfxHUD {
+		gfxChat(top, left, cols, rows)
+		var cells hudCanvas
+		cells.cells = map[[2]int]hudCell{}
+		hudBox(&cells, top, left, cols, rows, ChatAccent(), seed, false, true)
+		cells.blank()
+		for k, c := range cells.cells {
+			h.cells[k] = c
+		}
+		return
+	}
 	hudBox(h, top, left, cols, rows, ChatAccent(), seed, false, true)
 }
 

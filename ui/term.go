@@ -1092,6 +1092,7 @@ func renderTermFrames() {
 		if termHUD {
 			data = onBlack(data)
 		}
+		data += gfxOutput(cols, rows, strings.Contains(data, "\x1b[2J"))
 		enqueueFrame(&device.TerminalFrame{Data: data})
 	}
 }
@@ -1220,6 +1221,18 @@ func renderChatScreen(cols, rows int) string {
 		hudBox(hud, canvasTop-1, videoLeft-1, vs.selfSlot.cols+2, vs.selfSlot.rows+2, self, selfSeed, false, false)
 		hudBox(hud, canvasTop-1, peerLeft-1, vs.peerSlot.cols+2, vs.peerSlot.rows+2, peer, peerSeed, true, false)
 		hudWindowBorder(hud, cols, rows)
+		if gfxHUD {
+			// The frames go as an image: their cells stay blank, and
+			// so do the video's cells outside the frames' inner line.
+			gfxBegin()
+			gfxPane(canvasTop, videoLeft, vs.selfSlot.cols, vs.selfSlot.rows, false)
+			gfxPane(canvasTop, peerLeft, vs.peerSlot.cols, vs.peerSlot.rows, true)
+			gfxBorder()
+			hud.blank()
+			for k, c := range gfxVideoMask(gfxGrid(cols, rows)).cells {
+				hud.cells[k] = c
+			}
+		}
 		for k := range hud.cells {
 			paneCache.invalidate(k[0], k[1], 1, 1)
 		}
@@ -2023,9 +2036,16 @@ func buildStatusScreen(cols, rows int, message string) string {
 	appendBorderClear(&out, cols, rows)
 	if framed() {
 		h := newHUDCanvas()
+		if gfxHUD {
+			gfxBegin()
+			gfxBorder()
+		}
 		writePixelStatusFrame(&out, h, blockCols, len(lines), startRow, cols, rows)
 		if termHUD {
 			hudWindowBorder(h, cols, rows)
+			if gfxHUD {
+				h.blank()
+			}
 			h.draw(outAt(&out))
 		}
 	}

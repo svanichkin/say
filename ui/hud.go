@@ -423,8 +423,13 @@ func hudBracket(b *strings.Builder, row, left, width int, spans ...[2]int) {
 			line[i] = false
 		}
 	}
+	end, mid := "▐", "─"
+	if gfxHUD { // drawn in the image: the cells stay blank
+		gfxBracket(row, left, width, spans...)
+		end, mid = " ", " "
+	}
 	writeCursorTo(b, row, left)
-	b.WriteString(hudBlack + accentSGR(hudOrange) + "▐")
+	b.WriteString(hudBlack + accentSGR(hudOrange) + end)
 	for i := 1; i < width-1; i++ {
 		if !line[i] {
 			continue
@@ -434,11 +439,22 @@ func hudBracket(b *strings.Builder, row, left, width int, spans ...[2]int) {
 			j++
 		}
 		writeCursorTo(b, row, left+i)
-		b.WriteString(strings.Repeat("─", j-i))
+		b.WriteString(strings.Repeat(mid, j-i))
 		i = j - 1
 	}
 	writeCursorTo(b, row, left+width-1)
-	b.WriteString("▌\x1b[0m")
+	if end == "▐" {
+		end = "▌"
+	}
+	b.WriteString(end + "\x1b[0m")
+}
+
+// blank turns every cell of the canvas into a blank one on black: the
+// frames' cells when the frames go as an image.
+func (h *hudCanvas) blank() {
+	for k := range h.cells {
+		h.cells[k] = hudCell{r: ' ', fg: hudFg}
+	}
 }
 
 // hudVideoMask is the frames' canvas while the panes are drawn: the cells

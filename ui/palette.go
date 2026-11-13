@@ -51,6 +51,7 @@ func SetColorMode(key string) {
 	}
 	// The window's frames, in characters, where the window's colours show.
 	setTermHUD(!ansiColors())
+	setGraphics(kittyGraphics())
 }
 
 func ansiColors() bool { return ColorMode(colorMode.Load()) == ColorANSI16 }

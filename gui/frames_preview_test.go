@@ -47,35 +47,35 @@ func TestFramesPreview(t *testing.T) {
 	}
 	defer face.Close()
 	plot := func(f paneFrame, c color.RGBA, video color.RGBA) {
-		fillPoly(img, f.inner, video)
-		for _, ps := range f.rails {
+		fillPoly(img, f.Inner, video)
+		for _, ps := range f.Rails {
 			fillPoly(img, ps, scale(c, 2, 3))
 		}
-		strokeLoop(img, f.inner, 1.6, scale(c, 2, 3))
-		strokeLoop(img, f.outer, 2.3, c)
-		for _, path := range f.traces {
+		strokeLoop(img, f.Inner, 1.6, scale(c, 2, 3))
+		strokeLoop(img, f.Outer, 2.3, c)
+		for _, path := range f.Traces {
 			for i := 1; i < len(path); i++ {
 				strokeLoop(img, []pt{path[i-1], path[i]}, 1.4, c)
 			}
 		}
-		for _, node := range f.nodes {
+		for _, node := range f.Nodes {
 			const d = 2.5
 			fillPoly(img, []pt{{node[0] - d, node[1]}, {node[0], node[1] - d}, {node[0] + d, node[1]}, {node[0], node[1] + d}}, c)
 		}
-		for _, ps := range f.plates {
+		for _, ps := range f.Plates {
 			fillPoly(img, ps, c)
 		}
-		for _, ps := range f.teeth {
+		for _, ps := range f.Teeth {
 			fillPoly(img, ps, c)
 		}
-		for _, ps := range f.cuts {
+		for _, ps := range f.Cuts {
 			fillPoly(img, ps, color.RGBA{8, 8, 12, 255})
 		}
-		if f.label != nil {
-			fillPoly(img, f.label, c)
+		if f.Label != nil {
+			fillPoly(img, f.Label, c)
 			d := font.Drawer{Dst: img, Src: image.NewUniform(color.RGBA{8, 8, 12, 255}), Face: face,
-				Dot: fixed.P(int(f.labelX), int(f.labelY)+ch/2+(face.Metrics().Ascent-face.Metrics().Descent).Ceil()/2)}
-			d.DrawString(f.caption)
+				Dot: fixed.P(int(f.LabelX), int(f.LabelY)+ch/2+(face.Metrics().Ascent-face.Metrics().Descent).Ceil()/2)}
+			d.DrawString(f.Caption)
 		}
 	}
 	for i := 0; i < pairs; i++ {
