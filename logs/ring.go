@@ -6,6 +6,8 @@ package logs
 // reliable, with the log forwarding in network/tcp/logforward.go.
 
 import (
+	"github.com/svanichkin/say/dbg"
+
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
@@ -37,13 +39,27 @@ var BootID = func() string {
 	return hex.EncodeToString(b[:])
 }()
 
+// logPrefixLen is the length of the timestamp log.Logger puts before each
+// message (log.LstdFlags | log.Lmicroseconds: "2006/01/02 15:04:05.000000 ").
+const logPrefixLen = len("2006/01/02 15:04:05.000000 ")
+
 // Tap returns a writer that writes to w and keeps every line in the ring.
-// log.Logger writes one line per Write.
+// log.Logger writes one line per Write. In a release build (see package
+// dbg) nothing is kept, and [debug] and [trace] lines are left out.
 func Tap(w io.Writer) io.Writer { return &tap{w: w} }
 
 type tap struct{ w io.Writer }
 
 func (t *tap) Write(p []byte) (int, error) {
+	if !dbg.On {
+		if msg := p[min(len(p), logPrefixLen):]; debugLine(string(msg[:min(len(msg), 7)])) {
+			return len(p), nil
+		}
+		if t.w == nil {
+			return len(p), nil
+		}
+		return t.w.Write(p)
+	}
 	keep(p)
 	if t.w == nil {
 		return len(p), nil

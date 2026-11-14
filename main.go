@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/gui"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/network"
@@ -230,7 +231,7 @@ func run() (err error) {
 	}
 	log.SetOutput(logs.Tap(logOutput)) // DEBUG-TEMP: Tap keeps lines for the peer
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	if logWriter != nil && logErr == nil { // DEBUG-TEMP: the peer's log, beside ours
+	if dbg.On && logWriter != nil && logErr == nil { // DEBUG-TEMP: the peer's log, beside ours
 		logs.SetPeerLogPath(strings.TrimSuffix(logPath, ".log") + "-peer.log")
 		log.Printf("[debug] %s %s, boot %s, %s/%s, args %q", role, appVersion(), logs.BootID, runtime.GOOS, runtime.GOARCH, os.Args[1:])
 	}

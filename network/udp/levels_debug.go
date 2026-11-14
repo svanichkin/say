@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/logs"
 )
 
@@ -30,6 +31,9 @@ type levelMeter struct {
 // add counts a frame: its samples, and whether it went as speech (sending)
 // or was decoded (receiving).
 func (m *levelMeter) add(pcm []int16, speech bool) {
+	if !dbg.On {
+		return
+	}
 	for _, v := range pcm {
 		x := int(v)
 		if x < 0 {
@@ -48,6 +52,9 @@ func (m *levelMeter) add(pcm []int16, speech bool) {
 
 // conceal counts a frame made up for a missing one.
 func (m *levelMeter) conceal() {
+	if !dbg.On {
+		return
+	}
 	m.frames++
 	m.concealed++
 	m.flush()

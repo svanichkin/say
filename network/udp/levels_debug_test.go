@@ -1,3 +1,5 @@
+//go:build debug
+
 package udp
 
 // DEBUG-TEMP: with levels_debug.go.

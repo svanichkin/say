@@ -14,6 +14,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/logs"
 )
 
@@ -37,7 +38,7 @@ var (
 // askPeerLog asks the peer for its log when we log at debug level and keep
 // the peer's log somewhere.
 func askPeerLog(conn net.Conn) {
-	if !conf.Verbose || logs.PeerLogPath() == "" {
+	if !dbg.On || !conf.Verbose || logs.PeerLogPath() == "" {
 		return
 	}
 	if err := writeFrameSafe(conn, frameLogWant, nil); err != nil {
@@ -52,6 +53,9 @@ var logSenders sync.Map // net.Conn → struct{}
 
 // sendLog sends our log on conn until the connection closes.
 func sendLog(conn net.Conn, peerLabel string) {
+	if !dbg.On {
+		return // a release build keeps no log to send
+	}
 	if _, busy := logSenders.LoadOrStore(conn, struct{}{}); busy {
 		return
 	}

@@ -5,9 +5,11 @@ BIN_DIR := bin
 GO := go
 
 VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null)
-BUILD_FLAGS :=
+# GOTAGS=debug makes a debug build (see README, "Debug build").
+GOTAGS ?=
+BUILD_FLAGS := -tags "$(GOTAGS)"
 ifneq ($(strip $(VERSION)),)
-	BUILD_FLAGS := -ldflags "-X main.version=$(VERSION)"
+	BUILD_FLAGS += -ldflags "-X main.version=$(VERSION)"
 endif
 
 HOST_OS := $(shell $(GO) env GOOS)
@@ -29,11 +31,15 @@ TARGETS := \
 	plan9/386 \
 	plan9/arm
 
-.PHONY: build run test tidy fmt clean build-all $(TARGETS:%=build-%)
+.PHONY: build debug run test tidy fmt clean build-all $(TARGETS:%=build-%)
 
 build:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=1 $(GO) build $(BUILD_FLAGS) -o $(HOST_BIN) $(BUILD_PKG)
+
+# debug: a debug build for this machine (see README, "Debug build").
+debug:
+	$(MAKE) build GOTAGS=debug
 
 run:
 	$(GO) run .

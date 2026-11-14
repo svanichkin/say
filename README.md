@@ -254,6 +254,22 @@ $env:CGO_ENABLED = "1"
 go run .
 ```
 
+### Debug build
+
+Builds are release builds by default. A debug build (`-tags debug`) traces
+calls in detail: `[debug]` and `[trace]` lines with `-log debug`, the peer's
+log sent over the call to a caller started with `-log debug` (saved beside
+ours as `*-peer.log`), and on Windows a debug log without any flags. It is
+for chasing problems in calls, not for everyday use: the tracing takes some
+CPU, the log grows by tens of MB an hour, and the log sent over a call takes
+bandwidth from it and shows the peer your addresses.
+
+```sh
+make debug                                   # this machine, into bin/
+make build-windows/amd64 GOTAGS=debug        # any target of make build-all
+go build -tags debug .                       # without make
+```
+
 ## Configuration
 
 Say stores its configuration under your OS config directory: on Linux this is

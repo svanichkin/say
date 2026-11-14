@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
 )
@@ -50,6 +51,9 @@ func vslot(index uint16) *voiceRec {
 
 // traceVoiceRx: a frame arrived from the network.
 func traceVoiceRx(index uint16, via string, size int) {
+	if !dbg.On {
+		return
+	}
 	vtrace.Lock()
 	r := vslot(index)
 	if !r.rxAt.IsZero() {
@@ -64,6 +68,9 @@ func traceVoiceRx(index uint16, via string, size int) {
 // traceVoiceDecoded: a frame was decoded for its slot (or made up for a
 // missing one, madeUp).
 func traceVoiceDecoded(index uint16, pcm []int16, queuedSamples int, madeUp bool) {
+	if !dbg.On {
+		return
+	}
 	level := frameLevel(pcm)
 	vtrace.Lock()
 	r := vslot(index)
@@ -74,6 +81,9 @@ func traceVoiceDecoded(index uint16, pcm []int16, queuedSamples int, madeUp bool
 
 // traceVoice logs what happened to a frame there and then.
 func traceVoice(index uint16, format string, args ...any) {
+	if !dbg.On {
+		return
+	}
 	logs.LogV("[trace] voice #%d "+format, append([]any{index}, args...)...)
 }
 
@@ -93,6 +103,9 @@ var voiceTraceOnce sync.Once
 // startVoiceTrace joins the speaker's events with what is known of each
 // frame and logs them.
 func startVoiceTrace() {
+	if !dbg.On {
+		return
+	}
 	voiceTraceOnce.Do(func() {
 		go func() {
 			for e := range device.PlayEvents() {

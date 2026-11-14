@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/network"
 )
 
@@ -314,10 +315,10 @@ func ParseCLI() (*AppOptions, error) {
 		// -sysaudio=false opts out.
 		SysAudio: runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 	}
-	// DEBUG-TEMP: Windows logs at debug level without flags (-log=false
-	// turns it off), so that a remote user's drops can be traced. Remove
-	// once calls are reliable.
-	if runtime.GOOS == "windows" {
+	// DEBUG-TEMP: a debug build on Windows logs at debug level without
+	// flags (-log=false turns it off), so that a remote user's drops can be
+	// traced. Remove once calls are reliable.
+	if dbg.On && runtime.GOOS == "windows" {
 		opts.LogEnabled, opts.LogDebug, opts.Verbose = true, true, true
 	}
 

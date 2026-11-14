@@ -1,3 +1,5 @@
+//go:build debug
+
 package tcp
 
 // DEBUG-TEMP: with logforward.go.
