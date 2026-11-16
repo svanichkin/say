@@ -12,6 +12,7 @@
 *.zip
 *.json
 *say*
+!device/sayring.h
 *.log
 *.jpeg
 *.tiv
