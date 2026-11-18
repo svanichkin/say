@@ -1,18 +1,8 @@
 package codec
 
-// Range-coded change frames (frameTypeDeltaRC, frameTypeDeltaPatchRC).
-//
-// A binary adaptive range coder (the LZMA scheme) codes, cell by cell, one
-// "changed" bit and, for a changed cell, its glyph (6 bits) and its
-// foreground and background palette indices (8 bits each) as bit trees.
-// Every bit has an adaptive probability, so the coder learns the picture's
-// statistics as the call goes. The changed bit is coded in the context of
-// its neighbours (left, above-left, above, above-right) and of the same
-// cell in the previous frame: changes come in patches and persist.
-//
-// The models restart at every frame that is not a change frame, on both
-// sides: a receiver that lost a frame waits for the next full frame anyway,
-// and continues from there with the encoder's state.
+// A binary adaptive range coder (the LZMA scheme): every bit has an
+// adaptive probability, so the coder learns a frame's statistics as it
+// goes. The frames' models are in frames.go.
 
 const (
 	rcProbBits = 11
@@ -55,31 +45,79 @@ func (e *rcEncoder) shiftLow() {
 	e.low = (e.low & 0xffffff) << 8
 }
 
-func (e *rcEncoder) bit(p *uint16, b int) {
-	bound := (e.rng >> rcProbBits) * uint32(*p)
+// encStep codes bit b at probability *p on the coder's range and low,
+// adapting *p, and returns them (normalize follows when rng < rcTop): no
+// call in it, so it inlines into the loops below, which keep rng and low
+// in registers over a symbol's bits.
+func encStep(rng uint32, low uint64, p *uint16, b int) (uint32, uint64) {
+	v := uint32(*p)
+	bound := (rng >> rcProbBits) * v
 	if b == 0 {
-		e.rng = bound
-		*p += (rcProbOne - *p) >> rcMoveBits
+		rng = bound
+		v += (rcProbOne - v) >> rcMoveBits
 	} else {
-		e.low += uint64(bound)
-		e.rng -= bound
-		*p -= *p >> rcMoveBits
+		low += uint64(bound)
+		rng -= bound
+		v -= v >> rcMoveBits
 	}
+	*p = uint16(v)
+	return rng, low
+}
+
+// normalize brings the range back to rcTop or above.
+func (e *rcEncoder) normalize() {
 	for e.rng < rcTop {
 		e.rng <<= 8
 		e.shiftLow()
 	}
 }
 
+func (e *rcEncoder) bit(p *uint16, b int) {
+	e.rng, e.low = encStep(e.rng, e.low, p, b)
+	if e.rng < rcTop {
+		e.normalize()
+	}
+}
+
 // tree codes the low n bits of v, most significant first; probs has 1<<n
 // entries (index 0 unused).
 func (e *rcEncoder) tree(probs []uint16, n int, v int) {
+	rng, low := e.rng, e.low
 	m := 1
 	for i := n - 1; i >= 0; i-- {
 		b := v >> i & 1
-		e.bit(&probs[m], b)
+		if rng, low = encStep(rng, low, &probs[m], b); rng < rcTop {
+			e.rng, e.low = rng, low
+			e.normalize()
+			rng, low = e.rng, e.low
+		}
 		m = m<<1 | b
 	}
+	e.rng, e.low = rng, low
+}
+
+// colour codes palette index v against ref (-1: none), as rcCoder.colour
+// describes.
+func (e *rcEncoder) colour(pred *[3][256]uint16, v, ref int) {
+	rng, low := e.rng, e.low
+	m, on := 1, ref >= 0
+	for i := 7; i >= 0; i-- {
+		s := 0
+		if on {
+			s = 1 + ref>>i&1
+		}
+		b := v >> i & 1
+		if rng, low = encStep(rng, low, &pred[s][m], b); rng < rcTop {
+			e.rng, e.low = rng, low
+			e.normalize()
+			rng, low = e.rng, e.low
+		}
+		if on && b != ref>>i&1 {
+			on = false
+		}
+		m = m<<1 | b
+	}
+	e.rng, e.low = rng, low
 }
 
 // finish flushes the coder. Trailing zero bytes are dropped: the decoder
@@ -120,63 +158,81 @@ func (d *rcDecoder) reset(in []byte) {
 	}
 }
 
-func (d *rcDecoder) bit(p *uint16) int {
-	bound := (d.rng >> rcProbBits) * uint32(*p)
-	var b int
-	if d.code < bound {
-		d.rng = bound
-		*p += (rcProbOne - *p) >> rcMoveBits
+// decStep decodes a bit at probability *p from the coder's range and code,
+// adapting *p (as encStep).
+func decStep(rng, code uint32, p *uint16) (uint32, uint32, int) {
+	v := uint32(*p)
+	bound := (rng >> rcProbBits) * v
+	b := 0
+	if code < bound {
+		rng = bound
+		v += (rcProbOne - v) >> rcMoveBits
 	} else {
-		d.code -= bound
-		d.rng -= bound
-		*p -= *p >> rcMoveBits
+		code -= bound
+		rng -= bound
+		v -= v >> rcMoveBits
 		b = 1
 	}
+	*p = uint16(v)
+	return rng, code, b
+}
+
+// normalize brings the range back to rcTop or above.
+func (d *rcDecoder) normalize() {
 	for d.rng < rcTop {
 		d.rng <<= 8
 		d.code = d.code<<8 | uint32(d.next())
+	}
+}
+
+func (d *rcDecoder) bit(p *uint16) int {
+	var b int
+	d.rng, d.code, b = decStep(d.rng, d.code, p)
+	if d.rng < rcTop {
+		d.normalize()
 	}
 	return b
 }
 
 func (d *rcDecoder) tree(probs []uint16, n int) int {
+	rng, code := d.rng, d.code
 	m := 1
-	for i := 0; i < n; i++ {
-		m = m<<1 | d.bit(&probs[m])
+	for range n {
+		var b int
+		if rng, code, b = decStep(rng, code, &probs[m]); rng < rcTop {
+			d.rng, d.code = rng, code
+			d.normalize()
+			rng, code = d.rng, d.code
+		}
+		m = m<<1 | b
 	}
+	d.rng, d.code = rng, code
 	return m - 1<<n
 }
 
-// rcModel is the adaptive state of the range-coded change frames.
-type rcModel struct {
-	valid   bool // false: restart before the next change frame
-	changed [32]uint16
-	glyph   [64]uint16
-	// Colours in the context of the cell's previous colour's top bits: the
-	// palette is sorted by colour code, brightness first, so these are
-	// roughly the previous brightness, and a cell's brightness changes
-	// little more often than not.
-	fg   [8][256]uint16
-	bg   [8][256]uint16
-	prev []bool // cells that changed in the previous change frame
-}
-
-func (m *rcModel) restart(cells int) {
-	probs := [][]uint16{m.changed[:], m.glyph[:]}
-	for c := range m.fg {
-		probs = append(probs, m.fg[c][:], m.bg[c][:])
-	}
-	for _, p := range probs {
-		for i := range p {
-			p[i] = rcProbOne / 2
+// colour decodes a palette index against ref (-1: none), as rcCoder.colour
+// describes.
+func (d *rcDecoder) colour(pred *[3][256]uint16, ref int) int {
+	rng, code := d.rng, d.code
+	m, on := 1, ref >= 0
+	for i := 7; i >= 0; i-- {
+		s := 0
+		if on {
+			s = 1 + ref>>i&1
 		}
+		var b int
+		if rng, code, b = decStep(rng, code, &pred[s][m]); rng < rcTop {
+			d.rng, d.code = rng, code
+			d.normalize()
+			rng, code = d.rng, d.code
+		}
+		if on && b != ref>>i&1 {
+			on = false
+		}
+		m = m<<1 | b
 	}
-	if cap(m.prev) < cells {
-		m.prev = make([]bool, cells)
-	}
-	m.prev = m.prev[:cells]
-	clear(m.prev)
-	m.valid = true
+	d.rng, d.code = rng, code
+	return m - 256
 }
 
 // changedContext is the context of cell i's changed bit: which of its
@@ -205,72 +261,6 @@ func changedContext(changed, prev []bool, i, cols int) int {
 	return ctx
 }
 
-// encode range-codes a change frame: for every cell the changed bit (from
-// mask) and, for a changed cell, its glyph and colour indices; prevFg and
-// prevBg are the cells' colours in the frame before.
-func (m *rcModel) encode(enc *rcEncoder, glyphs, fg, bg, prevFg, prevBg, mask []byte, cols int, changed []bool) {
-	for i := range glyphs {
-		ch := mask[i/8]&(1<<(i%8)) != 0
-		changed[i] = ch
-		b := 0
-		if ch {
-			b = 1
-		}
-		enc.bit(&m.changed[changedContext(changed, m.prev, i, cols)], b)
-		if !ch {
-			continue
-		}
-		enc.tree(m.glyph[:], 6, int(glyphs[i]))
-		enc.tree(m.fg[prevFg[i]>>5][:], 8, int(fg[i]))
-		enc.tree(m.bg[prevBg[i]>>5][:], 8, int(bg[i]))
-	}
-	copy(m.prev, changed)
-}
-
-// decode applies a range-coded change frame to the base cells.
-func (m *rcModel) decode(dec *rcDecoder, glyphs, fg, bg []byte, cols int, changed []bool) {
-	for i := range glyphs {
-		ch := dec.bit(&m.changed[changedContext(changed, m.prev, i, cols)]) == 1
-		changed[i] = ch
-		if !ch {
-			continue
-		}
-		glyphs[i] = byte(dec.tree(m.glyph[:], 6))
-		fg[i] = byte(dec.tree(m.fg[fg[i]>>5][:], 8)) // fg[i] is still the previous colour
-		bg[i] = byte(dec.tree(m.bg[bg[i]>>5][:], 8))
-	}
-	copy(m.prev, changed)
-}
-
-// Range-coded full frames and keyframes (frameTypeFullRC, frameTypeKeyRC).
-// A frame of its own: the model starts afresh with every such frame. Each
-// field of a cell (glyph, foreground, background) is coded as "same as the
-// cell to the left", else "same as the cell above", else its value; a
-// picture is mostly even areas, where those flags cost a fraction of a bit.
-type rcSpatial struct {
-	eqLeft  [3][4]uint16 // per field; context: left == above, previous field matched
-	eqAbove [3][2]uint16 // per field; context: previous field matched
-	glyph   [64]uint16
-	colour  [2][8][256]uint16 // fg, bg; context: top bits of the colour above (or left)
-}
-
-func (m *rcSpatial) restart() {
-	probs := [][]uint16{m.glyph[:]}
-	for f := range m.eqLeft {
-		probs = append(probs, m.eqLeft[f][:], m.eqAbove[f][:])
-	}
-	for f := range m.colour {
-		for c := range m.colour[f] {
-			probs = append(probs, m.colour[f][c][:])
-		}
-	}
-	for _, p := range probs {
-		for i := range p {
-			p[i] = rcProbOne / 2
-		}
-	}
-}
-
 // spatialCell describes what the coder of field f of cell i may refer to.
 func spatialCell(plane []byte, i, cols int) (left, above int, hasLeft, hasAbove bool) {
 	x := i % cols
@@ -281,93 +271,6 @@ func spatialCell(plane []byte, i, cols int) (left, above int, hasLeft, hasAbove 
 		above, hasAbove = int(plane[i-cols]), true
 	}
 	return
-}
-
-// encode codes all cells of a frame.
-func (m *rcSpatial) encode(enc *rcEncoder, glyphs, fg, bg []byte, cols int) {
-	planes := [3][]byte{glyphs, fg, bg}
-	for i := range glyphs {
-		matched := false // the previous field of this cell repeated a neighbour
-		for f, plane := range planes {
-			v := int(plane[i])
-			left, above, hasLeft, hasAbove := spatialCell(plane, i, cols)
-			eq := false
-			if hasLeft {
-				ctx := 0
-				if hasAbove && left == above {
-					ctx |= 1
-				}
-				if matched {
-					ctx |= 2
-				}
-				eq = v == left
-				enc.bit(&m.eqLeft[f][ctx], b2i(eq))
-			}
-			if !eq && hasAbove && (!hasLeft || above != left) {
-				eq = v == above
-				enc.bit(&m.eqAbove[f][b2i(matched)], b2i(eq))
-			}
-			matched = eq
-			if eq {
-				continue
-			}
-			if f == 0 {
-				enc.tree(m.glyph[:], 6, v)
-				continue
-			}
-			ref := 0
-			if hasAbove {
-				ref = above
-			} else if hasLeft {
-				ref = left
-			}
-			enc.tree(m.colour[f-1][ref>>5][:], 8, v)
-		}
-	}
-}
-
-// decode fills all cells of a frame.
-func (m *rcSpatial) decode(dec *rcDecoder, glyphs, fg, bg []byte, cols int) {
-	planes := [3][]byte{glyphs, fg, bg}
-	for i := range glyphs {
-		matched := false
-		for f, plane := range planes {
-			left, above, hasLeft, hasAbove := spatialCell(plane, i, cols)
-			v, eq := 0, false
-			if hasLeft {
-				ctx := 0
-				if hasAbove && left == above {
-					ctx |= 1
-				}
-				if matched {
-					ctx |= 2
-				}
-				if dec.bit(&m.eqLeft[f][ctx]) == 1 {
-					v, eq = left, true
-				}
-			}
-			if !eq && hasAbove && (!hasLeft || above != left) {
-				if dec.bit(&m.eqAbove[f][b2i(matched)]) == 1 {
-					v, eq = above, true
-				}
-			}
-			matched = eq
-			if !eq {
-				if f == 0 {
-					v = dec.tree(m.glyph[:], 6)
-				} else {
-					ref := 0
-					if hasAbove {
-						ref = above
-					} else if hasLeft {
-						ref = left
-					}
-					v = dec.tree(m.colour[f-1][ref>>5][:], 8)
-				}
-			}
-			plane[i] = byte(v)
-		}
-	}
 }
 
 func b2i(b bool) int {

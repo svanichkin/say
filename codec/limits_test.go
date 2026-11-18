@@ -6,27 +6,16 @@ import (
 )
 
 func TestDecodeRejectsOversizedPayloads(t *testing.T) {
-	// A small datagram that expands far beyond any valid frame.
-	bomb, err := compressZstd(make([]byte, 4<<20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bomb) > maxMediaTestDatagram {
-		t.Fatalf("test bomb is %d bytes, expected it to fit a datagram", len(bomb))
-	}
-	if _, err := NewDecoder().Decode(bomb); err == nil || !strings.Contains(err.Error(), "zstd") {
-		t.Fatalf("decompression bomb: err = %v, want a zstd limit error", err)
-	}
-
 	// A header claiming more cells than allowed must fail before allocating planes.
 	hdr := []byte(PayloadMagic)
-	hdr = append(hdr, 1, 0xff, 0xff, 0xff, 0xff)
-	packed, err := compressZstd(hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewDecoder().Decode(packed); err == nil || !strings.Contains(err.Error(), "outside") {
+	hdr = append(hdr, frameTypeKey, 0xff, 0xff, 0xff, 0xff)
+	if _, err := NewDecoder().Decode(hdr); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("65535x65535 frame: err = %v, want a size limit error", err)
+	}
+	// An unknown frame type is refused.
+	hdr = append([]byte(PayloadMagic), 9, 1, 0, 1, 0)
+	if _, err := NewDecoder().Decode(hdr); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("frame type 9: err = %v, want an unknown type error", err)
 	}
 }
 

@@ -78,12 +78,9 @@ func TestRangeCoderRoundTrip(t *testing.T) {
 	}
 }
 
-// frameKind returns the frame type of a payload, zstd-wrapped or not.
+// frameKind returns the frame type of a payload.
 func frameKind(t *testing.T, out []byte) byte {
 	t.Helper()
-	if string(out[:len(PayloadMagic)]) == PayloadMagic {
-		return out[len(PayloadMagic)]
-	}
 	return frameType(t, out)
 }
 
@@ -94,8 +91,6 @@ func TestRangeCodedFramesReproduceTheSentPicture(t *testing.T) {
 	}{{"noisy", noisyFrames(60, 3)}, {"drifting", driftingFrames(60)}} {
 		enc := NewEncoder(false, 20, 0, false)
 		enc.SetShapeHold(10)
-		enc.SetPalettePatches(true)
-		enc.SetRangeCoding(true)
 		dec := NewDecoder()
 		types := map[byte]int{}
 		for f, frame := range src.frames {
@@ -103,21 +98,15 @@ func TestRangeCodedFramesReproduceTheSentPicture(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			typ := out[len(PayloadMagic)]
-			if string(out[:len(PayloadMagic)]) != PayloadMagic {
-				typ = frameType(t, out) // zstd-wrapped
-			}
+			typ := frameType(t, out)
 			types[typ]++
 			if _, err := dec.Decode(out); err != nil {
 				t.Fatalf("%s frame %d (type %d): %v", src.name, f, typ, err)
 			}
 			assertSameAsSent(t, enc, dec, f)
 		}
-		if types[frameTypeDeltaRC]+types[frameTypeDeltaPatchRC] == 0 || types[frameTypeKeyRC] == 0 {
-			t.Fatalf("%s: range-coded change frames or keyframes missing: %v", src.name, types)
-		}
-		if types[frameTypeKey]+types[frameTypeFull]+types[frameTypeDelta]+types[frameTypeDeltaPatch] != 0 {
-			t.Fatalf("%s: zstd frames with range coding on: %v", src.name, types)
+		if types[frameTypeDelta]+types[frameTypeDeltaPatch] == 0 || types[frameTypeKey] == 0 {
+			t.Fatalf("%s: change frames or keyframes missing: %v", src.name, types)
 		}
 		t.Logf("%s: frame types %v", src.name, types)
 	}
@@ -126,8 +115,6 @@ func TestRangeCodedFramesReproduceTheSentPicture(t *testing.T) {
 func TestLostRangeCodedFrameResyncsAtTheNextFullFrame(t *testing.T) {
 	enc := NewEncoder(false, 15, 0, false)
 	enc.SetShapeHold(10)
-	enc.SetPalettePatches(true)
-	enc.SetRangeCoding(true)
 	dec := NewDecoder()
 	lost, recovered := false, false
 	for f, frame := range noisyFrames(80, 5) {
@@ -135,11 +122,8 @@ func TestLostRangeCodedFrameResyncsAtTheNextFullFrame(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		typ := out[len(PayloadMagic)]
-		if string(out[:len(PayloadMagic)]) != PayloadMagic {
-			typ = frameType(t, out)
-		}
-		rc := typ == frameTypeDeltaRC || typ == frameTypeDeltaPatchRC // a change frame
+		typ := frameType(t, out)
+		rc := typ == frameTypeDelta || typ == frameTypeDeltaPatch // a change frame
 		if !lost && rc && f > 8 {
 			lost = true
 			dec.ResetBase()
@@ -173,7 +157,6 @@ func TestLostRangeCodedFrameResyncsAtTheNextFullFrame(t *testing.T) {
 func TestCorruptRangeCodedFrameIsRefused(t *testing.T) {
 	enc := NewEncoder(false, 0, 0, false)
 	enc.SetShapeHold(10)
-	enc.SetRangeCoding(true)
 	frames := noisyFrames(6, 9)
 	var payloads [][]byte
 	for _, frame := range frames {
@@ -252,14 +235,13 @@ func TestRangeCoderTrailingZeros(t *testing.T) {
 }
 
 // Scene cuts without palette changes produce full frames without a palette
-// (frameTypeFullRC); they must decode with the last keyframe's palette.
+// (frameTypeFull); they must decode with the last keyframe's palette.
 func TestRangeCodedFullFrames(t *testing.T) {
 	a, b := noisyFrames(1, 11)[0], noisyFrames(1, 11)[0]
 	for i := range b { // the same colours, moved: a cut, but no new palette
 		b[i] = a[len(a)-1-i/3*3+i%3-2]
 	}
 	enc := NewEncoder(false, 0, 0, false)
-	enc.SetRangeCoding(true)
 	dec := NewDecoder()
 	types := map[byte]int{}
 	for f := 0; f < 12; f++ {
@@ -277,30 +259,27 @@ func TestRangeCodedFullFrames(t *testing.T) {
 		}
 		assertSameAsSent(t, enc, dec, f)
 	}
-	if types[frameTypeFullRC] == 0 {
+	if types[frameTypeFull] == 0 {
 		t.Fatalf("no full frames without a palette: %v", types)
 	}
 	t.Logf("frame types %v", types)
 }
 
 func TestForceKeyframe(t *testing.T) {
-	for _, rc := range []bool{false, true} {
-		enc := NewEncoder(false, 0, 0, false)
-		enc.SetShapeHold(10)
-		enc.SetRangeCoding(rc)
-		frames := noisyFrames(6, 4)
-		for f, frame := range frames {
-			if f == 3 {
-				enc.ForceKeyframe()
-			}
-			out, err := enc.Encode(Frame{Data: frame, Width: 352, Height: 288}, 88, 36)
-			if err != nil {
-				t.Fatal(err)
-			}
-			key := frameKind(t, out) == frameTypeKey || frameKind(t, out) == frameTypeKeyRC
-			if want := f == 0 || f == 3; key != want {
-				t.Fatalf("range coding %v, frame %d: keyframe %v, want %v", rc, f, key, want)
-			}
+	enc := NewEncoder(false, 0, 0, false)
+	enc.SetShapeHold(10)
+	frames := noisyFrames(6, 4)
+	for f, frame := range frames {
+		if f == 3 {
+			enc.ForceKeyframe()
+		}
+		out, err := enc.Encode(Frame{Data: frame, Width: 352, Height: 288}, 88, 36)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := frameKind(t, out) == frameTypeKey
+		if want := f == 0 || f == 3; key != want {
+			t.Fatalf("frame %d: keyframe %v, want %v", f, key, want)
 		}
 	}
 }
@@ -318,8 +297,6 @@ func TestSkipEmptyKeepsTheStreamInSync(t *testing.T) {
 	}
 	enc := NewEncoder(false, 0, 0, false)
 	enc.SetShapeHold(10)
-	enc.SetPalettePatches(true)
-	enc.SetRangeCoding(true)
 	dec := NewDecoder()
 	skipped, sent := 0, 0
 	for f, frame := range frames {

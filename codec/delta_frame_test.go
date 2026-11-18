@@ -56,10 +56,9 @@ func TestDeltaFramesReproduceTheSentPicture(t *testing.T) {
 		if _, err := dec.Decode(out); err != nil {
 			t.Fatalf("frame %d: %v", f, err)
 		}
-		raw, _ := decompressZstd(out)
-		typ := raw[len(PayloadMagic)]
+		typ := frameType(t, out)
 		types[typ]++
-		if typ == frameTypeDelta {
+		if typ == frameTypeDelta || typ == frameTypeDeltaPatch {
 			deltaBytes += len(out)
 			deltas++
 		} else {
@@ -91,11 +90,10 @@ func TestDeltaFramesRecoverAfterLoss(t *testing.T) {
 			dec.ResetBase()
 			continue
 		}
-		raw, _ := decompressZstd(out)
-		typ := raw[len(PayloadMagic)]
+		typ := frameType(t, out)
 		_, err = dec.Decode(out)
 		switch {
-		case f > 12 && !recovered && typ == frameTypeDelta:
+		case f > 12 && !recovered && (typ == frameTypeDelta || typ == frameTypeDeltaPatch):
 			if !errors.Is(err, ErrNoBase) {
 				t.Fatalf("frame %d: change frame after a loss decoded (%v), want ErrNoBase", f, err)
 			}

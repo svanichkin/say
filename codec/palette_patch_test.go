@@ -31,18 +31,16 @@ func driftingFrames(n int) [][]byte {
 
 func frameType(t *testing.T, out []byte) byte {
 	t.Helper()
-	raw, err := decompressZstd(out)
-	if err != nil {
-		t.Fatal(err)
+	if len(out) <= len(PayloadMagic) || string(out[:len(PayloadMagic)]) != PayloadMagic {
+		t.Fatalf("not a frame: % x", out[:min(len(out), 8)])
 	}
-	return raw[len(PayloadMagic)]
+	return out[len(PayloadMagic)]
 }
 
 func TestPalettePatchesReproduceTheSentPicture(t *testing.T) {
 	frames := driftingFrames(60)
-	keys := func(patches bool) int {
+	keys := func() int {
 		enc := NewEncoder(false, 0, 0, false)
-		enc.SetPalettePatches(patches)
 		dec := NewDecoder()
 		n, patched := 0, 0
 		for f, frame := range frames {
@@ -57,7 +55,7 @@ func TestPalettePatchesReproduceTheSentPicture(t *testing.T) {
 				patched++
 			}
 			if _, err := dec.Decode(out); err != nil {
-				t.Fatalf("patches %v, frame %d: %v", patches, f, err)
+				t.Fatalf("frame %d: %v", f, err)
 			}
 			assertSameAsSent(t, enc, dec, f)
 			if len(dec.lastPalette) != len(enc.lastPalette) {
@@ -70,21 +68,16 @@ func TestPalettePatchesReproduceTheSentPicture(t *testing.T) {
 				}
 			}
 		}
-		if patches && patched == 0 {
+		if patched == 0 {
 			t.Fatal("no frame patched the palette")
 		}
 		return n
 	}
-	without, with := keys(false), keys(true)
-	if with >= without {
-		t.Fatalf("keyframes with patches %d, without %d: patches should replace them", with, without)
-	}
-	t.Logf("keyframes: %d without patches, %d with", without, with)
+	t.Logf("keyframes: %d of %d frames", keys(), len(frames))
 }
 
 func TestLostPalettePatchWaitsForThePalette(t *testing.T) {
 	enc := NewEncoder(false, 20, 0, false)
-	enc.SetPalettePatches(true)
 	dec := NewDecoder()
 	lost, recovered := false, false
 	sincePatch := false
@@ -137,7 +130,6 @@ func TestLostPalettePatchWaitsForThePalette(t *testing.T) {
 // old tinted palette entry, and no held cell may keep its colour.
 func TestSetBWLeavesNoColour(t *testing.T) {
 	enc := NewEncoder(false, 0, 0, false)
-	enc.SetPalettePatches(true)
 	enc.SetShapeHold(64)
 	dec := NewDecoder()
 	frames := driftingFrames(12)

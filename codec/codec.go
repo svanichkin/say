@@ -5,14 +5,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/bits"
 	"runtime"
 	"sort"
 	"sync"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 const defaultKeyframeInterval = 100
@@ -260,6 +257,14 @@ func glyphCandidates() ([]uint32, []int) {
 // covering most of it, which held in about one cell in nine and was then drawn
 // in those two exact colours, cost a third of the encoder's time.
 func findCharDataBlock(block *cellBlock, flags int) CharData {
+	pattern, codePoint := nearestGlyph(cellMask(block), flags)
+	return createCharDataBlock(block, codePoint, pattern)
+}
+
+// cellMask splits a cell along its widest channel (the first wins a tie)
+// at the middle of its range: the pixels above it set, raster order from
+// the top bit.
+func cellMask(block *cellBlock) uint32 {
 	minY, minCb, minCr := uint32(255), uint32(255), uint32(255)
 	maxY, maxCb, maxCr := uint32(0), uint32(0), uint32(0)
 	for _, px := range block {
@@ -268,7 +273,6 @@ func findCharDataBlock(block *cellBlock, flags int) CharData {
 		minCb, maxCb = min(minCb, cb), max(maxCb, cb)
 		minCr, maxCr = min(minCr, cr), max(maxCr, cr)
 	}
-	// Widest channel; the first wins a tie.
 	shift, lo, span := uint(16), minY, maxY-minY
 	if maxCb-minCb > span {
 		shift, lo, span = 8, minCb, maxCb-minCb
@@ -285,15 +289,18 @@ func findCharDataBlock(block *cellBlock, flags int) CharData {
 		}
 		bitsVal = bitsVal<<1 | bit
 	}
+	return bitsVal
+}
 
+// nearestGlyph is the glyph closest to a cell's mask: the fewest pixels
+// differing, as it is or inverted (32 minus the difference), in that order;
+// the first wins a tie and an exact match cannot be beaten. The colours are
+// the averages under the glyph's set and clear bits, so an inverted match
+// needs nothing more.
+func nearestGlyph(bitsVal uint32, flags int) (uint32, int) {
 	bestDiff := 32
 	bestPattern := uint32(0x0000ffff)
 	codePoint := 0x2584
-
-	// Each glyph is tried as is and inverted (32 minus the difference), in
-	// that order; an exact match cannot be beaten. The colours are the
-	// averages under the glyph's set and clear bits, so an inverted match
-	// needs nothing more.
 	if flags == 0 {
 		patterns, codes := glyphCandidates()
 		for i, pattern := range patterns {
@@ -325,8 +332,29 @@ func findCharDataBlock(block *cellBlock, flags int) CharData {
 			}
 		}
 	}
+	return bestPattern, codePoint
+}
 
-	return createCharDataBlock(block, codePoint, bestPattern)
+// glyphCache remembers nearestGlyph's answers (flags 0) by mask, a
+// direct-mapped table: a camera's cells repeat their masks (flat cells,
+// the same edges), and an answer depends on the mask alone.
+type glyphCache struct {
+	key     [glyphCacheSize]uint64 // 1<<32 | mask; 0: empty
+	pattern [glyphCacheSize]uint32
+	code    [glyphCacheSize]int32
+}
+
+const glyphCacheSize = 1 << 12
+
+func (c *glyphCache) nearest(mask uint32) (uint32, int) {
+	h := (mask * 2654435761) >> (32 - 12)
+	k := 1<<32 | uint64(mask)
+	if c.key[h] == k {
+		return c.pattern[h], int(c.code[h])
+	}
+	p, cp := nearestGlyph(mask, 0)
+	c.key[h], c.pattern[h], c.code[h] = k, p, int32(cp)
+	return p, cp
 }
 
 var (
@@ -364,72 +392,6 @@ func glyphIndexMap() map[int]byte {
 	return glyphIndexTable
 }
 
-// packGlyphs6 packs glyph indices (each 0..63) into a bitstream
-// using 6 bits per glyph.
-func packGlyphs6(src []byte) []byte {
-	var out []byte
-	return packGlyphs6Into(&out, src)
-}
-
-// packGlyphs6Into is packGlyphs6 writing into *buf, grown as needed and
-// reused across frames.
-func packGlyphs6Into(buf *[]byte, src []byte) []byte {
-	n := len(src)
-	if n == 0 {
-		return nil
-	}
-	totalBits := n * 6
-	outLen := (totalBits + 7) / 8
-	out := ensureByteSlice(buf, outLen)
-	clear(out)
-	bitPos := 0
-	for _, v := range src {
-		val := int(v) & 0x3f
-		byteIndex := bitPos / 8
-		bitOffset := bitPos % 8
-
-		// write lower bits into current byte
-		out[byteIndex] |= byte(val << bitOffset)
-
-		// if it crosses byte boundary, spill the remaining bits
-		if bitOffset > 2 {
-			out[byteIndex+1] |= byte(val >> (8 - bitOffset))
-		}
-
-		bitPos += 6
-	}
-	return out
-}
-
-// unpackGlyphs6 unpacks glyph indices from a 6-bit-per-glyph bitstream.
-func unpackGlyphs6(data []byte, count int) ([]byte, error) {
-	if count == 0 {
-		return nil, nil
-	}
-	totalBits := len(data) * 8
-	neededBits := count * 6
-	if neededBits > totalBits {
-		return nil, fmt.Errorf("glyphs6: not enough data: need %d bits, have %d", neededBits, totalBits)
-	}
-
-	out := make([]byte, count)
-	bitPos := 0
-	for i := 0; i < count; i++ {
-		byteIndex := bitPos / 8
-		bitOffset := bitPos % 8
-
-		val := int(data[byteIndex] >> bitOffset)
-		bitsUsed := 8 - bitOffset
-		if bitsUsed < 6 {
-			val |= int(data[byteIndex+1]) << bitsUsed
-		}
-
-		out[i] = byte(val & 0x3f)
-		bitPos += 6
-	}
-	return out, nil
-}
-
 func getChannel(rgb uint32, index int) int {
 	// rgb here actually stores Y, Cb, Cr in 3 bytes.
 	switch index {
@@ -453,72 +415,15 @@ const (
 	paletteReuseColorErrorTolerance = 30
 )
 
-var (
-	zstdEncoderLevel = zstd.SpeedBetterCompression
-
-	sharedZstdEncoder persistentZstdEncoder
-	sharedZstdDecoder persistentZstdDecoder
-)
-
-type persistentZstdEncoder struct {
-	once sync.Once
-	mu   sync.Mutex
-	enc  *zstd.Encoder
-	err  error
-}
-
-func (p *persistentZstdEncoder) use(fn func(*zstd.Encoder) error) error {
-	p.once.Do(func() {
-		p.enc, p.err = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstdEncoderLevel))
-	})
-	if p.err != nil {
-		return p.err
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	return fn(p.enc)
-}
-
 // Resolution limits for one video frame, in terminal cells. They bound the
-// memory a peer can make us allocate and keep every encoded frame within a
-// single UDP datagram (MaxPayloadBytes). 160×80 cells is a 640×640 px source,
-// far above what a pane in a typical terminal needs.
+// memory a peer can make us allocate and the size of an encoded frame.
+// 160×80 cells is a 640×640 px source, far above what a pane in a typical
+// terminal needs.
 const (
 	MaxFrameCols  = 160
 	MaxFrameRows  = 80
 	MaxFrameCells = MaxFrameCols * MaxFrameRows
 )
-
-// MaxPayloadBytes is the largest decompressed payload a valid frame can have:
-// header, 6-bit glyph plane, a full palette and two one-byte index planes.
-const MaxPayloadBytes = len(PayloadMagic) + 1 + 2 + 2 + 4*4 +
-	(MaxFrameCells*6+7)/8 + maxPaletteColors*2 + 2*MaxFrameCells
-
-type persistentZstdDecoder struct {
-	once sync.Once
-	mu   sync.Mutex
-	dec  *zstd.Decoder
-	err  error
-}
-
-func (p *persistentZstdDecoder) use(fn func(*zstd.Decoder) error) error {
-	p.once.Do(func() {
-		p.dec, p.err = zstd.NewReader(nil,
-			zstd.WithDecoderConcurrency(1),
-			zstd.WithDecoderMaxMemory(uint64(MaxPayloadBytes)),
-			zstd.WithDecoderMaxWindow(uint64(MaxPayloadBytes)))
-	})
-	if p.err != nil {
-		return p.err
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	return fn(p.dec)
-}
 
 type paletteColor [3]byte
 
@@ -538,7 +443,7 @@ type Encoder struct {
 	// across frames until the palette changes.
 	match paletteMatcher
 
-	payloadBuf bytes.Buffer
+	payloadBuf []byte
 
 	lastPalette         []paletteColor
 	lastPaletteExpanded [][3]int
@@ -552,7 +457,6 @@ type Encoder struct {
 	// without a palette must not be sent (a receiver that lost a patch
 	// would draw it in the old colours). paletteMissRatio: the share of
 	// colours a freshly built palette missed (more colours than it holds).
-	palettePatches   bool
 	patchedSinceKey  bool
 	paletteMissRatio float64
 	paletteUsed      [maxPaletteColors]uint32 // frame number of each entry's last use
@@ -562,14 +466,15 @@ type Encoder struct {
 
 	skipEmpty bool // SetSkipEmpty
 
-	// Range-coded change frames (SetRangeCoding).
-	rangeCoding bool
-	rc          rcModel
-	rcEnc       rcEncoder
-	rcChanged   []bool
-	rcPrevFg    []byte // the colours sent before this frame (contexts)
-	rcPrevBg    []byte
-	rcFull      rcSpatial
+	// The range coder and the frames' models (frames.go).
+	rcEnc     rcEncoder
+	rcFrame   rcFrame
+	rc        rcChange
+	rcChanged []bool
+	rcPrevG   []byte // the cells sent before this frame
+	rcPrevFg  []byte
+	rcPrevBg  []byte
+	emptyFg   []paletteColor // the foregrounds, the empty glyph's its background
 
 	// Cell hold (see holdShapes): holdBits is the per-pixel threshold.
 	holdBits   int
@@ -587,11 +492,7 @@ type Encoder struct {
 	sentCells  int
 
 	// Scratch for building a payload, reused across frames.
-	changeMask    []byte
-	changedGlyphs []byte
-	changedFg     []byte
-	changedBg     []byte
-	packedGlyphs  []byte
+	changeMask []byte
 
 	framesSinceLastKey int
 	keyframeInterval   int
@@ -599,6 +500,14 @@ type Encoder struct {
 	forceBW            bool
 	maxFPS             int
 	mirror             bool
+
+	// codeIdx holds a colour code's index in the palette (codeIndices),
+	// codeGen<<8 | index; an entry of another generation is empty, so a new
+	// palette clears the table by advancing codeGen.
+	codeIdx []uint32
+	codeGen uint32
+
+	glyphCache *[2]glyphCache // per worker of buildCellData, kept by Restart
 }
 
 var defaultEncoder = NewEncoder(false, defaultKeyframeInterval, 0, false)
@@ -651,34 +560,23 @@ type Decoder struct {
 	baseFg     []byte
 	baseBg     []byte
 
-	// Range-coded change frames: the models follow the encoder's.
-	rc        rcModel
+	// The range decoder and the frames' models follow the encoder's.
 	rcDec     rcDecoder
+	rcFrame   rcFrame
+	rc        rcChange
 	rcChanged []bool
-	rcFull    rcSpatial
 }
 
-// Frame types (the byte after the magic).
+// Frame types (the byte after the magic); after the header (cols, rows) a
+// frame is one range-coded stream (frames.go).
 const (
-	frameTypeFull  byte = 0 // all cells, palette of the last keyframe
-	frameTypeKey   byte = 1 // all cells and a palette
-	frameTypeDelta byte = 2 // only the cells that changed since the previous frame
-	// frameTypeDeltaPatch is a change frame that first replaces palette
-	// entries (index, colour code). Sent only to peers that announced
-	// support (SetPalettePatches).
-	frameTypeDeltaPatch byte = 3
-	// frameTypeDeltaRC and frameTypeDeltaPatchRC are change frames whose
-	// cells are range coded (rangecoder.go) instead of zstd: the payload is
-	// not wrapped in zstd. Sent only to peers that announced support
-	// (SetRangeCoding).
-	frameTypeDeltaRC      byte = 4
-	frameTypeDeltaPatchRC byte = 5
-	// frameTypeFullRC and frameTypeKeyRC are frameTypeFull and frameTypeKey
-	// with range-coded cells (rcSpatial), not wrapped in zstd.
-	frameTypeFullRC    byte = 6
-	frameTypeKeyRC     byte = 7
-	deltaMaxChangedNum      = 6 // a change frame is sent while at most 6/10…
-	deltaMaxChangedDen      = 10
+	frameTypeFull       byte = 0 // all cells, on the palette the receiver holds
+	frameTypeKey        byte = 1 // a palette and all cells
+	frameTypeDelta      byte = 2 // the cells that changed since the previous frame
+	frameTypeDeltaPatch byte = 3 // palette entries replaced, then as frameTypeDelta
+
+	deltaMaxChangedNum = 6 // a change frame is sent while at most 6/10…
+	deltaMaxChangedDen = 10
 )
 
 // ErrNoBase reports a change-only frame whose previous frame is missing
@@ -711,9 +609,13 @@ func (d *Decoder) applyPatchLocked(patch []byte) bool {
 // frames are refused until the next full frame instead of drawing garbage.
 func (d *Decoder) ResetBase() {
 	d.mu.Lock()
+	d.resetBaseLocked()
+	d.mu.Unlock()
+}
+
+func (d *Decoder) resetBaseLocked() {
 	d.baseValid = false
 	d.rc.valid = false
-	d.mu.Unlock()
 }
 
 var defaultDecoder Decoder
@@ -741,15 +643,14 @@ func Encode(frame Frame, cols, rows int) ([]byte, error) {
 	return defaultEncoder.Encode(frame, cols, rows)
 }
 
-// Encode encodes a frame for the network: the payload compressed with zstd.
+// Encode encodes a frame for the network (nil: nothing changed, with
+// SetSkipEmpty).
 func (e *Encoder) Encode(frame Frame, cols, rows int) ([]byte, error) {
-	return e.encode(frame, cols, rows, true)
-}
-
-// EncodePlain encodes a frame that stays in this process (the self view):
-// the same payload without compression, for Decoder.DecodePlain.
-func (e *Encoder) EncodePlain(frame Frame, cols, rows int) ([]byte, error) {
-	return e.encode(frame, cols, rows, false)
+	glyphs, fgColors, bgColors, err := e.cells(frame, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	return e.encodeCells(glyphs, fgColors, bgColors, cols, rows)
 }
 
 // EncodeWithSelfView encodes frame for the network, as Encode does, and makes
@@ -762,7 +663,7 @@ func (e *Encoder) EncodeWithSelfView(frame Frame, cols, rows int, self *Encoder)
 	if err != nil {
 		return nil, nil, err
 	}
-	net, err = e.encodeCells(glyphs, fgColors, bgColors, cols, rows, true)
+	net, err = e.encodeCells(glyphs, fgColors, bgColors, cols, rows)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -799,14 +700,6 @@ func newTextFrame(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows i
 		copy(tf.BgYCbCr[i*3:i*3+3], bgColors[i][:])
 	}
 	return tf
-}
-
-func (e *Encoder) encode(frame Frame, cols, rows int, compress bool) ([]byte, error) {
-	glyphs, fgColors, bgColors, err := e.cells(frame, cols, rows)
-	if err != nil {
-		return nil, err
-	}
-	return e.encodeCells(glyphs, fgColors, bgColors, cols, rows, compress)
 }
 
 // cells turns a frame into glyphs and fg/bg colours, after the cell hold.
@@ -911,13 +804,24 @@ func glyphMirrors() ([]byte, []bool) {
 	return glyphMirror, glyphMirrorSwap
 }
 
-// encodeCells packs cells (glyph indices and fg/bg colours) into a payload:
-// a palette or its indices, change-only frames, zstd if compress.
-func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows int, compress bool) ([]byte, error) {
+// encodeCells codes cells (glyph indices and fg/bg colours) into a frame:
+// a key frame (palette and cells), a full frame (cells on the palette the
+// receiver holds) or a change frame (the cells that changed, first the
+// palette entries replaced).
+func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, cols, rows int) ([]byte, error) {
 	totalCells := cols * rows
 
+	// The empty glyph shows no foreground: none in the palette, no patch
+	// and no change for it; it takes its background's index (frames.go).
+	e.emptyFg = append(e.emptyFg[:0], fgColors[:totalCells]...)
+	for i, g := range glyphs[:totalCells] {
+		if g == 0 {
+			e.emptyFg[i] = bgColors[i]
+		}
+	}
+	fgColors = e.emptyFg
+
 	keyframe := byte(1)
-	var palBytes []byte
 	var finalFgIdx []byte
 	var finalBgIdx []byte
 
@@ -925,26 +829,14 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		reuseFg := ensureByteSlice(&e.reuseFgIdx, totalCells)
 		reuseBg := ensureByteSlice(&e.reuseBgIdx, totalCells)
 		e.match.reserve(2 * totalCells)
-		var mismatches int
-		limit := paletteReuseMaxMismatchRatio
-		if e.palettePatches {
-			mismatches = e.patchPalette(fgColors, bgColors, reuseFg, reuseBg)
-			// What is still missed found no free entry: a fresh palette
-			// would miss as much, so rebuilding it only costs a keyframe.
-			limit = max(limit, e.paletteMissRatio)
-		} else {
-			mismatches = assignPaletteIndices(fgColors, e.lastPalette, &e.match, reuseFg, paletteReuseColorErrorTolerance)
-			mismatches += assignPaletteIndices(bgColors, e.lastPalette, &e.match, reuseBg, paletteReuseColorErrorTolerance)
-		}
-
-		totalSamples := totalCells * 2
-		if totalSamples > 0 {
-			mismatchRatio := float64(mismatches) / float64(totalSamples)
-			if mismatchRatio <= limit {
-				keyframe = 0
-				finalFgIdx = reuseFg
-				finalBgIdx = reuseBg
-			}
+		mismatches := e.patchPalette(fgColors, bgColors, reuseFg, reuseBg)
+		// What is still missed found no free entry: a fresh palette would
+		// miss as much, so rebuilding it only costs a keyframe.
+		limit := max(paletteReuseMaxMismatchRatio, e.paletteMissRatio)
+		if float64(mismatches)/float64(2*totalCells) <= limit && len(e.palettePatch) <= 3*maxPaletteColors {
+			keyframe = 0
+			finalFgIdx = reuseFg
+			finalBgIdx = reuseBg
 		}
 	}
 	patch := e.palettePatch
@@ -961,18 +853,16 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		// reused indices: rebuilding it from this frame's slightly noisy
 		// colours made a static picture shift colours at every keyframe.
 		keyframe = 1
-		palBytes = flattenPalette(e.lastPalette)
 	} else if keyframe == 1 {
 		palette := buildPaletteFromColors(fgColors, bgColors, totalCells)
-		palBytes = flattenPalette(palette)
 		e.storePalette(palette) // also resets e.match to the new palette
 
 		fgIdx := ensureByteSlice(&e.fgIdx, totalCells)
 		bgIdx := ensureByteSlice(&e.bgIdx, totalCells)
 
 		e.match.reserve(2 * totalCells)
-		misses := assignPaletteIndices(fgColors, e.lastPalette, &e.match, fgIdx, paletteReuseColorErrorTolerance)
-		misses += assignPaletteIndices(bgColors, e.lastPalette, &e.match, bgIdx, paletteReuseColorErrorTolerance)
+		misses := e.codeIndices(fgColors, fgIdx, paletteReuseColorErrorTolerance)
+		misses += e.codeIndices(bgColors, bgIdx, paletteReuseColorErrorTolerance)
 		e.paletteMissRatio = 0
 		if totalCells > 0 {
 			e.paletteMissRatio = float64(misses) / float64(2*totalCells)
@@ -981,33 +871,40 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 		finalFgIdx = fgIdx
 		finalBgIdx = bgIdx
 	}
+	if len(e.lastPalette) == 0 || finalFgIdx == nil {
+		return nil, fmt.Errorf("no palette for %d cells", totalCells)
+	}
+	for i, g := range glyphs[:totalCells] {
+		if g == 0 {
+			finalFgIdx[i] = finalBgIdx[i]
+		}
+	}
 
 	// Change-only frame: with the palette unchanged, send just the cells that
 	// differ from the previous frame. Keyframes stay full so a receiver that
 	// lost a frame recovers at the next one.
-	frameType := keyframe
-	var changeMask, changedGlyphs, changedFg, changedBg []byte
+	frameType := frameTypeFull
+	if keyframe == 1 {
+		frameType = frameTypeKey
+	}
+	var changeMask []byte
 	if keyframe == 0 && e.sentCells == totalCells {
-		// The encoder's own buffers: writeField copies them into the payload.
 		changeMask = ensureByteSlice(&e.changeMask, (totalCells+7)/8)
 		clear(changeMask)
-		changedGlyphs, changedFg, changedBg = e.changedGlyphs[:0], e.changedFg[:0], e.changedBg[:0]
+		changed := 0
 		for i := 0; i < totalCells; i++ {
 			if glyphs[i] != e.sentGlyphs[i] || finalFgIdx[i] != e.sentFg[i] || finalBgIdx[i] != e.sentBg[i] {
 				changeMask[i/8] |= 1 << (i % 8)
-				changedGlyphs = append(changedGlyphs, glyphs[i])
-				changedFg = append(changedFg, finalFgIdx[i])
-				changedBg = append(changedBg, finalBgIdx[i])
+				changed++
 			}
 		}
-		e.changedGlyphs, e.changedFg, e.changedBg = changedGlyphs, changedFg, changedBg
-		if len(changedGlyphs)*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum {
+		if changed*deltaMaxChangedDen <= totalCells*deltaMaxChangedNum {
 			frameType = frameTypeDelta
 			if len(patch) > 0 {
 				frameType = frameTypeDeltaPatch
 			}
 		}
-		if e.skipEmpty && frameType == frameTypeDelta && len(changedGlyphs) == 0 {
+		if e.skipEmpty && frameType == frameTypeDelta && changed == 0 {
 			// Nothing changed: nothing to send. Returned before any state the
 			// receiver follows (the range coder's models above all) moves.
 			return nil, nil
@@ -1016,113 +913,44 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	if keyframe == 1 {
 		e.patchedSinceKey = false
 	}
-	if e.rangeCoding {
-		e.rcPrevFg = append(e.rcPrevFg[:0], e.sentFg...)
-		e.rcPrevBg = append(e.rcPrevBg[:0], e.sentBg...)
-	}
-	e.sentGlyphs = append(e.sentGlyphs[:0], glyphs...)
+	e.rcPrevG = append(e.rcPrevG[:0], e.sentGlyphs...)
+	e.rcPrevFg = append(e.rcPrevFg[:0], e.sentFg...)
+	e.rcPrevBg = append(e.rcPrevBg[:0], e.sentBg...)
+	e.sentGlyphs = append(e.sentGlyphs[:0], glyphs[:totalCells]...)
 	e.sentFg = append(e.sentFg[:0], finalFgIdx...)
 	e.sentBg = append(e.sentBg[:0], finalBgIdx...)
 	e.sentCells = totalCells
 
-	e.payloadBuf.Reset()
-	payload := &e.payloadBuf
-
-	payload.WriteString(PayloadMagic)
-	payload.WriteByte(frameType)
-	var size [4]byte
-	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(cols)))
-	payload.Write(binary.LittleEndian.AppendUint16(size[:0], uint16(rows)))
-
-	if (frameType == frameTypeDelta || frameType == frameTypeDeltaPatch) && e.rangeCoding {
-		frameType = frameTypeDeltaRC
-		if len(patch) > 0 {
-			frameType = frameTypeDeltaPatchRC
-			if err := writeField(payload, patch); err != nil {
-				return nil, fmt.Errorf("write palette patch: %w", err)
-			}
-		}
-		payload.Bytes()[len(PayloadMagic)] = frameType
+	out := append(e.payloadBuf[:0], PayloadMagic...)
+	out = append(out, frameType)
+	out = binary.LittleEndian.AppendUint16(out, uint16(cols))
+	out = binary.LittleEndian.AppendUint16(out, uint16(rows))
+	e.rcEnc.reset(e.rcEnc.out)
+	c := rcCoder{e: &e.rcEnc}
+	switch frameType {
+	case frameTypeDelta, frameTypeDeltaPatch:
 		if !e.rc.valid {
 			e.rc.restart(totalCells)
+		}
+		if frameType == frameTypeDeltaPatch {
+			e.rc.patch(c, patch)
 		}
 		if cap(e.rcChanged) < totalCells {
 			e.rcChanged = make([]bool, totalCells)
 		}
-		e.rcEnc.reset(e.rcEnc.out)
-		e.rc.encode(&e.rcEnc, glyphs, finalFgIdx, finalBgIdx, e.rcPrevFg, e.rcPrevBg, changeMask, cols, e.rcChanged[:totalCells])
-		payload.Write(e.rcEnc.finish())
-		e.updateKeyframeCounter(keyframe)
-		return bytes.Clone(payload.Bytes()), nil // range coded: no zstd
-	}
-	e.rc.valid = false // a full frame restarts the range coder's models
-
-	if e.rangeCoding {
-		frameType = frameTypeFullRC
-		if keyframe == 1 {
-			frameType = frameTypeKeyRC
-			if err := writeField(payload, palBytes); err != nil {
-				return nil, fmt.Errorf("write palette: %w", err)
-			}
+		e.rc.cells(c, glyphs[:totalCells], finalFgIdx, finalBgIdx, e.rcPrevG, e.rcPrevFg, e.rcPrevBg, changeMask, cols, e.rcChanged[:totalCells])
+	default:
+		e.rc.valid = false // a key or full frame restarts the change frames' model
+		e.rcFrame.restart()
+		if frameType == frameTypeKey {
+			e.rcFrame.palette(c, paletteCodes(e.lastPalette))
 		}
-		payload.Bytes()[len(PayloadMagic)] = frameType
-		e.rcFull.restart()
-		e.rcEnc.reset(e.rcEnc.out)
-		e.rcFull.encode(&e.rcEnc, glyphs, finalFgIdx, finalBgIdx, cols)
-		payload.Write(e.rcEnc.finish())
-		e.updateKeyframeCounter(keyframe)
-		return bytes.Clone(payload.Bytes()), nil // range coded: no zstd
+		e.rcFrame.encodeCells(&e.rcEnc, glyphs[:totalCells], finalFgIdx, finalBgIdx, cols)
 	}
-
-	if frameType == frameTypeDelta || frameType == frameTypeDeltaPatch {
-		if frameType == frameTypeDeltaPatch {
-			if err := writeField(payload, patch); err != nil {
-				return nil, fmt.Errorf("write palette patch: %w", err)
-			}
-		}
-		for _, field := range [][]byte{changeMask, packGlyphs6Into(&e.packedGlyphs, changedGlyphs), changedFg, changedBg} {
-			if err := writeField(payload, field); err != nil {
-				return nil, fmt.Errorf("write change frame: %w", err)
-			}
-		}
-		e.updateKeyframeCounter(keyframe)
-		if !compress {
-			return bytes.Clone(payload.Bytes()), nil
-		}
-		compressed, err := compressZstd(payload.Bytes())
-		if err != nil {
-			return nil, fmt.Errorf("zstd encode: %w", err)
-		}
-		return compressed, nil
-	}
-
-	// write per-cell planes: glyph indices (packed as 6 bits) and palette-based color indices
-	glyphsPacked := packGlyphs6Into(&e.packedGlyphs, glyphs)
-	if err := writeField(payload, glyphsPacked); err != nil {
-		return nil, fmt.Errorf("write glyphs: %w", err)
-	}
-	if keyframe == 1 {
-		if err := writeField(payload, palBytes); err != nil {
-			return nil, fmt.Errorf("write palette: %w", err)
-		}
-	}
-	if err := writeField(payload, finalFgIdx); err != nil {
-		return nil, fmt.Errorf("write fgIdx: %w", err)
-	}
-	if err := writeField(payload, finalBgIdx); err != nil {
-		return nil, fmt.Errorf("write bgIdx: %w", err)
-	}
-
+	out = append(out, e.rcEnc.finish()...)
+	e.payloadBuf = out
 	e.updateKeyframeCounter(keyframe)
-
-	if !compress {
-		return bytes.Clone(payload.Bytes()), nil
-	}
-	compressed, err := compressZstd(payload.Bytes())
-	if err != nil {
-		return nil, fmt.Errorf("zstd encode: %w", err)
-	}
-	return compressed, nil
+	return bytes.Clone(out), nil
 }
 
 // patchPalette assigns palette indices to the frame's colours. A colour
@@ -1253,293 +1081,106 @@ func (e *Encoder) storePalette(palette []paletteColor) {
 		e.lastPaletteExpanded[i] = expandPaletteEntry(c)
 	}
 	e.match.reset(e.lastPaletteExpanded)
+	e.codeGen++ // codeIdx forgets the palette before
 }
 
 func Decode(data []byte) (*TextFrame, error) {
 	return defaultDecoder.Decode(data)
 }
 
+// Decode decodes a frame of Encoder.Encode. A change frame without its
+// previous frame returns ErrNoBase.
 func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty payload")
-	}
-	if bytes.HasPrefix(data, []byte(PayloadMagic)) {
-		return d.DecodePlain(data) // range-coded frames are not wrapped in zstd
-	}
-	payload, err := decompressZstd(data)
-	if err != nil {
-		return nil, fmt.Errorf("zstd decode: %w", err)
-	}
-	return d.DecodePlain(payload)
-}
-
-// DecodePlain decodes an uncompressed payload from Encoder.EncodePlain.
-func (d *Decoder) DecodePlain(payload []byte) (*TextFrame, error) {
-	offset := 0
-	// magic + keyframe + cols + rows is the fixed-size prefix.
-	if len(payload) < len(PayloadMagic)+1+2+2 {
+	initGlyphTables() // the glyphs' range is checked below, a decoder may come first
+	if len(data) < len(PayloadMagic)+1+2+2 {
 		return nil, fmt.Errorf("payload too short")
 	}
-	if string(payload[:len(PayloadMagic)]) != PayloadMagic {
-		return nil, fmt.Errorf("unexpected magic %q", string(payload[:len(PayloadMagic)]))
+	if string(data[:len(PayloadMagic)]) != PayloadMagic {
+		return nil, fmt.Errorf("unexpected magic %q", string(data[:len(PayloadMagic)]))
 	}
-	offset += len(PayloadMagic)
-
-	keyframe := payload[offset]
-	offset++
-
-	if len(payload)-offset < 4 {
-		return nil, fmt.Errorf("payload too short for cols/rows")
-	}
-	cols := binary.LittleEndian.Uint16(payload[offset : offset+2])
-	offset += 2
-	rows := binary.LittleEndian.Uint16(payload[offset : offset+2])
-	offset += 2
-	if cols == 0 || rows == 0 || int(cols) > MaxFrameCols || int(rows) > MaxFrameRows {
+	offset := len(PayloadMagic)
+	frameType := data[offset]
+	cols := int(binary.LittleEndian.Uint16(data[offset+1:]))
+	rows := int(binary.LittleEndian.Uint16(data[offset+3:]))
+	offset += 5
+	if cols == 0 || rows == 0 || cols > MaxFrameCols || rows > MaxFrameRows {
 		return nil, fmt.Errorf("frame size %dx%d outside 1..%dx%d", cols, rows, MaxFrameCols, MaxFrameRows)
 	}
-
-	readField := func(label string) ([]byte, error) {
-		if len(payload)-offset < 4 {
-			return nil, fmt.Errorf("%s length header truncated", label)
-		}
-		length := binary.LittleEndian.Uint32(payload[offset : offset+4])
-		offset += 4
-		if len(payload)-offset < int(length) {
-			return nil, fmt.Errorf("%s length %d exceeds remaining %d", label, length, len(payload)-offset)
-		}
-		data := payload[offset : offset+int(length)]
-		offset += int(length)
-		return data, nil
+	if frameType > frameTypeDeltaPatch {
+		return nil, fmt.Errorf("unknown frame type %d", frameType)
 	}
+	totalCells := cols * rows
+	c := rcCoder{d: &d.rcDec}
 
-	totalCells := int(cols) * int(rows)
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	var glyphs, fgIdx, bgIdx []byte
-	var paletteBytes []byte
-
-	var patch []byte
-	if keyframe == frameTypeDeltaPatch || keyframe == frameTypeDeltaPatchRC {
-		var err error
-		if patch, err = readField("palette patch"); err != nil {
-			return nil, err
-		}
-		if len(patch)%3 != 0 {
-			return nil, fmt.Errorf("palette patch length %d is not a multiple of 3", len(patch))
-		}
-	}
-	if keyframe == frameTypeDeltaRC || keyframe == frameTypeDeltaPatchRC {
-		d.mu.Lock()
-		valid := d.baseValid && d.baseCols == int(cols) && d.baseRows == int(rows)
-		if valid {
-			glyphs = append([]byte(nil), d.baseGlyphs...)
-			fgIdx = append([]byte(nil), d.baseFg...)
-			bgIdx = append([]byte(nil), d.baseBg...)
-			valid = d.applyPatchLocked(patch)
-		}
-		if valid {
-			if !d.rc.valid {
-				d.rc.restart(totalCells)
-			}
-			if cap(d.rcChanged) < totalCells {
-				d.rcChanged = make([]bool, totalCells)
-			}
-			d.rcDec.reset(payload[offset:])
-			d.rc.decode(&d.rcDec, glyphs, fgIdx, bgIdx, int(cols), d.rcChanged[:totalCells])
-		}
-		d.mu.Unlock()
-		if !valid {
+	d.rcDec.reset(data[offset:])
+	switch frameType {
+	case frameTypeDelta, frameTypeDeltaPatch:
+		if !d.baseValid || d.baseCols != cols || d.baseRows != rows || len(d.lastPalette) == 0 {
 			return nil, ErrNoBase
 		}
-		for _, g := range glyphs {
-			if int(g) >= len(glyphPatterns) {
-				return nil, fmt.Errorf("glyph index %d out of range", g)
-			}
+		glyphs = append([]byte(nil), d.baseGlyphs...)
+		fgIdx = append([]byte(nil), d.baseFg...)
+		bgIdx = append([]byte(nil), d.baseBg...)
+		if !d.rc.valid {
+			d.rc.restart(totalCells)
 		}
-	} else if keyframe == frameTypeDelta || keyframe == frameTypeDeltaPatch {
-		mask, err := readField("mask")
-		if err != nil {
-			return nil, err
-		}
-		changedGlyphsEnc, err := readField("glyphs")
-		if err != nil {
-			return nil, err
-		}
-		changedFg, err := readField("fgIdx")
-		if err != nil {
-			return nil, err
-		}
-		changedBg, err := readField("bgIdx")
-		if err != nil {
-			return nil, err
-		}
-		if len(mask) != (totalCells+7)/8 {
-			return nil, fmt.Errorf("change mask length %d for %d cells", len(mask), totalCells)
-		}
-		changed := 0
-		for _, m := range mask {
-			changed += bits.OnesCount8(m)
-		}
-		changedGlyphs, err := unpackGlyphs6(changedGlyphsEnc, changed)
-		if err != nil {
-			return nil, err
-		}
-		if len(changedFg) != changed || len(changedBg) != changed {
-			return nil, fmt.Errorf("change frame: %d cells but %d/%d colour indices", changed, len(changedFg), len(changedBg))
-		}
-		d.mu.Lock()
-		valid := d.baseValid && d.baseCols == int(cols) && d.baseRows == int(rows)
-		if valid {
-			glyphs = append([]byte(nil), d.baseGlyphs...)
-			fgIdx = append([]byte(nil), d.baseFg...)
-			bgIdx = append([]byte(nil), d.baseBg...)
-			valid = d.applyPatchLocked(patch)
-		}
-		d.mu.Unlock()
-		if !valid {
+		if frameType == frameTypeDeltaPatch && !d.applyPatchLocked(d.rc.patch(c, nil)) {
+			d.resetBaseLocked()
 			return nil, ErrNoBase
 		}
-		k := 0
-		for i := 0; i < totalCells; i++ {
-			if mask[i/8]&(1<<(i%8)) != 0 {
-				glyphs[i], fgIdx[i], bgIdx[i] = changedGlyphs[k], changedFg[k], changedBg[k]
-				k++
+		if cap(d.rcChanged) < totalCells {
+			d.rcChanged = make([]bool, totalCells)
+		}
+		d.rc.cells(c, glyphs, fgIdx, bgIdx, nil, nil, nil, nil, cols, d.rcChanged[:totalCells])
+	default:
+		buf := make([]byte, totalCells*3)
+		glyphs, fgIdx, bgIdx = buf[:totalCells:totalCells], buf[totalCells:2*totalCells:2*totalCells], buf[2*totalCells:]
+		d.rcFrame.restart()
+		if frameType == frameTypeKey {
+			codes := d.rcFrame.palette(c, nil)
+			palette := make([]paletteColor, len(codes))
+			for i, v := range codes {
+				palette[i] = expandCode(v)
 			}
+			d.lastPalette = palette
+		} else if len(d.lastPalette) == 0 {
+			return nil, fmt.Errorf("full frame received before any keyframe palette")
 		}
-	} else if keyframe == frameTypeFullRC || keyframe == frameTypeKeyRC {
-		if keyframe == frameTypeKeyRC {
-			var err error
-			if paletteBytes, err = readField("palette"); err != nil {
-				return nil, err
-			}
-		}
-		glyphs = make([]byte, totalCells*3)
-		glyphs, fgIdx, bgIdx = glyphs[:totalCells:totalCells], glyphs[totalCells:2*totalCells:2*totalCells], glyphs[2*totalCells:]
-		d.rcDec.reset(payload[offset:])
-		d.rcFull.restart()
-		d.rcFull.decode(&d.rcDec, glyphs, fgIdx, bgIdx, int(cols))
-		for _, g := range glyphs {
-			if int(g) >= len(glyphPatterns) {
-				return nil, fmt.Errorf("glyph index %d out of range", g)
-			}
-		}
-	} else {
-		glyphsEnc, err := readField("glyphs")
-		if err != nil {
-			return nil, err
-		}
-		if keyframe == frameTypeKey {
-			paletteBytes, err = readField("palette")
-			if err != nil {
-				return nil, err
-			}
-		}
-		fgIdxEnc, err := readField("fgIdx")
-		if err != nil {
-			return nil, err
-		}
-		bgIdxEnc, err := readField("bgIdx")
-		if err != nil {
-			return nil, err
-		}
-		glyphs, err = unpackGlyphs6(glyphsEnc, totalCells)
-		if err != nil {
-			return nil, err
-		}
-		fgIdx, bgIdx = fgIdxEnc, bgIdxEnc
-		if len(fgIdx) != totalCells {
-			return nil, fmt.Errorf("fgIdx length %d does not match total cells %d", len(fgIdx), totalCells)
-		}
-		if len(bgIdx) != totalCells {
-			return nil, fmt.Errorf("bgIdx length %d does not match total cells %d", len(bgIdx), totalCells)
-		}
-	}
-	var palette []paletteColor
-	if keyframe == frameTypeKey || keyframe == frameTypeKeyRC {
-		parsedPalette, err := decodePalettePayload(paletteBytes)
-		if err != nil {
-			return nil, err
-		}
-		d.mu.Lock()
-		d.lastPalette = parsedPalette
-		palette = d.lastPalette
-		d.mu.Unlock()
-	} else {
-		d.mu.Lock()
-		if len(d.lastPalette) == 0 {
-			d.baseValid = false
-			d.mu.Unlock()
-			return nil, fmt.Errorf("delta frame received before any keyframe palette")
-		}
-		palette = d.lastPalette
-		d.mu.Unlock()
+		d.rcFrame.decodeCells(&d.rcDec, glyphs, fgIdx, bgIdx, cols)
+		d.rc.valid = false // the encoder restarts its change model here too
 	}
 
-	palCount := len(palette)
-
+	palette := d.lastPalette
 	colours := make([]byte, totalCells*6) // one allocation for both planes
 	fgYCbCr := colours[: totalCells*3 : totalCells*3]
 	bgYCbCr := colours[totalCells*3:]
 	for i := 0; i < totalCells; i++ {
-		idx := int(fgIdx[i])
-		if idx < 0 || idx >= palCount {
-			d.ResetBase()
-			return nil, fmt.Errorf("fgIdx[%d]=%d out of range (palette size %d)", i, idx, palCount)
+		if int(glyphs[i]) >= len(glyphPatterns) || int(fgIdx[i]) >= len(palette) || int(bgIdx[i]) >= len(palette) {
+			d.resetBaseLocked()
+			return nil, fmt.Errorf("cell %d: glyph %d, colours %d, %d out of range (palette size %d)", i, glyphs[i], fgIdx[i], bgIdx[i], len(palette))
 		}
-		copy(fgYCbCr[i*3:], palette[idx][:])
-
-		idx2 := int(bgIdx[i])
-		if idx2 < 0 || idx2 >= palCount {
-			d.ResetBase()
-			return nil, fmt.Errorf("bgIdx[%d]=%d out of range (palette size %d)", i, idx2, palCount)
-		}
-		copy(bgYCbCr[i*3:], palette[idx2][:])
+		copy(fgYCbCr[i*3:], palette[fgIdx[i]][:])
+		copy(bgYCbCr[i*3:], palette[bgIdx[i]][:])
 	}
 
 	// This frame is the base for the next change-only frame.
-	d.mu.Lock()
-	if keyframe == frameTypeFull || keyframe == frameTypeKey || keyframe == frameTypeFullRC || keyframe == frameTypeKeyRC {
-		d.rc.valid = false // the encoder restarts its models here too
-	}
 	d.baseGlyphs = append(d.baseGlyphs[:0], glyphs...)
 	d.baseFg = append(d.baseFg[:0], fgIdx...)
 	d.baseBg = append(d.baseBg[:0], bgIdx...)
-	d.baseCols, d.baseRows, d.baseValid = int(cols), int(rows), true
-	d.mu.Unlock()
+	d.baseCols, d.baseRows, d.baseValid = cols, rows, true
 
 	return &TextFrame{
-		Cols:    int(cols),
-		Rows:    int(rows),
-		Width:   int(cols) << 2,
-		Height:  int(rows) << 3,
+		Cols:    cols,
+		Rows:    rows,
+		Width:   cols << 2,
+		Height:  rows << 3,
 		Glyphs:  glyphs,
 		FgYCbCr: fgYCbCr,
 		BgYCbCr: bgYCbCr,
 	}, nil
-}
-
-func decodePalettePayload(paletteBytes []byte) ([]paletteColor, error) {
-	if len(paletteBytes)%2 != 0 {
-		return nil, fmt.Errorf("palette length %d is not a multiple of 2", len(paletteBytes))
-	}
-
-	paletteCount := len(paletteBytes) / 2
-	palette := make([]paletteColor, paletteCount)
-
-	for i := 0; i < paletteCount; i++ {
-		lo := uint16(paletteBytes[2*i])
-		hi := uint16(paletteBytes[2*i+1])
-		v := lo | (hi << 8)
-
-		y6 := (v >> 10) & 0x3f
-		cb5 := (v >> 5) & 0x1f
-		cr5 := v & 0x1f
-
-		palette[i][0] = byte((y6 << 2) | (y6 >> 4))
-		palette[i][1] = expandChroma5(byte(cb5))
-		palette[i][2] = expandChroma5(byte(cr5))
-	}
-
-	return palette, nil
 }
 
 // Palette chroma has 5 bits. Values are rounded to the nearest of 32 levels
@@ -1659,6 +1300,9 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 
 	memo := &e.cellMemo
 	memo.resize(totalCells)
+	if e.glyphCache == nil {
+		e.glyphCache = new([2]glyphCache)
+	}
 
 	// Parallel pass: compute glyphs and per-cell fg/bg colors. Two workers
 	// halve the time of a frame for the same CPU; more only add CPU (+15 %
@@ -1678,6 +1322,7 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 		startRow := wIdx
 		go func(start int) {
 			defer wg.Done()
+			gc := &e.glyphCache[start]
 			var block cellBlock
 			data := frame.Data
 			for by := start; by < rows; by += workers {
@@ -1713,7 +1358,8 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 						glyphs[cell], fgColors[cell], bgColors[cell] = memo.glyph[cell], memo.fg[cell], memo.bg[cell]
 						continue
 					}
-					cd := findCharDataBlock(&block, 0)
+					pattern, codePoint := gc.nearest(cellMask(&block))
+					cd := createCharDataBlock(&block, codePoint, pattern)
 					glyphs[cell] = glyphIndexOf(glyphLookup, cd.CodePoint)
 
 					fgColor := paletteColor{
@@ -1822,22 +1468,34 @@ func expandPaletteEntry(p paletteColor) [3]int {
 	}
 }
 
-// assignPaletteIndices writes the index of the nearest palette entry of each
-// colour to dst (m must be reset to palette) and returns how many colours
-// are farther than mismatchThreshold from it (-1: not counted).
-func assignPaletteIndices(colors []paletteColor, palette []paletteColor, m *paletteMatcher, dst []byte, mismatchThreshold int) int {
-	if len(colors) != len(dst) {
-		return 0
+// codeIndices writes the palette index of each of a keyframe's colours to
+// dst and returns how many colours are farther than mismatchThreshold from
+// it (-1: not counted). The palette is made of the colours' codes (Y 6
+// bits, Cb and Cr 5): a colour takes its code's entry, or, for a code the
+// palette lacks (a frame of more than 256 codes), the entry nearest the
+// code's colour, searched once per code and palette (codeIdx). Before, each
+// colour searched for the entry nearest itself: on camera frames of 160x65
+// cells 0.50 ms against 0.11, the pictures the same within 0.1 dB.
+func (e *Encoder) codeIndices(colors []paletteColor, dst []byte, mismatchThreshold int) int {
+	if len(e.codeIdx) != 1<<16 {
+		e.codeIdx = make([]uint32, 1<<16)
 	}
-	if len(palette) == 0 {
-		clear(dst)
-		return len(colors)
+	if e.codeGen == 0 || e.codeGen >= 1<<24 {
+		clear(e.codeIdx)
+		e.codeGen = 1
 	}
+	gen, tab := e.codeGen<<8, e.codeIdx
 	mismatches := 0
-	for i, color := range colors {
-		idx, dist := m.index(color)
-		dst[i] = idx
-		if mismatchThreshold >= 0 && dist > mismatchThreshold {
+	for i, c := range colors {
+		code := uint16(c[0]>>2)<<10 | uint16(quantChroma5(c[1]))<<5 | uint16(quantChroma5(c[2]))
+		t := tab[code]
+		if t&^0xff != gen {
+			idx, _ := e.match.nearest(expandCode(code))
+			t = gen | uint32(idx)
+			tab[code] = t
+		}
+		dst[i] = byte(t)
+		if mismatchThreshold >= 0 && colorDistance(e.lastPaletteExpanded[byte(t)], c) > mismatchThreshold {
 			mismatches++
 		}
 	}
@@ -1863,6 +1521,17 @@ type paletteMatcher struct {
 	shift uint32
 	gen   uint32
 	used  int
+
+	// sorted is the palette in order, packed for nearest (made again when
+	// stale).
+	sorted []sortedEntry
+	stale  bool
+}
+
+// sortedEntry is a palette entry for the search: Y, Cb, Cr and its index.
+type sortedEntry struct {
+	y, cb, cr int32
+	idx       int32
 }
 
 // reset makes m match against palette and forgets earlier answers.
@@ -1875,6 +1544,7 @@ func (m *paletteMatcher) reset(palette [][3]int) {
 	sort.SliceStable(m.order, func(a, b int) bool {
 		return palette[m.order[a]][0] < palette[m.order[b]][0]
 	})
+	m.stale = true
 	m.forget()
 }
 
@@ -1895,6 +1565,7 @@ func (m *paletteMatcher) set(palette [][3]int, idx byte) {
 	m.order = append(m.order, 0)
 	copy(m.order[at+1:], m.order[at:])
 	m.order[at] = idx
+	m.stale = true
 }
 
 // refresh finds the nearest entry anew and remembers it for c.
@@ -1970,30 +1641,54 @@ func (m *paletteMatcher) index(c paletteColor) (byte, int) {
 // nearest searches the palette. Sorted by Y, it starts at c's Y and stops
 // on each side once the Y difference alone exceeds the best distance.
 func (m *paletteMatcher) nearest(c paletteColor) (byte, int) {
-	p, o := m.palette, m.order
-	best, bestIdx := math.MaxInt, 0
-	y := int(c[0])
-	lo, hi := 0, len(o) // first entry with Y >= y
+	if m.stale {
+		m.sorted = m.sorted[:0]
+		for _, o := range m.order {
+			p := m.palette[o]
+			m.sorted = append(m.sorted, sortedEntry{int32(p[0]), int32(p[1]), int32(p[2]), int32(o)})
+		}
+		m.stale = false
+	}
+	e := m.sorted
+	y, cb, cr := int32(c[0]), int32(c[1]), int32(c[2])
+	best, bestIdx := int32(math.MaxInt32), int32(0)
+	lo, hi := 0, len(e) // first entry with Y >= y
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if p[o[mid]][0] < y {
+		if e[mid].y < y {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
+	abs := func(v int32) int32 {
+		if v < 0 {
+			return -v
+		}
+		return v
+	}
 	// The lowest index wins a tie.
-	for j := lo; j < len(o) && p[o[j]][0]-y <= best; j++ {
-		if d := colorDistance(p[o[j]], c); d < best || d == best && int(o[j]) < bestIdx {
-			best, bestIdx = d, int(o[j])
+	for j := lo; j < len(e); j++ {
+		p := &e[j]
+		dy := p.y - y
+		if dy > best {
+			break
+		}
+		if d := dy + abs(p.cb-cb) + abs(p.cr-cr); d < best || d == best && p.idx < bestIdx {
+			best, bestIdx = d, p.idx
 		}
 	}
-	for j := lo - 1; j >= 0 && y-p[o[j]][0] <= best; j-- {
-		if d := colorDistance(p[o[j]], c); d < best || d == best && int(o[j]) < bestIdx {
-			best, bestIdx = d, int(o[j])
+	for j := lo - 1; j >= 0; j-- {
+		p := &e[j]
+		dy := y - p.y
+		if dy > best {
+			break
+		}
+		if d := dy + abs(p.cb-cb) + abs(p.cr-cr); d < best || d == best && p.idx < bestIdx {
+			best, bestIdx = d, p.idx
 		}
 	}
-	return byte(bestIdx), best
+	return byte(bestIdx), int(best)
 }
 
 func colorDistance(paletteRGB [3]int, color paletteColor) int {
@@ -2017,80 +1712,6 @@ func ensureByteSlice(buf *[]byte, size int) []byte {
 		*buf = make([]byte, size)
 	}
 	return (*buf)[:size]
-}
-
-func compressZstd(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	// EncodeAll compresses one block with the encoder's reusable state; the
-	// streaming Reset/Write/Close allocated its history for every frame.
-	var out []byte
-	if err := sharedZstdEncoder.use(func(enc *zstd.Encoder) error {
-		out = enc.EncodeAll(data, make([]byte, 0, len(data)/2+64))
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func decompressZstd(data []byte) ([]byte, error) {
-	var out bytes.Buffer
-
-	if err := sharedZstdDecoder.use(func(dec *zstd.Decoder) error {
-		if err := dec.Reset(bytes.NewReader(data)); err != nil {
-			return err
-		}
-		// Read one byte past the limit to tell "exactly at" from "over".
-		n, err := out.ReadFrom(io.LimitReader(dec, int64(MaxPayloadBytes)+1))
-		if err != nil {
-			return err
-		}
-		if n > int64(MaxPayloadBytes) {
-			return fmt.Errorf("decompressed payload exceeds %d bytes", MaxPayloadBytes)
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
-}
-
-func writeField(buf *bytes.Buffer, data []byte) error {
-	var size [4]byte
-	if _, err := buf.Write(binary.LittleEndian.AppendUint32(size[:0], uint32(len(data)))); err != nil {
-		return err
-	}
-	if len(data) == 0 {
-		return nil
-	}
-	_, err := buf.Write(data)
-	return err
-}
-
-func flattenPalette(palette []paletteColor) []byte {
-	if len(palette) == 0 {
-		return nil
-	}
-	k := len(palette)
-	out := make([]byte, k*2)
-
-	for i := 0; i < k; i++ {
-		// palette[i] хранит коды: Y6, Cb5, Cr5.
-		y6 := uint16(palette[i][0]) & 0x3f
-		cb5 := uint16(palette[i][1]) & 0x1f
-		cr5 := uint16(palette[i][2]) & 0x1f
-
-		v := (y6 << 10) | (cb5 << 5) | cr5
-
-		// Little-endian: [lo, hi]
-		out[2*i] = byte(v & 0xff)
-		out[2*i+1] = byte(v >> 8)
-	}
-
-	return out
 }
 
 func maxInt(a, b int) int {
@@ -2220,20 +1841,59 @@ func (e *Encoder) SetSkipEmpty(on bool) {
 	e.skipEmpty = on
 }
 
-// SetRangeCoding sends change frames range coded (frameTypeDeltaRC) instead
-// of zstd. Only for a peer whose decoder knows those frame types.
-func (e *Encoder) SetRangeCoding(on bool) {
-	e.rangeCoding = on
-	e.rc.valid = false
-}
-
-// SetPalettePatches lets change frames replace palette entries
-// (frameTypeDeltaPatch) instead of sending a keyframe with a new palette.
-// Only for a peer whose decoder knows that frame type.
-func (e *Encoder) SetPalettePatches(on bool) {
-	e.palettePatches = on
-}
-
 func (e *Encoder) SetKeyframeInterval(frames int) {
 	e.keyframeInterval = max(0, frames)
+}
+
+// Restart makes the next frame of e the one a new Encoder would make (a
+// keyframe with a palette of its own, nothing of the frames before), the
+// settings and buffers kept, and the cells' results (cellMemo: what a
+// cell's pixels give, a function of them alone): for pictures coded one by
+// one, which a new Encoder each costs its allocations.
+func (e *Encoder) Restart() {
+	*e = Encoder{
+		glyphs: e.glyphs, fgIdx: e.fgIdx, bgIdx: e.bgIdx,
+		fgColors: e.fgColors, bgColors: e.bgColors,
+		xMap: e.xMap, yMap: e.yMap, xOff: e.xOff, rowOff: e.rowOff,
+		cellMemo:   e.cellMemo,
+		match:      e.match,
+		payloadBuf: e.payloadBuf[:0],
+
+		lastPalette:         e.lastPalette[:0],
+		lastPaletteExpanded: e.lastPaletteExpanded[:0],
+		reuseFgIdx:          e.reuseFgIdx,
+		reuseBgIdx:          e.reuseBgIdx,
+		paletteMissed:       e.paletteMissed[:0],
+		palettePatch:        e.palettePatch[:0],
+
+		skipEmpty: e.skipEmpty,
+
+		rcEnc:     rcEncoder{out: e.rcEnc.out[:0]},
+		rcChanged: e.rcChanged,
+		rcPrevG:   e.rcPrevG[:0],
+		rcPrevFg:  e.rcPrevFg[:0],
+		rcPrevBg:  e.rcPrevBg[:0],
+		emptyFg:   e.emptyFg[:0],
+
+		holdBits:   e.holdBits,
+		holdDebug:  e.holdDebug,
+		held:       e.held,
+		prevGlyphs: e.prevGlyphs[:0],
+		prevFg:     e.prevFg[:0],
+		prevBg:     e.prevBg[:0],
+
+		sentGlyphs: e.sentGlyphs[:0],
+		sentFg:     e.sentFg[:0],
+		sentBg:     e.sentBg[:0],
+		changeMask: e.changeMask,
+
+		codeIdx:    e.codeIdx,
+		glyphCache: e.glyphCache,
+		codeGen:    e.codeGen,
+
+		keyframeInterval: e.keyframeInterval,
+		forceBW:          e.forceBW,
+		maxFPS:           e.maxFPS,
+		mirror:           e.mirror,
+	}
 }
