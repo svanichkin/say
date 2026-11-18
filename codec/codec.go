@@ -197,22 +197,11 @@ func readCellBlock(getPixel func(int, int) uint32, x0, y0 int) cellBlock {
 // createCharDataBlock averages the pixels under the set and the clear bits
 // of pattern into the foreground and background colours.
 func createCharDataBlock(block *cellBlock, codePoint int, pattern uint32) CharData {
-	var fg, bg [3]int
+	var sums [6]uint32
+	cellSums(block, pattern, &sums)
+	fg := [3]int{int(sums[0]), int(sums[1]), int(sums[2])}
+	bg := [3]int{int(sums[3]) - fg[0], int(sums[4]) - fg[1], int(sums[5]) - fg[2]}
 	fgCount := bits.OnesCount32(pattern)
-	mask := uint32(0x80000000)
-	for _, px := range block {
-		y, cb, cr := int(px>>16&0xff), int(px>>8&0xff), int(px&0xff)
-		if pattern&mask != 0 {
-			fg[0] += y
-			fg[1] += cb
-			fg[2] += cr
-		} else {
-			bg[0] += y
-			bg[1] += cb
-			bg[2] += cr
-		}
-		mask >>= 1
-	}
 	if bgCount := 32 - fgCount; bgCount > 0 {
 		bg[0], bg[1], bg[2] = bg[0]/bgCount, bg[1]/bgCount, bg[2]/bgCount
 	}
@@ -261,10 +250,24 @@ func findCharDataBlock(block *cellBlock, flags int) CharData {
 	return createCharDataBlock(block, codePoint, pattern)
 }
 
-// cellMask splits a cell along its widest channel (the first wins a tie)
-// at the middle of its range: the pixels above it set, raster order from
-// the top bit.
-func cellMask(block *cellBlock) uint32 {
+// cellSumsGo is cellSums in Go.
+func cellSumsGo(block *cellBlock, pattern uint32, sums *[6]uint32) {
+	*sums = [6]uint32{}
+	mask := uint32(0x80000000)
+	for _, px := range block {
+		y, cb, cr := px>>16&0xff, px>>8&0xff, px&0xff
+		if pattern&mask != 0 {
+			sums[0], sums[1], sums[2] = sums[0]+y, sums[1]+cb, sums[2]+cr
+		}
+		sums[3], sums[4], sums[5] = sums[3]+y, sums[4]+cb, sums[5]+cr
+		mask >>= 1
+	}
+}
+
+// cellMaskGo is cellMask in Go: the cell is split along its widest channel
+// (the first wins a tie) at the middle of its range, the pixels above it
+// set, raster order from the top bit.
+func cellMaskGo(block *cellBlock) uint32 {
 	minY, minCb, minCr := uint32(255), uint32(255), uint32(255)
 	maxY, maxCb, maxCr := uint32(0), uint32(0), uint32(0)
 	for _, px := range block {
