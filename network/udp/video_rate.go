@@ -130,6 +130,30 @@ const (
 	videoHoldStepDown   = 4 // per clean report, back towards -video-hold
 )
 
+// The cell hold on a clean path grows with the frame (baseVideoHold): -video-hold
+// up to videoHoldBaseCells, twice it from videoHoldBaseLarge, linearly between.
+// Past the camera's own pixels (352x288 in 4x8 cells: 88x36) finer cells
+// sample the same pixels again and mostly carry the camera's noise: on two
+// recorded calls (cmd/videosim) 160x65 at hold 10 took 463 and 511 kbit/s,
+// at hold 20 288 and 281 (88x36 at hold 10: 158 and 176), and looked as good
+// by eye.
+const (
+	videoHoldBaseCells = 88 * 36
+	videoHoldBaseLarge = 160 * 65
+)
+
+// baseVideoHold is the cell hold for a frame of the given size on a clean
+// path, from hold (-video-hold).
+func baseVideoHold(hold, cells int) int {
+	switch {
+	case cells <= videoHoldBaseCells:
+		return hold
+	case cells >= videoHoldBaseLarge:
+		return 2 * hold
+	}
+	return hold + hold*(cells-videoHoldBaseCells)/(videoHoldBaseLarge-videoHoldBaseCells)
+}
+
 // maxVideoHold is the highest cell hold for a picture of the given size: a
 // large picture tolerates coarser cells than a small one.
 func maxVideoHold(cells int) int {

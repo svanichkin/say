@@ -609,6 +609,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			// adapted to the peer's video loss: colour first, then hold, then fps
 			// (a peer behind a colour filter gets no colour from the start)
 			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono}
+			// the cell hold on a clean path, by the frame's size (baseVideoHold)
+			holdBase = videoShapeHold
 		)
 		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
 		defer fpsLimiter.Stop()
@@ -671,7 +673,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 						cells = cols * rows
 					}
 					prevFPS, prevHold := adapt.fps, adapt.hold
-					adapt.update(loss, sentFPS, ceiling, videoShapeHold, maxVideoHold(cells))
+					adapt.update(loss, sentFPS, ceiling, holdBase, maxVideoHold(cells))
 					if mono := peer.mono || adapt.noColour; mono != netMono {
 						if mono {
 							logs.LogV("[video/udp] %s: sending without colour", why)
@@ -744,6 +746,18 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				} else if peerOK && guessedSize {
 					log.Printf("[video/udp] the peer asks for %dx%d now", peerCols, peerRows)
 					guessedSize = false
+				}
+				// A larger frame holds its cells harder (baseVideoHold): the
+				// hold moves with the base, what loss added kept.
+				if peerOK {
+					if base := baseVideoHold(videoShapeHold, peerCols*peerRows); base != holdBase {
+						prev := adapt.hold
+						adapt.hold, holdBase = max(base, adapt.hold+base-holdBase), base
+						if adapt.hold != prev {
+							logs.LogV("[video/udp] %dx%d cells: cell hold %d -> %d", peerCols, peerRows, prev, adapt.hold)
+							netEncoder.SetShapeHold(adapt.hold)
+						}
+					}
 				}
 				var addr *net.UDPAddr
 				if peerOK {
