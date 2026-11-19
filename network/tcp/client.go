@@ -114,7 +114,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 		stopTerm := startTermSizeSender(sessionCtx, conn, termSync.Local, termSync.Initial, termSync.Current)
 		defer stopTerm()
 	}
-	defer startKeyframeRequester(sessionCtx, conn)()
+	defer startVideoCtl(sessionCtx, conn)()
 
 	if mediaFactory == nil {
 		log.Printf("[media] transport is disabled")

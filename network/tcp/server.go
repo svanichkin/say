@@ -159,7 +159,7 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 		stopTermSize := startTermSizeSender(ctx, conn, termSync.Local, termSync.Initial, termSync.Current)
 		defer stopTermSize()
 	}
-	defer startKeyframeRequester(ctx, conn)()
+	defer startVideoCtl(ctx, conn)()
 
 	serveControlFrames(br, controlSession{
 		conn:      conn,

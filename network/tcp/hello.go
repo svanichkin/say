@@ -28,12 +28,18 @@ import (
 //	6  video frames carry numbers and references (codec/refs.go; frame types
 //	   4-7); a lost frame is answered by a recovery request (control frame
 //	   0x0f) and, for a while, acknowledgements (0x10) instead of a keyframe
+//	7  video in layers of small datagrams (network/udp/video_layers.go): a
+//	   lower layer of the whole picture, each datagram carrying the frame
+//	   before again, and the upper grid in bands of rows, each a stream of
+//	   its own; one control frame (0x11) carries recovery requests,
+//	   acknowledgements and keyframe requests for a layer, and the
+//	   receiver's reports on what arrived (0x0c, 0x0f, 0x10 are gone)
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 6
-	MinProtocolVersion = 6
+	ProtocolVersion    = 7
+	MinProtocolVersion = 7
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

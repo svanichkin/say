@@ -27,7 +27,6 @@ var (
 )
 
 const (
-	minVideoFPS           = 5
 	videoFPSUncapped      = 60 // limiter rate without -fps; cameras deliver at most ~30
 	mediaKindAudio   byte = 0
 	mediaKindVideo   byte = 1
@@ -554,7 +553,8 @@ func startSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	}
 }
 
-// startVideoSender: camera → TextFrame → UDP (mediaKindVideo)
+// startVideoSender: camera → TextFrame layers → UDP (mediaKindVideo), see
+// video_layers.go.
 func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 	stopCh <-chan struct{}, getPeer func() *net.UDPAddr,
 	mediaEpoch time.Time, videoCamIn <-chan device.CameraFrame,
@@ -567,58 +567,53 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 		return
 	}
 
-	// ======== Video sender: camera → textFrame → UDP ========
+	// ======== Video sender: camera → textFrame layers → UDP ========
 	selfMono := ui.ColorFilterActive()
-	previewEncoder, netEncoder := initVideoCodec(peer, selfMono)
+	previewEncoder := initVideoCodec(selfMono)
 	if peer.mono {
 		log.Printf("[video] the peer shows brightness only: sending without colour")
 	}
-	// Cells are shared by both panes only when both want the same: colour
-	// or brightness only.
-	netMono := peer.mono
+	layers := newLayerSender(peer.mono)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		var (
-			sentPkts, sentBytes uint64
-
+			sentPkts, sentBytes      uint64
 			frames                   uint64
 			tEncodeLocal, tEncodeNet time.Duration
-
-			cameraOff bool // mediactrl turned the camera off
-
-			sinceAckRef int // frames since one was coded against an acknowledged frame
+			cameraOff                bool // mediactrl turned the camera off
+			sendStart                = time.Now()
+			sendingStarted           = time.Now()
+			guessedSize              bool // the peer's size is ours for it (see peerSizeWait)
+			videoSeq                 byte // the datagram counter
+			lastWhy                  string
 		)
+		// sentAt maps a media index (a frame's capture, on the media clock)
+		// back to the sender's time: the newest such index not after now.
+		sentAt := func(index uint16) time.Duration {
+			now := time.Now()
+			back := (mediaIndex(mediaEpoch, now) - index) & mediaIndexMask
+			return now.Add(-time.Duration(back) * mediaTickDuration).Sub(sendStart)
+		}
 
 		tick := time.NewTicker(time.Second)
 		lastRateSample := time.Now()
 		defer tick.Stop()
-
-		var fpsLimiter *time.Ticker
-		var (
-			ceiling        = videoFPSCeiling()
-			lastLossReport time.Time
-			lastAdapt      time.Time
-			lastForcedKey  time.Time
-			lastVideoSent  time.Time // the last datagram (see SetSkipEmpty)
-			sendingStarted = time.Now()
-			guessedSize    bool // the peer's size is ours for it (see peerSizeWait)
-			skippedFrames  int
-			videoSeq       byte
-			// adapted to the peer's video loss: colour first, then hold, then fps
-			// (a peer behind a colour filter gets no colour from the start)
-			adapt = videoAdapt{fps: ceiling, hold: videoShapeHold, noColour: peer.mono}
-			// the cell hold on a clean path, by the frame's size (baseVideoHold)
-			holdBase = videoShapeHold
-		)
-		fpsLimiter = time.NewTicker(time.Second / time.Duration(adapt.fps))
+		fpsLimiter := time.NewTicker(time.Second / time.Duration(videoFPSCeiling()))
 		defer fpsLimiter.Stop()
 
 		for {
 			select {
 			case <-stopCh:
 				return
+
+			case msg := <-ui.PeerVideoCtl():
+				layers.control(time.Since(sendStart), msg, sentAt)
+				if layers.rc.why != lastWhy {
+					lastWhy = layers.rc.why
+					logs.LogV("[video/udp] rate %.0f kbit/s, cut at %s", layers.rc.rate, lastWhy)
+				}
 
 			case <-tick.C:
 				// network TX stats
@@ -627,71 +622,20 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					elapsed = time.Second
 				}
 				rateKBps := (float64(sentBytes) / 1024) / elapsed.Seconds()
-				logs.LogV("[video/udp] tx: %d pkts, %.2f kB/s",
-					sentPkts, rateKBps)
+				logs.LogV("[video/udp] tx: %d pkts, %.2f kB/s, rate %.0f kbit/s, lower %dx%d, upper %dx%d",
+					sentPkts, rateKBps, layers.rc.rate, layers.low.cols, layers.low.rows, layers.hiCols, layers.hiRows)
 				ui.UpdateTxVideoRate(rateKBps)
-
 				if frames > 0 {
-					logs.LogV(
-						"[video/prof] fps=%d (unchanged, not sent: %d) encodeLocal=%.1fms encodeNet=%.1fms",
-						frames, skippedFrames,
+					logs.LogV("[video/prof] fps=%d encodeLocal=%.1fms encodeNet=%.1fms",
+						frames,
 						float64(tEncodeLocal/time.Millisecond)/float64(frames),
 						float64(tEncodeNet/time.Millisecond)/float64(frames),
 					)
 				}
-
-				sentFPS := int(frames) // what actually went out in the last second
-				skippedFrames = 0
 				sentPkts, sentBytes = 0, 0
 				frames = 0
 				tEncodeLocal, tEncodeNet = 0, 0
 				lastRateSample = time.Now()
-
-				// Adapt to the peer's latest loss report, and to the queue on
-				// the way: a growing queue counts as loss, at most every
-				// videoQueueEvery while it lasts (pongs held up behind it
-				// bring no reports).
-				loss, at := ui.PeerVideoLossSnapshot()
-				newReport := at.After(lastLossReport)
-				queue := ui.PathQueue()
-				queueLoss := queueVideoLoss(queue)
-				queueDue := queueLoss >= videoLossLight && time.Since(lastAdapt) >= videoQueueEvery
-				if fpsLimiter != nil && (newReport || queueDue) {
-					if newReport {
-						lastLossReport = at
-					} else {
-						loss = 0
-					}
-					why := fmt.Sprintf("peer video loss %.0f%%", loss*100)
-					if queueLoss > loss {
-						loss = queueLoss
-						why = fmt.Sprintf("a %s queue on the way", queue.Round(10*time.Millisecond))
-					}
-					lastAdapt = time.Now()
-					cells := 0
-					if cols, rows, ok := ui.PeerSlot(); ok {
-						cells = cols * rows
-					}
-					prevFPS, prevHold := adapt.fps, adapt.hold
-					adapt.update(loss, sentFPS, ceiling, holdBase, maxVideoHold(cells))
-					if mono := peer.mono || adapt.noColour; mono != netMono {
-						if mono {
-							logs.LogV("[video/udp] %s: sending without colour", why)
-						} else {
-							logs.LogV("[video/udp] peer video clean: colour back")
-						}
-						netMono = mono
-						netEncoder.SetBW(mono)
-					}
-					if adapt.hold != prevHold {
-						logs.LogV("[video/udp] %s: cell hold %d -> %d", why, prevHold, adapt.hold)
-						netEncoder.SetShapeHold(adapt.hold)
-					}
-					if adapt.fps != prevFPS {
-						logs.LogV("[video/udp] %s: %d -> %d fps", why, prevFPS, adapt.fps)
-						fpsLimiter.Reset(time.Second / time.Duration(adapt.fps))
-					}
-				}
 
 			case frame, ok := <-videoCamIn:
 				if !ok {
@@ -701,7 +645,7 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					continue
 				}
 				// The camera switched off (mediactrl): its frames go nowhere,
-				// and the peer's pane loses the signal. Back on, a keyframe:
+				// and the peer's pane loses the signal. Back on, keyframes:
 				// the peer may have dropped what it held meanwhile.
 				if !mediactrl.VideoEnabled() {
 					if !cameraOff {
@@ -712,17 +656,14 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				}
 				if cameraOff {
 					cameraOff = false
-					netEncoder.ForceKeyframe()
+					layers.forceKeyframes()
 					log.Printf("[video] camera on")
 				}
-				if fpsLimiter != nil {
-					select {
-					case <-fpsLimiter.C:
-					case <-stopCh:
-						return
-					}
+				select {
+				case <-fpsLimiter.C:
+				case <-stopCh:
+					return
 				}
-
 				frames++
 
 				rawFrame := codec.Frame{
@@ -747,134 +688,74 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					log.Printf("[video/udp] the peer asks for %dx%d now", peerCols, peerRows)
 					guessedSize = false
 				}
-				// A larger frame holds its cells harder (baseVideoHold): the
-				// hold moves with the base, what loss added kept.
-				if peerOK {
-					if base := baseVideoHold(videoShapeHold, peerCols*peerRows); base != holdBase {
-						prev := adapt.hold
-						adapt.hold, holdBase = max(base, adapt.hold+base-holdBase), base
-						if adapt.hold != prev {
-							logs.LogV("[video/udp] %dx%d cells: cell hold %d -> %d", peerCols, peerRows, prev, adapt.hold)
-							netEncoder.SetShapeHold(adapt.hold)
-						}
-					}
-				}
 				var addr *net.UDPAddr
 				if peerOK {
 					addr = getPeer()
 				}
-				sendNet := addr != nil
-
-				// The peer lost a frame and asked for a keyframe. At most one
-				// per videoKeyframeRequestGap: a keyframe is large, and a lossy
-				// path must not get a burst of them (the peer asks again).
-				if ui.TakePeerKeyframeRequest() && time.Since(lastForcedKey) >= videoKeyframeRequestGap {
-					lastForcedKey = time.Now()
-					netEncoder.ForceKeyframe()
-					logs.LogV("[video/udp] the peer asked for a keyframe")
-				}
-				// The peer lost a frame: code against the newest it decoded
-				// (a keyframe only when that one is no longer kept). After a
-				// loss it acknowledges what it decodes: code against that,
-				// so a frame lost on the way costs only its own update.
-				if id, ok := ui.TakePeerRecover(); ok {
-					netEncoder.RecoverFrom(id)
-					logs.LogV("[video/udp] the peer asked to recover from frame %d", id)
-				} else if sinceAckRef >= videoAckEvery {
-					if id, ok := ui.TakePeerAck(); ok {
-						netEncoder.CodeAgainst(id)
-						sinceAckRef = 0
-					}
-				}
-				sinceAckRef++
-
-				// Unchanged frames are not sent, but one goes out at least every
-				// videoHeartbeat, so the peer knows the stream is alive.
-				netEncoder.SetSkipEmpty(time.Since(lastVideoSent) < videoHeartbeat)
-
-				// ----- encode -----
-				var dataNet []byte
-				var selfView *codec.TextFrame
-				var errLocal, errNet error
-				if netMono == selfMono && selfOK && sendNet && selfCols == peerCols && selfRows == peerRows {
-					// Both panes have one size: the cells are built once and
-					// the self view mirrors them.
-					start := time.Now()
-					dataNet, selfView, errNet = netEncoder.EncodeWithSelfView(rawFrame, peerCols, peerRows, previewEncoder)
-					errLocal = errNet
-					tEncodeNet += time.Since(start)
-				} else {
-					if selfOK {
-						start := time.Now()
-						// The self view never leaves this process: no palette or payload.
-						selfView, errLocal = previewEncoder.SelfView(rawFrame, selfCols, selfRows)
-						tEncodeLocal += time.Since(start)
-					}
-					if sendNet {
-						start := time.Now()
-						dataNet, errNet = netEncoder.Encode(rawFrame, peerCols, peerRows)
-						tEncodeNet += time.Since(start)
-					}
-				}
 
 				// ----- local preview (self view) -----
 				if selfOK {
-					if err := errLocal; err != nil {
+					start := time.Now()
+					// The self view never leaves this process: no palette or payload.
+					selfView, err := previewEncoder.SelfView(rawFrame, selfCols, selfRows)
+					tEncodeLocal += time.Since(start)
+					if err != nil {
 						log.Printf("[video/udp] Encode local: %v", err)
-					} else if tv := selfView; videoSelfScreenOut != nil {
+					} else if videoSelfScreenOut != nil {
 						select {
-						case videoSelfScreenOut <- tv:
+						case videoSelfScreenOut <- selfView:
 						default:
 							select {
 							case <-videoSelfScreenOut:
-								logs.LogV("[video/udp] drop local preview frame (videoLocalOut full, dropped oldest)")
 							default:
 							}
 							select {
-							case videoSelfScreenOut <- tv:
+							case videoSelfScreenOut <- selfView:
 							default:
-								logs.LogV("[video/udp] drop local preview frame (videoLocalOut full, dropped newest)")
 							}
 						}
 					}
 				}
-
-				// ----- send encoded frame over the network -----
-				if sendNet && errNet == nil && dataNet == nil {
-					// Nothing changed (SetSkipEmpty): no datagram, and the
-					// frame counter does not move, so this is not a loss.
-					skippedFrames++
-					sendNet = false
+				if addr == nil {
+					continue
 				}
-				if sendNet {
-					if err := errNet; err != nil {
-						log.Printf("[video/udp] Encode net: %v", err)
-						continue
-					}
-					lastVideoSent = time.Now()
 
-					if mediaHeaderBytes+videoSeqBytes+videoFlagsBytes+len(dataNet) > maxMediaDatagram {
+				// ----- the layers, over the network -----
+				now := time.Since(sendStart)
+				layers.setPane(now, peerCols, peerRows)
+				start := time.Now()
+				packets, err := layers.frame(now, rawFrame)
+				tEncodeNet += time.Since(start)
+				if err != nil {
+					log.Printf("[video/udp] Encode net: %v", err)
+					continue
+				}
+				header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
+				for k := range packets {
+					p := &packets[k]
+					var voiceFirst uint16
+					var voiceFrames [][]byte
+					if k == 0 {
+						// Voice frames waiting for their datagram ride along.
+						voiceFirst, voiceFrames, _ = voice.takeFrames()
+					}
+					out := make([]byte, 0, mediaHeaderBytes+videoSeqBytes+videoFlagsBytes+p.size()+64)
+					out = append(out, header[:]...)
+					out = appendVideoHead(out, videoSeq, voiceFirst, voiceFrames)
+					out = appendLayerHead(out, p.head)
+					out = append(out, p.frame...)
+					if len(out) > maxMediaDatagram {
 						// Cannot happen within codec.MaxFrameCells; never send an
-						// oversized datagram that the network would drop or fragment.
-						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", mediaHeaderBytes+len(dataNet), maxMediaDatagram)
-						// The encoder counts this frame as sent; skipping its
-						// number shows the receiver the gap, so it waits for a
-						// full frame instead of applying changes to a stale one.
+						// oversized datagram that the network would drop or
+						// fragment. The counter skips it: the peer sees the gap.
+						log.Printf("[video/udp] drop frame: %d bytes exceeds datagram limit %d", len(out), maxMediaDatagram)
 						videoSeq++
 						continue
 					}
-					header := encodeMediaHeader(mediaKindVideo, mediaIndex(mediaEpoch, frame.CapturedAt))
-					// Voice frames waiting for their datagram ride along.
-					voiceFirst, voiceFrames, _ := voice.takeFrames()
-					out := make([]byte, 0, mediaHeaderBytes+videoSeqBytes+videoFlagsBytes+len(dataNet)+64)
-					out = append(out, header[:]...)
-					out = appendVideoHead(out, videoSeq, voiceFirst, voiceFrames) // frame counter for the peer's loss estimate
 					videoSeq++
-					out = append(out, dataNet...)
-
 					n, err := pc.WriteTo(out, addr)
 					if err != nil {
-						// A lost video frame is harmless; only a closed socket ends the session.
+						// A lost video datagram is harmless; only a closed socket ends the session.
 						if !isFatalSendError(err) {
 							sendErrLog.report("video", err)
 							continue
@@ -889,8 +770,6 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					if n > mediaHeaderBytes {
 						sentBytes += uint64(n - mediaHeaderBytes) // exclude packed media header
 					}
-					_, sentIndex, _ := decodeMediaHeader(header[:])                                                                                               // DEBUG-TEMP
-					logs.LogV("[trace] video #%d (frame %d) sent: %d B, %d voice frames from #%d inside", sentIndex, videoSeq-1, n, len(voiceFrames), voiceFirst) // DEBUG-TEMP
 				}
 			}
 		}
@@ -1151,12 +1030,13 @@ func startAudioReceiver(wg *sync.WaitGroup, dec audioDecoder, frameSamples int,
 	}()
 }
 
-// startVideoReceiver launches a goroutine that decodes textFrame video frames from netVideoIn
-// and updates the remote preview independently of the audio receive loop.
+// startVideoReceiver launches a goroutine that decodes the video layers
+// from netVideoIn (video_layers.go) and shows the picture in step with the
+// sound, independently of the audio receive loop.
 func startVideoReceiver(wg *sync.WaitGroup,
 	stopCh <-chan struct{}, netVideoIn <-chan []byte, screenOut chan *codec.TextFrame,
 	playbackIndex func() (uint16, bool)) {
-	decoder := codec.NewDecoder()
+	layers := newLayerReceiver(ui.SendVideoCtl)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1168,10 +1048,6 @@ func startVideoReceiver(wg *sync.WaitGroup,
 		queue := make([]timedFrame, 0, videoMaxQueuedFrames)
 		lastFrameAt := time.Time{}
 		var loss videoLossMeter
-		var (
-			haveSeq bool
-			lastSeq byte
-		)
 		var (
 			playbackSeen     bool
 			lastPlayback     uint16
@@ -1198,23 +1074,6 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
-		// A lost frame: ask the peer to recover from the newest frame
-		// decoded (a keyframe before any), again while frames cannot be
-		// decoded; for videoAckWindow after it acknowledge every frame
-		// decoded.
-		var lastKeyRequest, lastLoss time.Time
-		requestRecovery := func(now time.Time) {
-			lastLoss = now
-			if now.Sub(lastKeyRequest) < videoKeyframeRetry {
-				return
-			}
-			lastKeyRequest = now
-			if id, ok := decoder.LastGood(); ok {
-				ui.RequestRecover(id)
-			} else {
-				ui.RequestKeyframe()
-			}
-		}
 		var syncLogAt time.Time
 		var newestIndex uint16
 		var haveNewest bool
@@ -1300,39 +1159,16 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
-		// process decodes one frame in the order of the frame counter.
-		process := func(index uint16, seq byte, payload []byte, now time.Time) {
-			loss.observe(seq, now)
-			loss.report(now)
-			if haveSeq {
-				switch gap := seq - lastSeq; {
-				case gap == 0 || gap > 128:
-					logs.LogV("[trace] video #%d (frame %d) dropped: a duplicate or older than frame %d", index, seq, lastSeq) // DEBUG-TEMP
-					return                                                                                                     // duplicate or stale: its turn has passed
-				case gap != 1:
-					// A frame is missing: the next ones are coded against it
-					// until the peer recovers from one this side holds.
-					logs.LogV("[trace] video frames %d..%d missing", lastSeq+1, seq-1) // DEBUG-TEMP
-					lastLoss = now
-				}
-			}
-			haveSeq, lastSeq = true, seq
-			tv, err := decoder.Decode(payload)
-			if err != nil {
-				logs.LogV("[trace] video #%d (frame %d) not decoded: %v", index, seq, err) // DEBUG-TEMP
-				requestRecovery(now)
-				if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
-					loss.failed()
-					log.Printf("[video/udp] textFrame decode: %v", err)
-				}
+		// drain decodes what is due and queues the picture for its time.
+		drain := func(now time.Time) {
+			changed, index := layers.drain(now)
+			if !changed {
 				return
 			}
-			if now.Sub(lastLoss) < videoAckWindow {
-				if id, ok := decoder.LastGood(); ok {
-					ui.AckVideo(id)
-				}
+			tv := layers.picture()
+			if tv == nil {
+				return
 			}
-
 			newestIndex, haveNewest = index, true
 			queue = append(queue, timedFrame{index: index, frame: tv, at: time.Now()})
 			sort.Slice(queue, func(i, j int) bool {
@@ -1343,41 +1179,8 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			// must hold more than that span of frames.
 			if len(queue) > videoMaxQueuedFrames {
 				loss.late(len(queue) - videoMaxQueuedFrames)
-				for _, f := range queue[:len(queue)-videoMaxQueuedFrames] { // DEBUG-TEMP
-					logs.LogV("[trace] video #%d dropped: too many frames waiting for the sound", f.index)
-				}
 				queue = queue[len(queue)-videoMaxQueuedFrames:]
 				logs.LogV("[video/udp] drop stale queued frame")
-			}
-		}
-
-		// Frames that arrived wait here to go in the order of the frame
-		// counter: a missing one is waited for up to videoReorderWait (the
-		// next often overtakes it on a path with jitter), then given up.
-		type arrived struct {
-			index   uint16
-			seq     byte
-			payload []byte
-			at      time.Time
-		}
-		var pending []arrived
-		drain := func(now time.Time) {
-			for len(pending) > 0 {
-				next, oldest := 0, pending[0].at
-				for k, p := range pending {
-					if byte(p.seq-lastSeq-1) < byte(pending[next].seq-lastSeq-1) {
-						next = k
-					}
-					if p.at.Before(oldest) {
-						oldest = p.at
-					}
-				}
-				p := pending[next]
-				if haveSeq && p.seq != lastSeq+1 && p.seq-lastSeq <= 128 && now.Sub(oldest) < videoReorderWait {
-					return // wait a little for the missing one
-				}
-				pending = append(pending[:next], pending[next+1:]...)
-				process(p.index, p.seq, p.payload, now)
 			}
 		}
 
@@ -1386,14 +1189,13 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				drain(time.Now())
+				now := time.Now()
+				drain(now)
+				layers.report(now)
 				presentDue()
 			case pkt, ok := <-netVideoIn:
 				if !ok {
 					return
-				}
-				if pkt == nil {
-					continue
 				}
 				if len(pkt) <= mediaIndexBytes+videoSeqBytes {
 					continue
@@ -1403,19 +1205,14 @@ func startVideoReceiver(wg *sync.WaitGroup,
 					queue = queue[:0]
 				}
 				now := time.Now()
-				if !lastFrameAt.IsZero() && now.Sub(lastFrameAt) >= videoSilenceGap {
-					// Frames may have been lost unnoticed (the counter wraps):
-					// take whatever comes next as the next.
-					for _, p := range pending {
-						process(p.index, p.seq, p.payload, now)
-					}
-					pending = pending[:0]
-					haveSeq = false
-				}
 				lastFrameAt = now
 				seq := pkt[mediaIndexBytes]
-				logs.LogV("[trace] video #%d (frame %d) arrived, %d B", index, seq, len(pkt)-mediaIndexBytes-videoSeqBytes) // DEBUG-TEMP
-				pending = append(pending, arrived{index: index, seq: seq, payload: pkt[mediaIndexBytes+videoSeqBytes:], at: now})
+				loss.observe(seq, now)
+				loss.report(now)
+				if err := layers.arrive(now, seq, index, pkt[mediaIndexBytes+videoSeqBytes:]); err != nil {
+					logs.LogV("[video/udp] %v", err)
+					continue
+				}
 				drain(now)
 			}
 		}

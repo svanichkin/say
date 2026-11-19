@@ -3,7 +3,6 @@ package tcp
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -30,9 +29,7 @@ const (
 	frameFileEnd    byte = 0x09
 	frameFileResult byte = 0x0a // receiver → sender: file saved or failed
 	frameBye        byte = 0x0b // the peer is hanging up: end the call now
-	frameKeyframe   byte = 0x0c // receiver → sender: a video frame was lost, send a keyframe
-	frameRecover    byte = 0x0f // receiver → sender: a video frame was lost, code against frame (uint16 LE), the newest decoded
-	frameAck        byte = 0x10 // receiver → sender: video frame (uint16 LE) decoded
+	frameVideoCtl   byte = 0x11 // receiver → sender: a video control message (network/udp/video_layers.go)
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -72,12 +69,8 @@ func frameName(t byte) string {
 		return "file"
 	case frameBye:
 		return "bye"
-	case frameKeyframe:
-		return "keyframe"
-	case frameRecover:
-		return "recover"
-	case frameAck:
-		return "ack"
+	case frameVideoCtl:
+		return "videoctl"
 	case frameTermSize:
 		return "termsize"
 	case frameLogWant, frameLog:
@@ -203,16 +196,8 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			return
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:
 			handleChatFrame(s.conn, t, payload, s.incoming)
-		case frameKeyframe:
-			ui.NotePeerKeyframeRequest()
-		case frameRecover:
-			if len(payload) >= 2 {
-				ui.NotePeerRecover(binary.LittleEndian.Uint16(payload))
-			}
-		case frameAck:
-			if len(payload) >= 2 {
-				ui.NotePeerAck(binary.LittleEndian.Uint16(payload))
-			}
+		case frameVideoCtl:
+			ui.NotePeerVideoCtl(payload)
 		case frameTermSize:
 			if cols, rows, ok := decodeTermSizeFrame(payload); ok && s.termSync != nil {
 				s.termSync.notifyPeer(cols, rows)
@@ -262,11 +247,9 @@ func hangup(conn net.Conn) error {
 	return err
 }
 
-// startKeyframeRequester forwards the video receiver's keyframe requests,
-// recovery requests and acknowledgements (ui.RequestKeyframe,
-// RequestRecover, AckVideo) to the peer. A peer that does not know a frame
-// ignores it, as every unknown control frame.
-func startKeyframeRequester(ctx context.Context, conn net.Conn) func() {
+// startVideoCtl forwards the video receiver's control messages
+// (ui.SendVideoCtl) to the peer.
+func startVideoCtl(ctx context.Context, conn net.Conn) func() {
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -275,17 +258,9 @@ func startKeyframeRequester(ctx context.Context, conn net.Conn) func() {
 				return
 			case <-done:
 				return
-			case <-ui.KeyframeRequests():
-				if err := writeFrameSafe(conn, frameKeyframe, nil); err != nil {
-					log.Printf("[p2p] keyframe request failed: %v", err)
-				}
-			case id := <-ui.RecoverRequests():
-				if err := writeFrameSafe(conn, frameRecover, binary.LittleEndian.AppendUint16(nil, id)); err != nil {
-					log.Printf("[p2p] recovery request failed: %v", err)
-				}
-			case id := <-ui.VideoAcks():
-				if err := writeFrameSafe(conn, frameAck, binary.LittleEndian.AppendUint16(nil, id)); err != nil {
-					log.Printf("[p2p] video acknowledgement failed: %v", err)
+			case msg := <-ui.VideoCtlOut():
+				if err := writeFrameSafe(conn, frameVideoCtl, msg); err != nil {
+					log.Printf("[p2p] video control message failed: %v", err)
 				}
 			}
 		}
