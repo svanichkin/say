@@ -587,6 +587,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 			tEncodeLocal, tEncodeNet time.Duration
 
 			cameraOff bool // mediactrl turned the camera off
+
+			sinceAckRef int // frames since one was coded against an acknowledged frame
 		)
 
 		tick := time.NewTicker(time.Second)
@@ -757,6 +759,20 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					netEncoder.ForceKeyframe()
 					logs.LogV("[video/udp] the peer asked for a keyframe")
 				}
+				// The peer lost a frame: code against the newest it decoded
+				// (a keyframe only when that one is no longer kept). After a
+				// loss it acknowledges what it decodes: code against that,
+				// so a frame lost on the way costs only its own update.
+				if id, ok := ui.TakePeerRecover(); ok {
+					netEncoder.RecoverFrom(id)
+					logs.LogV("[video/udp] the peer asked to recover from frame %d", id)
+				} else if sinceAckRef >= videoAckEvery {
+					if id, ok := ui.TakePeerAck(); ok {
+						netEncoder.CodeAgainst(id)
+						sinceAckRef = 0
+					}
+				}
+				sinceAckRef++
 
 				// Unchanged frames are not sent, but one goes out at least every
 				// videoHeartbeat, so the peer knows the stream is alive.
@@ -1168,12 +1184,20 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
-		// A lost frame stops the picture until the next full frame: ask the
-		// peer for one, again while none arrives (it travels over UDP too).
-		var lastKeyRequest time.Time
-		requestKeyframe := func(now time.Time) {
-			if now.Sub(lastKeyRequest) >= videoKeyframeRetry {
-				lastKeyRequest = now
+		// A lost frame: ask the peer to recover from the newest frame
+		// decoded (a keyframe before any), again while frames cannot be
+		// decoded; for videoAckWindow after it acknowledge every frame
+		// decoded.
+		var lastKeyRequest, lastLoss time.Time
+		requestRecovery := func(now time.Time) {
+			lastLoss = now
+			if now.Sub(lastKeyRequest) < videoKeyframeRetry {
+				return
+			}
+			lastKeyRequest = now
+			if id, ok := decoder.LastGood(); ok {
+				ui.RequestRecover(id)
+			} else {
 				ui.RequestKeyframe()
 			}
 		}
@@ -1262,11 +1286,93 @@ func startVideoReceiver(wg *sync.WaitGroup,
 			}
 		}
 
+		// process decodes one frame in the order of the frame counter.
+		process := func(index uint16, seq byte, payload []byte, now time.Time) {
+			loss.observe(seq, now)
+			loss.report(now)
+			if haveSeq {
+				switch gap := seq - lastSeq; {
+				case gap == 0 || gap > 128:
+					logs.LogV("[trace] video #%d (frame %d) dropped: a duplicate or older than frame %d", index, seq, lastSeq) // DEBUG-TEMP
+					return                                                                                                     // duplicate or stale: its turn has passed
+				case gap != 1:
+					// A frame is missing: the next ones are coded against it
+					// until the peer recovers from one this side holds.
+					logs.LogV("[trace] video frames %d..%d missing", lastSeq+1, seq-1) // DEBUG-TEMP
+					lastLoss = now
+				}
+			}
+			haveSeq, lastSeq = true, seq
+			tv, err := decoder.Decode(payload)
+			if err != nil {
+				logs.LogV("[trace] video #%d (frame %d) not decoded: %v", index, seq, err) // DEBUG-TEMP
+				requestRecovery(now)
+				if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
+					loss.failed()
+					log.Printf("[video/udp] textFrame decode: %v", err)
+				}
+				return
+			}
+			if now.Sub(lastLoss) < videoAckWindow {
+				if id, ok := decoder.LastGood(); ok {
+					ui.AckVideo(id)
+				}
+			}
+
+			newestIndex, haveNewest = index, true
+			queue = append(queue, timedFrame{index: index, frame: tv, at: time.Now()})
+			sort.Slice(queue, func(i, j int) bool {
+				return mediaIndexDelta(queue[i].index, queue[j].index) < 0
+			})
+			// Frames wait here for the audio playback clock, which runs behind
+			// arrival by the jitter buffer plus device latency, so the queue
+			// must hold more than that span of frames.
+			if len(queue) > videoMaxQueuedFrames {
+				loss.late(len(queue) - videoMaxQueuedFrames)
+				for _, f := range queue[:len(queue)-videoMaxQueuedFrames] { // DEBUG-TEMP
+					logs.LogV("[trace] video #%d dropped: too many frames waiting for the sound", f.index)
+				}
+				queue = queue[len(queue)-videoMaxQueuedFrames:]
+				logs.LogV("[video/udp] drop stale queued frame")
+			}
+		}
+
+		// Frames that arrived wait here to go in the order of the frame
+		// counter: a missing one is waited for up to videoReorderWait (the
+		// next often overtakes it on a path with jitter), then given up.
+		type arrived struct {
+			index   uint16
+			seq     byte
+			payload []byte
+			at      time.Time
+		}
+		var pending []arrived
+		drain := func(now time.Time) {
+			for len(pending) > 0 {
+				next, oldest := 0, pending[0].at
+				for k, p := range pending {
+					if byte(p.seq-lastSeq-1) < byte(pending[next].seq-lastSeq-1) {
+						next = k
+					}
+					if p.at.Before(oldest) {
+						oldest = p.at
+					}
+				}
+				p := pending[next]
+				if haveSeq && p.seq != lastSeq+1 && p.seq-lastSeq <= 128 && now.Sub(oldest) < videoReorderWait {
+					return // wait a little for the missing one
+				}
+				pending = append(pending[:next], pending[next+1:]...)
+				process(p.index, p.seq, p.payload, now)
+			}
+		}
+
 		for {
 			select {
 			case <-stopCh:
 				return
 			case <-ticker.C:
+				drain(time.Now())
 				presentDue()
 			case pkt, ok := <-netVideoIn:
 				if !ok {
@@ -1285,56 +1391,18 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				now := time.Now()
 				if !lastFrameAt.IsZero() && now.Sub(lastFrameAt) >= videoSilenceGap {
 					// Frames may have been lost unnoticed (the counter wraps):
-					// start from the next full frame.
-					decoder.ResetBase()
+					// take whatever comes next as the next.
+					for _, p := range pending {
+						process(p.index, p.seq, p.payload, now)
+					}
+					pending = pending[:0]
 					haveSeq = false
 				}
 				lastFrameAt = now
 				seq := pkt[mediaIndexBytes]
 				logs.LogV("[trace] video #%d (frame %d) arrived, %d B", index, seq, len(pkt)-mediaIndexBytes-videoSeqBytes) // DEBUG-TEMP
-				loss.observe(seq, now)
-				loss.report(now)
-				if haveSeq {
-					switch gap := seq - lastSeq; {
-					case gap == 0 || gap > 128:
-						logs.LogV("[trace] video #%d (frame %d) dropped: a duplicate or older than frame %d", index, seq, lastSeq) // DEBUG-TEMP
-						continue                                                                                                   // duplicate or stale: its turn has passed
-					case gap != 1:
-						// A frame is missing: change-only frames have no base
-						// until the next full frame.
-						logs.LogV("[trace] video frames %d..%d missing: the picture waits for a full frame", lastSeq+1, seq-1) // DEBUG-TEMP
-						decoder.ResetBase()
-						requestKeyframe(now)
-					}
-				}
-				haveSeq, lastSeq = true, seq
-				tv, err := decoder.Decode(pkt[mediaIndexBytes+videoSeqBytes:])
-				if err != nil {
-					logs.LogV("[trace] video #%d (frame %d) not decoded: %v", index, seq, err) // DEBUG-TEMP
-					requestKeyframe(now)
-					if !errors.Is(err, codec.ErrNoBase) { // the gap was already counted
-						loss.failed()
-						log.Printf("[video/udp] textFrame decode: %v", err)
-					}
-					continue
-				}
-
-				newestIndex, haveNewest = index, true
-				queue = append(queue, timedFrame{index: index, frame: tv, at: time.Now()})
-				sort.Slice(queue, func(i, j int) bool {
-					return mediaIndexDelta(queue[i].index, queue[j].index) < 0
-				})
-				// Frames wait here for the audio playback clock, which runs behind
-				// arrival by the jitter buffer plus device latency, so the queue
-				// must hold more than that span of frames.
-				if len(queue) > videoMaxQueuedFrames {
-					loss.late(len(queue) - videoMaxQueuedFrames)
-					for _, f := range queue[:len(queue)-videoMaxQueuedFrames] { // DEBUG-TEMP
-						logs.LogV("[trace] video #%d dropped: too many frames waiting for the sound", f.index)
-					}
-					queue = queue[len(queue)-videoMaxQueuedFrames:]
-					logs.LogV("[video/udp] drop stale queued frame")
-				}
+				pending = append(pending, arrived{index: index, seq: seq, payload: pkt[mediaIndexBytes+videoSeqBytes:], at: now})
+				drain(now)
 			}
 		}
 	}()

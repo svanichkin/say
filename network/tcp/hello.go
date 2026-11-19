@@ -25,12 +25,15 @@ import (
 //	5  every video frame is one range-coded stream, the palette and palette
 //	   patches included, with new models (codec/frames.go; frame types 0-3,
 //	   no zstd)
+//	6  video frames carry numbers and references (codec/refs.go; frame types
+//	   4-7); a lost frame is answered by a recovery request (control frame
+//	   0x0f) and, for a while, acknowledgements (0x10) instead of a keyframe
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 5
-	MinProtocolVersion = 5
+	ProtocolVersion    = 6
+	MinProtocolVersion = 6
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

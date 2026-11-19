@@ -73,7 +73,8 @@ func main() {
 	hold := flag.Int("hold", 10, "cell hold threshold (-video-hold)")
 	seed := flag.Int64("seed", 1, "random seed")
 	ack := flag.Bool("ack", false, "with -refs, the receiver acknowledges every frame decoded and the sender codes against the newest acknowledged one: a lost frame loses only its own update")
-	hybrid := flag.Duration("hybrid", 0, "with -ack: code against acknowledged frames only this long after the last loss reported, else against the frame before")
+	hybrid := flag.Duration("hybrid", 0, "with -ack: the receiver acknowledges frames only this long after a loss it saw (as network/udp), else the sender codes against the frame before")
+	ackEvery := flag.Int("ackevery", 1, "with -ack: code against an acknowledged frame at most every this many frames (else against the frame before)")
 	reorder := flag.Duration("reorder", 0, "the receiver holds frames up to this long to take them in order of their numbers (0: as they arrive, the older dropped)")
 	withRefs := flag.Bool("refs", false, "frames with numbers and references: a lost frame asks to recover from the newest frame decoded instead of for a keyframe")
 	flag.Parse()
@@ -164,9 +165,10 @@ func main() {
 		lastSent           time.Duration = -time.Hour
 		seq                byte
 		linkFree           time.Duration
-		inFlight           []arrival     // frames on their way, by arrival
-		requests           []request     // the receiver's messages on their way
-		lastLoss           time.Duration = -time.Hour
+		inFlight           []arrival                  // frames on their way, by arrival
+		requests           []request                  // the receiver's messages on their way
+		rxLoss             time.Duration = -time.Hour // the receiver last saw a loss
+		lastAckRef                       = -1 << 30   // the last frame coded against an acknowledged one
 		acked              uint16
 		haveAck            bool
 		haveSeq            bool
@@ -208,12 +210,16 @@ func main() {
 				return
 			}
 			lastRequest = at
+			rxLoss = at
 			requestsMade++
 			r := request{at: at + pathDelay(), loss: true}
 			if *withRefs {
 				r.id, r.recover = dec.LastGood()
 			}
 			requests = append(requests, r)
+		}
+		if haveSeq && a.seq-lastSeq != 1 {
+			rxLoss = at
 		}
 		if haveSeq && a.seq-lastSeq != 1 && !*withRefs {
 			dec.ResetBase() // without references the change frames have no base until a keyframe
@@ -236,7 +242,7 @@ func main() {
 		} else {
 			decoded[a.index] = tv
 		}
-		if *ack {
+		if *ack && (*hybrid == 0 || at-rxLoss < *hybrid) {
 			id, _ := dec.LastGood()
 			requests = append(requests, request{at: at + pathDelay(), id: id, recover: true})
 		}
@@ -245,6 +251,7 @@ func main() {
 	// wait in a buffer and go in order of their numbers; a missing one is
 	// given up after -reorder.
 	var pending []arrival
+	var lastTaken time.Duration
 	receive := func(now time.Duration) {
 		for len(inFlight) > 0 && inFlight[0].at <= now {
 			a := inFlight[0]
@@ -273,7 +280,15 @@ func main() {
 				break // wait a little for the missing one
 			}
 			pending = pending[1:]
-			process(next, max(now, next.at))
+			// In order it is taken as it arrives (or as the one before it
+			// was taken); a missing one given up after -reorder.
+			at := max(next.at, lastTaken)
+			if haveSeq && next.seq != lastSeq+1 {
+				at = max(at, oldest+*reorder)
+			}
+			at = min(at, now)
+			lastTaken = at
+			process(next, at)
 		}
 	}
 	for i, fr := range frames {
@@ -288,13 +303,13 @@ func main() {
 				enc.ForceKeyframe()
 			case r.loss:
 				enc.RecoverFrom(r.id) // the newest frame the peer holds
-				lastLoss = now
 			default:
 				acked, haveAck = r.id, true // an acknowledgement
 			}
 		}
-		if *ack && haveAck && (*hybrid == 0 || now-lastLoss < *hybrid) {
+		if *ack && haveAck && i-lastAckRef >= *ackEvery {
 			enc.CodeAgainst(acked) // never on a frame not acknowledged; gone: on from the frame before
+			haveAck, lastAckRef = false, i
 		}
 
 		// Send.
