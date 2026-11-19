@@ -1492,6 +1492,23 @@ var noisePaletteYCbCr = [2][3]byte{
 	{235, 128, 128}, // почти белый
 }
 
+// NoiseRows fills rows r0 to r1 of f with the no-signal noise (random
+// glyphs, nearly black and nearly white): a band of the picture that hung
+// (network/udp's video bands).
+func NoiseRows(f *codec.TextFrame, r0, r1 int) {
+	if len(noiseGlyphSet) == 0 {
+		return
+	}
+	rng := rand.New(rand.NewSource(nextNoiseSeed()))
+	for i := r0 * f.Cols; i < r1*f.Cols && i < len(f.Glyphs); i++ {
+		v := rng.Uint32()
+		f.Glyphs[i] = noiseGlyphSet[int(v>>8)%len(noiseGlyphSet)]
+		fg, bg := noisePaletteYCbCr[v&1], noisePaletteYCbCr[v>>1&1]
+		copy(f.FgYCbCr[3*i:3*i+3], fg[:])
+		copy(f.BgYCbCr[3*i:3*i+3], bg[:])
+	}
+}
+
 func noiseTextFrame(cols, rows int) *codec.TextFrame {
 	if cols <= 0 || rows <= 0 || len(noiseGlyphSet) == 0 {
 		return nil

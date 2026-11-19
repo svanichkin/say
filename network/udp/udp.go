@@ -622,8 +622,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 					elapsed = time.Second
 				}
 				rateKBps := (float64(sentBytes) / 1024) / elapsed.Seconds()
-				logs.LogV("[video/udp] tx: %d pkts, %.2f kB/s, rate %.0f kbit/s, lower %dx%d, upper %dx%d",
-					sentPkts, rateKBps, layers.rc.rate, layers.low.cols, layers.low.rows, layers.hiCols, layers.hiRows)
+				logs.LogV("[video/udp] tx: %d pkts, %.2f kB/s, rate %.0f kbit/s, grid %dx%d in %d bands",
+					sentPkts, rateKBps, layers.rc.rate, layers.hiCols, layers.hiRows, len(layers.hi))
 				ui.UpdateTxVideoRate(rateKBps)
 				if frames > 0 {
 					logs.LogV("[video/prof] fps=%d encodeLocal=%.1fms encodeNet=%.1fms",

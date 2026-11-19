@@ -9,10 +9,7 @@ import (
 // every rateReportEvery (video_layers.go): what arrived in the last second,
 // the loss, the standing queue on the way (the least a datagram waited over
 // rateStanding, by the media clock against the shortest trip of the last
-// 10 s). Tried on a simulated path in BabeCam (Babe's cmd/babecam), with
-// loss in bursts, a link narrowing to 100 kbit/s and a path switch with the
-// round trip up to 6 s: the picture stops only while the path carries
-// nothing.
+// 10 s). Tried on a simulated path in Babe's cmd/babecam.
 
 // rateReportEvery is how often the receiver reports what arrived.
 const rateReportEvery = 100 * time.Millisecond
@@ -26,11 +23,11 @@ type rateCtl struct {
 	feedback time.Duration // how long a report takes to come back about a frame
 	perCell  float64       // bits a second a cell costs on the picture as it is (change frames, as many as go)
 	perCellN int           // seconds it was measured on
-	secStart time.Duration // the second being measured: since, its bits, its grid, whether the budget held a frame back
+	secStart time.Duration // the second being measured: since, its bits, the cells times the time they cover
 	secBits  float64
-	secCells int
-	secHeld  bool
+	secCellS float64
 	cutFrom  float64  // the rate before the last cut
+	demand   float64  // kbit/s the whole picture would take at the full grid, as it is now (the sender's estimate)
 	why      string   // why the last cut, for the log
 	sentWin  []sentAt // what went in the last rateSentKeep
 }
@@ -42,6 +39,9 @@ type sentAt struct {
 
 // rateReport is the receiver's report on the last rateReportEvery.
 type rateReport struct {
+	bytes    int
+	window   time.Duration
+	loss     float64
 	queue    time.Duration // the standing queue on the way: the least a frame waited in the last rateStanding
 	loss1s   float64       // the loss of the last second (a window holds a few frames only)
 	bytes1s  int           // what arrived in the last second
@@ -54,15 +54,15 @@ const (
 	rateStart     = 600.0 // kbit/s
 	rateMin       = 20.0
 	rateMax       = 4000.0
-	rateOverQueue = 100 * time.Millisecond // a standing queue this long ...
+	rateOverQueue = 60 * time.Millisecond  // a standing queue this long ...
 	rateOverShare = 0.9                    // ... while less than this share of what went arrives: the link is over
-	rateStanding  = 500 * time.Millisecond // a keyframe's burst drains within it
+	rateStanding  = 300 * time.Millisecond // a keyframe's burst drains within it
 	rateCutLoss   = 0.15
 	rateHoldQ     = 50 * time.Millisecond
 	rateHoldLoss  = 0.05
 	rateCut       = 0.85  // of what arrived
 	rateUp        = 1.06  // a clean report, up to where the last cut came from
-	rateUpSlow    = 1.015 // past it
+	rateUpSlow    = 1.03  // past it
 	rateFloorCap  = 100.0 // the rate may go this far above an idle stream
 	rateBurst     = 200 * time.Millisecond
 	rateSilent    = 500 * time.Millisecond // no frame this long (one goes every sayHeartbeat at least): the path is gone
@@ -124,9 +124,12 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 		if c.rate < 0.9*c.cutFrom {
 			up = rateUp
 		}
-		if cap := max(rateFloorCap, 2*c.sending(now)); c.rate < cap {
-			c.rate = min(rateMax, c.rate*up, cap) // not past twice what the stream uses
-		}
+		// Not past twice what the stream uses, or half again what the
+		// picture would take at the full grid: a still picture proves
+		// nothing about the path, and when it moves again it must not pour
+		// into a link that narrowed meanwhile; a grid made small by a
+		// narrow path must still be let grow back.
+		c.rate = min(rateMax, c.rate*up, max(rateFloorCap, 2*c.sending(now), 1.5*c.demand))
 	}
 }
 
@@ -168,36 +171,32 @@ func (c *rateCtl) spent(now time.Duration, bytes int) {
 	}
 }
 
-// measure takes bytes sent of the picture whose cost a cell is measured on
-// (the upper layer): its cells, whether a keyframe.
-func (c *rateCtl) measure(now time.Duration, bytes, cells int, key bool) {
-	if cells != c.secCells {
-		c.secStart, c.secBits, c.secCells, c.secHeld = now, 0, cells, false // another grid: measured anew
-	}
-	if !key {
-		c.secBits += float64(bytes * 8)
-	}
+// measure takes a band's frame sent (not a keyframe): its bytes, its
+// cells, and the time it covers (since the band's frame before: longer when
+// the budget held it back or nothing changed).
+func (c *rateCtl) measure(bytes, cells int, covered time.Duration) {
+	c.secBits += float64(bytes * 8)
+	c.secCellS += float64(cells) * covered.Seconds()
 }
 
-// tick ends a second of measuring what a cell costs: the bits that went (no
-// keyframes) over the cells. With frames held back by the budget it costs
-// at least that.
+// tick ends a second of measuring what a cell costs a second: the bits that
+// went over the cells times the time they covered. Frames held back by the
+// budget cover more time, unchanged bands send rarely and little: neither
+// skews it.
 func (c *rateCtl) tick(now time.Duration) {
-	d := now - c.secStart
-	if d < time.Second || c.secCells <= 0 {
+	if now-c.secStart < time.Second {
 		return
 	}
-	v := c.secBits / d.Seconds() / float64(c.secCells)
-	switch {
-	case c.perCellN == 0:
-		c.perCell = v
-	case c.secHeld:
-		c.perCell = max(c.perCell, v)
-	default:
-		c.perCell = 0.5*c.perCell + 0.5*v
+	if c.secCellS > 0 {
+		v := c.secBits / c.secCellS
+		if c.perCellN == 0 {
+			c.perCell = v
+		} else {
+			c.perCell = 0.5*c.perCell + 0.5*v
+		}
+		c.perCellN++
 	}
-	c.perCellN++
-	c.secStart, c.secBits, c.secHeld = now, 0, false
+	c.secStart, c.secBits, c.secCellS = now, 0, 0
 }
 
 // owdFloor is the shortest trip of the last 10 s (a path that changed is

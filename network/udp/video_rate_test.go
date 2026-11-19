@@ -189,10 +189,11 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 
 // lowPacket is a video datagram's part after the media header, as the
 // video receiver gets it: the media index, the datagram counter, the frame
-// as the lower layer's (its own counter the same).
+// as the one band's (its own counter the same).
 func lowPacket(index uint16, seq byte, frame []byte) []byte {
+	videoBandRows = 0 // one band: the whole frame
 	pkt := []byte{byte(index >> 8), byte(index), seq}
-	pkt = appendLayerHead(pkt, layerHead{layer: videoLayerLow, seq: seq})
+	pkt = appendLayerHead(pkt, layerHead{gen: 1, rows: 8, bands: 1, seq: seq})
 	return append(pkt, frame...)
 }
 

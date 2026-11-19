@@ -280,6 +280,7 @@ func run() (err error) {
 	udptransport.SetMicrophone(!opts.NoMic)
 	udptransport.SetSystemVoice(opts.SysAudio)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
+	udptransport.SetVideoBandRows(opts.VideoBand)
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	network.SetLAN(!opts.NoLAN)
 	network.SetDirect(!opts.NoDirect)

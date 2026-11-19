@@ -279,6 +279,7 @@ type AppOptions struct {
 	NoMic       bool
 	SysAudio    bool // the system voice processing (default on macOS and Windows)
 	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
+	VideoBand   int  // video band height in rows (0: one band); -video-band
 	HoldDebug   bool
 	ShowVersion bool
 	ShowDonate  bool
@@ -310,6 +311,7 @@ func ParseCLI() (*AppOptions, error) {
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
 		VideoHold:   10,
+		VideoBand:   1,
 		// The system voice processing (echo cancellation, noise suppression)
 		// is the default where Say has it: macOS and Windows.
 		// -sysaudio=false opts out.
@@ -808,6 +810,15 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.HoldDebug = boolVal
+		case "video-band":
+			if !hasValue || value == "" {
+				return fmt.Errorf("-video-band requires a value (rows; 0: one band)")
+			}
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 || n > 80 {
+				return fmt.Errorf("invalid -video-band %q: want 0..80", value)
+			}
+			opts.VideoBand = n
 		case "video-hold":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-video-hold requires a value (0 disables)")
@@ -950,7 +961,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "camera", "colors", "lang":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "video-band", "camera", "colors", "lang":
 		return true
 	default:
 		return false

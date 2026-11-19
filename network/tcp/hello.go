@@ -34,12 +34,14 @@ import (
 //	   its own; one control frame (0x11) carries recovery requests,
 //	   acknowledgements and keyframe requests for a layer, and the
 //	   receiver's reports on what arrived (0x0c, 0x0f, 0x10 are gone)
+//	8  video in bands of rows only, no lower layer; a band that hung shows
+//	   noise; after a loss every frame is coded against an acknowledged one
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 7
-	MinProtocolVersion = 7
+	ProtocolVersion    = 8
+	MinProtocolVersion = 8
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

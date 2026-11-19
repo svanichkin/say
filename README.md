@@ -62,27 +62,29 @@ external Yggdrasil daemon or web stack.
   latency (especially Bluetooth) can differ from this estimate.
 - Video in a two-pane terminal layout (square panes), synchronised with the
   audio of the same peer.
-- **Video in layers that do not stop on loss.** A lower layer carries the
-  whole picture at a quarter of the requested rows, 15 frames a second,
-  every datagram with the frame before again, so a single loss costs
-  nothing. An upper layer carries the grid the path allows, up to the one
-  requested, in bands of 8 rows, each band a stream of its own: a lost
-  datagram breaks its band only, and only until it recovers (from the newest
-  frame the receiver decoded, no keyframe), the lower layer showing there
-  meanwhile.
+- **Video in bands that do not stop on loss.** The picture goes in bands
+  of rows (one row each by default, `-video-band`), each band a stream of
+  its own in its own small datagram: a lost datagram breaks its band only,
+  which shows the no-signal noise until it recovers (from the newest frame
+  the receiver decoded, no keyframe). After a loss every frame of a band is
+  coded against one the receiver acknowledged, so a lost datagram is lost
+  alone.
 - **Rate control as WebRTC's.** The receiver reports every 100 ms what
   arrived, its loss and the standing queue on the way; the sender cuts its
   rate to below what arrived when a queue stands and less arrives than went,
   gently on heavy loss, and raises it on a clean path. Bands go while the
   rate's budget holds, the longest waiting first (short of rate the picture
-  changes a part at a time), and the upper grid fills what the lower layer
-  leaves of the rate. Tried on a simulated path (loss in bursts, a link
-  narrowing to 100 kbit/s, path switches with the round trip up to 6 s):
-  the picture stops only while the path carries nothing.
+  changes a part at a time), and the grid fills the rate, down to a quarter
+  of the requested rows, changed only for a clear difference. A still
+  picture keeps the rate near what it uses, so that a picture that moves
+  again does not pour into a link that narrowed meanwhile. Tried on a
+  simulated path (loss in bursts, a link narrowing to 100 kbit/s, path
+  switches with the round trip up to 6 s): the picture stops mostly while
+  the path carries nothing.
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. Both peers need this
-  version (protocol 7).
+  version (protocol 8).
 - **Small fixed buffers.** Every call plays with a 10 ms x 2 speaker buffer
   (like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms jitter
   buffer, in the LAN and over the internet alike. Steady clock drift between
@@ -374,6 +376,7 @@ codec on both sides). Relevant CLI switches:
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is coded, and the rate control sends what the path allows.
 - `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `10`, `0` disables; higher is calmer, but low-contrast details start to lag). N holds up to 88x36 cells, the camera's own pixels; a larger frame holds harder, up to 2N at 160x65: finer cells mostly carry the camera's noise there (160x65 at 2N takes about 40% fewer bytes than at N and looks the same).
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
+- `-video-band=N` – the height of the video's bands in rows (default `1`; `0`: one band, the whole picture). Each band is its own stream in its own datagrams: a loss breaks only its band, shown as noise until it recovers. Taller bands send fewer, larger datagrams.
 - `-camera /dev/videoN` – use this camera device only (Linux). Without it every `/dev/video*` capture node is tried in turn. Use it when a phone or board exposes several nodes, for example a `v4l2loopback` device that another program (such as a PinePhone camera service) fills: `-camera /dev/video0`.
 - `-colors 16|truecolor` – colour output. `16` uses only the 16 ANSI colours (8 for backgrounds), with dithering, for terminals without 24-bit colour such as Plan 9's `vt`; it is the default on Plan 9, `truecolor` elsewhere.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
