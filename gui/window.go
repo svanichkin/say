@@ -20,13 +20,11 @@ func Available() bool { return true }
 
 // The window works as a terminal does: the cell size follows the text
 // (rowPoints tall, half as wide), and resizing the window changes how many
-// cells there are. Cmd+ and Cmd- change the video detail instead: the same
-// pane shows a frame of 2x or 4x the cells (44 -> 88 -> 176 wide).
+// cells there are. Cmd+ and Cmd- change video detail one cell step at a time.
 const (
 	rowPoints = 16 // the height of a row of text, in points
 	minCols   = 40
 	minRows   = 16
-	maxDetail = 4
 )
 
 // closeWait is how long the window waits for Say to stop after its close
@@ -47,7 +45,7 @@ func Run(app func() error, in Input) error {
 	device.SetScreen(screen, screen.Size)
 	keepAwake()
 
-	g := &game{screen: screen, in: in, detail: 1}
+	g := &game{screen: screen, in: in}
 	s := ebiten.Monitor().DeviceScaleFactor()
 	g.setMetrics(s)
 
@@ -79,7 +77,6 @@ type game struct {
 	done      atomic.Bool
 	closing   bool
 	closingAt time.Time
-	detail    int
 
 	// Cell size and font, in device pixels, for the monitor's scale.
 	scale  float64
@@ -168,11 +165,15 @@ func (g *game) keys() {
 		return
 	}
 	if cmd && (inpututil.IsKeyJustPressed(ebiten.KeyEqual) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadAdd)) {
-		g.setDetail(g.detail * 2)
+		if g.in.Detail != nil {
+			g.in.Detail(1)
+		}
 		return
 	}
 	if cmd && (inpututil.IsKeyJustPressed(ebiten.KeyMinus) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadSubtract)) {
-		g.setDetail(g.detail / 2)
+		if g.in.Detail != nil {
+			g.in.Detail(-1)
+		}
 		return
 	}
 	if g.in.Key == nil {
@@ -188,19 +189,6 @@ func (g *game) keys() {
 	}
 	if repeated(ebiten.KeyBackspace) {
 		g.in.Key(0x7f)
-	}
-}
-
-// setDetail changes how many cells of picture a pane holds per cell of the
-// screen (1, 2 or 4); the peer is asked for frames that size.
-func (g *game) setDetail(d int) {
-	d = max(1, min(maxDetail, d))
-	if d == g.detail {
-		return
-	}
-	g.detail = d
-	if g.in.Detail != nil {
-		g.in.Detail(d)
 	}
 }
 

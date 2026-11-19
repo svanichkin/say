@@ -272,47 +272,66 @@ func ClickAt(col, row int) {
 // Interrupt stops Say, as Ctrl+C in the terminal does.
 func Interrupt() { interruptSelf() }
 
-// FrameRGB is the colour a frame's YCbCr shows as, with the colour filter
-// (-orange and the like) applied.
+// FrameRGB applies the display gamma and any local colour filter to a frame
+// colour. The encoded frame and network stream are unchanged.
 func FrameRGB(y, cb, cr byte) (r, g, b byte) {
-	ri, gi, bi := applyColorFilter(ycbcrToRGB(y, cb, cr))
+	ri, gi, bi := videoDisplayRGB(y, cb, cr)
 	return byte(ri), byte(gi), byte(bi)
 }
 
-// Video detail: in the pixel window a pane of n x m cells can hold a frame
-// of n*d x m*d cells, d = 1, 2 or 4 (Cmd+ and Cmd-, and one step more while
-// the video comes in clean). The peer is asked for frames that size and the
-// local preview is encoded so.
+// FrameY applies the same display gamma to the window's monochrome video.
+func FrameY(y byte) byte { return videoGammaY[y] }
+
+// Each detail step adds one row and the proportional number of columns,
+// preserving the pane's aspect. Manual steps come from Cmd+ / Cmd-; clean
+// incoming video earns automatic steps. The requested size can reach twice
+// the pane size, within the codec's frame limit.
 var videoDetail atomic.Int32
 
-// SetVideoDetail sets the detail (1, 2 or 4).
-func SetVideoDetail(d int) {
-	videoDetail.Store(int32(max(1, min(4, d))))
+// SetVideoDetail sets the number of manual detail steps.
+func SetVideoDetail(steps int) {
+	videoDetail.Store(int32(min(max(0, steps), currentDetailLimit())))
 	RequestRedraw()
 }
 
-func detail() int {
-	if !pixelMode {
-		return 1
+// StepVideoDetail is called for one Cmd+ or Cmd- press.
+func StepVideoDetail(delta int) {
+	if delta == 0 {
+		return
 	}
-	d := max(1, int(videoDetail.Load()))
-	if detailBoost.Load() {
-		d = min(4, d*2)
+	boostState.Lock()
+	limit := currentDetailLimit()
+	manual := min(int(videoDetail.Load()), limit)
+	auto := min(int(detailBoost.Load()), limit-manual)
+	videoDetail.Store(int32(manual))
+	detailBoost.Store(int32(auto))
+	switch {
+	case delta > 0 && manual+auto < limit:
+		videoDetail.Store(int32(manual + 1))
+	case delta < 0 && manual > 0:
+		videoDetail.Store(int32(manual - 1))
+	case delta < 0 && auto > 0:
+		detailBoost.Store(int32(auto - 1))
 	}
-	return d
+	if delta < 0 {
+		boostState.cleanSince = time.Time{}
+		boostState.retryAt = time.Now().Add(boostRetry)
+	}
+	boostState.Unlock()
+	RequestRedraw()
 }
 
-// While the peer's video comes in clean, the window asks for it one step
-// finer than the detail chosen (as one Cmd+ would); when it starts losing
-// frames, one step back, and it waits a while before trying again.
+// The receiver asks for one more row and two more columns after a clean
+// interval. Loss removes one such step and delays another attempt.
 const (
 	boostCleanLoss = 0.01             // a second this clean counts as clean
 	boostAfter     = 10 * time.Second // of clean seconds in a row
+	boostStepEvery = 2 * time.Second  // between later increases
 	boostDropLoss  = 0.04             // a second this lossy drops the step
 	boostRetry     = time.Minute      // after a drop, before the next try
 )
 
-var detailBoost atomic.Bool
+var detailBoost atomic.Int32
 
 var boostState struct {
 	sync.Mutex
@@ -320,12 +339,12 @@ var boostState struct {
 	retryAt    time.Time
 }
 
-// ResetDetailBoost drops the extra step of detail and what earned it.
+// ResetDetailBoost drops the automatic detail steps and what earned them.
 func ResetDetailBoost() {
 	boostState.Lock()
 	boostState.cleanSince, boostState.retryAt = time.Time{}, time.Time{}
+	detailBoost.Store(0)
 	boostState.Unlock()
-	detailBoost.Store(false)
 }
 
 // noteVideoLoss weighs a second's loss of the incoming video (lost, broken
@@ -336,10 +355,15 @@ func noteVideoLoss(loss float64, now time.Time) {
 	}
 	boostState.Lock()
 	defer boostState.Unlock()
+	limit := max(0, currentDetailLimit()-int(videoDetail.Load()))
+	steps := min(int(detailBoost.Load()), limit)
+	if steps != int(detailBoost.Load()) {
+		detailBoost.Store(int32(steps))
+	}
 	if loss > boostCleanLoss {
 		boostState.cleanSince = time.Time{}
-		if loss >= boostDropLoss && detailBoost.Load() {
-			detailBoost.Store(false)
+		if loss >= boostDropLoss && steps > 0 {
+			detailBoost.Store(int32(steps - 1))
 			boostState.retryAt = now.Add(boostRetry)
 			logs.LogV("[video] incoming video loss %.0f%%: detail one step down", loss*100)
 			RequestRedraw()
@@ -349,18 +373,59 @@ func noteVideoLoss(loss float64, now time.Time) {
 	if boostState.cleanSince.IsZero() {
 		boostState.cleanSince = now
 	}
-	if !detailBoost.Load() && now.Sub(boostState.cleanSince) >= boostAfter && !now.Before(boostState.retryAt) {
-		detailBoost.Store(true)
-		logs.LogV("[video] incoming video clean for %v: detail one step up", boostAfter)
+	wait := boostAfter
+	if steps > 0 {
+		wait = boostStepEvery
+	}
+	if steps < limit && now.Sub(boostState.cleanSince) >= wait && !now.Before(boostState.retryAt) {
+		detailBoost.Store(int32(steps + 1))
+		boostState.cleanSince = now
+		logs.LogV("[video] incoming video clean: detail one step up")
 		RequestRedraw()
 	}
 }
 
-// detailSize is a pane's frame size at the current detail, within what the
-// codec carries.
+// currentDetailLimit uses the current window's pane as the basis for manual
+// and automatic steps. The window has not reported a pane before a call.
+func currentDetailLimit() int {
+	selfSlotMu.RLock()
+	cols, rows := selfViewport.peerSlot.cols, selfViewport.peerSlot.rows
+	selfSlotMu.RUnlock()
+	return detailLimit(cols, rows)
+}
+
+// steppedDetailCols preserves the pane's aspect as rows change one by one.
+// With an odd number of columns, some steps add one column and others two.
+func steppedDetailCols(cols, rows, steps int) int {
+	if rows <= 0 {
+		return cols
+	}
+	return (cols*(rows+steps) + rows/2) / rows
+}
+
+// detailLimit allows the original 2x pane size, clipped by the codec's limit.
+// The source is not a hard pixel-for-pixel ceiling: a 4x8 glyph has one shape
+// and two colours, so more cells can still approximate the same source better.
+func detailLimit(cols, rows int) int {
+	if cols <= 0 || rows <= 0 {
+		return 0
+	}
+	maxCols := min(2*cols, codec.MaxFrameCols)
+	steps := max(0, min(rows, codec.MaxFrameRows-rows))
+	for steps > 0 && steppedDetailCols(cols, rows, steps) > maxCols {
+		steps--
+	}
+	return steps
+}
+
+// detailSize is a pane's requested frame size. One step adds one row.
 func detailSize(cols, rows int) (int, int) {
-	d := detail()
-	return min(cols*d, codec.MaxFrameCols), min(rows*d, codec.MaxFrameRows)
+	if pixelMode {
+		steps := min(detailLimit(cols, rows), int(videoDetail.Load())+int(detailBoost.Load()))
+		cols = steppedDetailCols(cols, rows, steps)
+		rows += steps
+	}
+	return min(cols, codec.MaxFrameCols), min(rows, codec.MaxFrameRows)
 }
 
 // Frames handed to the window, by the id in the pane mark. Only the latest

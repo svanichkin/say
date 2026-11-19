@@ -14,10 +14,11 @@ type Input struct {
 	Click     func(col, row int) // a click on a cell (1-based)
 	Interrupt func()             // Ctrl+C or the window closed
 	Resized   func()             // the screen changed size or font: redraw
-	Detail    func(d int)        // video detail changed (1, 2 or 4)
+	Detail    func(delta int)    // Cmd+ / Cmd-: add or remove one detail step
 
 	Frame    func(id uint64) *codec.TextFrame    // the frame a pane mark names
 	FrameRGB func(y, cb, cr byte) (r, g, b byte) // a frame colour as shown
+	FrameY   func(y byte) byte                   // display gamma for monochrome video
 
 	Accents func() (self, peer [3]int)       // the accent colours: ours, the peer's
 	Chat    func() [3]int                    // the chat frame's colour

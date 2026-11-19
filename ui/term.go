@@ -1082,6 +1082,7 @@ func renderTermFrames() {
 			data = renderConnectionScreen(cols, rows, lang.T(lang.LinkActive)+"\n"+lang.T(lang.TooSmall))
 		}
 	} else {
+		setSelfMenu(false) // the call's menu goes with the call
 		kind = "status: " + currentStatusMessage()
 		data = renderConnectionScreen(cols, rows, currentStatusMessage())
 	}
@@ -1240,7 +1241,12 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	now := time.Now()
-	localIdle := writeChatPane(&out, local, localAt, localFrameType, noSignalLabel()+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
+	localIdle := false
+	if selfMenuOpen() {
+		writeSelfMenu(&out, canvasTop, videoLeft, vs.selfSlot)
+	} else {
+		localIdle = writeChatPane(&out, local, localAt, localFrameType, noSignalLabel()+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
+	}
 	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel()+" NET", now, canvasTop, peerLeft, vs.peerSlot)
 	hudVideoMask = nil
 	// Animate the noise while a pane has no signal.
@@ -1254,13 +1260,10 @@ func renderChatScreen(cols, rows int) string {
 	if latencyLabel != "" && !framed() { // the window shows it between the panes
 		remoteCaption += " " + joinLabels(pathLabel, latencyLabel)
 	}
-	// A click mutes the sound only (mediactrl); the video goes on.
-	if !mediactrl.CaptureEnabled() {
-		localCaption = "MUTED " + localCaption
-	}
-	if !mediactrl.PlaybackEnabled() {
-		remoteCaption = "MUTED " + remoteCaption
-	}
+	// What is switched off (mediactrl): our microphone and camera, the
+	// peer's sound.
+	localCaption = muteCaption(mediactrl.CaptureEnabled(), mediactrl.VideoEnabled()) + localCaption
+	remoteCaption = muteCaption(mediactrl.PlaybackEnabled(), true) + remoteCaption
 	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
 	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
 	if framed() {
@@ -2187,8 +2190,7 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 			}
 			fg := frame.FgYCbCr[idx*3 : idx*3+3]
 			bg := frame.BgYCbCr[idx*3 : idx*3+3]
-			br, bgCol, bb := ycbcrToRGB(bg[0], bg[1], bg[2])
-			br, bgCol, bb = applyColorFilter(br, bgCol, bb)
+			br, bgCol, bb := videoDisplayRGB(bg[0], bg[1], bg[2])
 			cell := screenCell{bg: [3]int{br, bgCol, bb}, set: true}
 
 			glyphIndex := int(frame.Glyphs[idx])
@@ -2200,8 +2202,7 @@ func writeTextFrameRegion(sb *strings.Builder, frame *codec.TextFrame, startRow,
 			if blank {
 				cell.fg = cell.bg // the foreground of an empty glyph is invisible
 			} else {
-				fr, fgCol, fb := ycbcrToRGB(fg[0], fg[1], fg[2])
-				fr, fgCol, fb = applyColorFilter(fr, fgCol, fb)
+				fr, fgCol, fb := videoDisplayRGB(fg[0], fg[1], fg[2])
 				cell.fg = [3]int{fr, fgCol, fb}
 			}
 			if ansiColors() {
@@ -2328,6 +2329,23 @@ func ycbcrToRGB(y, cb, cr byte) (int, int, int) {
 	g := clampColor(Y - 0.344136*Cb - 0.714136*Cr)
 	b := clampColor(Y + 1.772*Cb)
 	return r, g, b
+}
+
+// A small display-only gamma lift reveals detail in dark video cells. The
+// lookup keeps it cheap when the renderer converts both colours of each glyph.
+const videoDisplayGamma = 0.9
+
+var videoGammaY = func() [256]byte {
+	var table [256]byte
+	for y := range table {
+		table[y] = byte(clampColor(255 * math.Pow(float64(y)/255, videoDisplayGamma)))
+	}
+	return table
+}()
+
+func videoDisplayRGB(y, cb, cr byte) (int, int, int) {
+	r, g, b := ycbcrToRGB(videoGammaY[y], cb, cr)
+	return applyColorFilter(r, g, b)
 }
 
 func applyColorFilter(r, g, b int) (int, int, int) {

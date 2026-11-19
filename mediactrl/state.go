@@ -9,20 +9,22 @@ import (
 type State struct {
 	CaptureEnabled  bool
 	PlaybackEnabled bool
+	VideoEnabled    bool
 }
 
 var (
 	captureEnabled  atomic.Bool
 	playbackEnabled atomic.Bool
+	videoEnabled    atomic.Bool
 )
 
 func init() {
 	captureEnabled.Store(true)
 	playbackEnabled.Store(true)
+	videoEnabled.Store(true)
 }
 
-// CaptureEnabled reports whether the local microphone is on. The camera is
-// not muted: a click on the self view silences the sound only.
+// CaptureEnabled reports whether the local microphone is on.
 func CaptureEnabled() bool {
 	return captureEnabled.Load()
 }
@@ -73,11 +75,31 @@ func TogglePlayback() bool {
 	}
 }
 
+// VideoEnabled reports whether the camera's frames go out (and to the self
+// view). Off, the camera keeps running but its frames are dropped: the peer
+// sees its pane lose the signal.
+func VideoEnabled() bool {
+	return videoEnabled.Load()
+}
+
+// ToggleVideo flips the camera switch and returns the new value.
+func ToggleVideo() bool {
+	for {
+		current := videoEnabled.Load()
+		next := !current
+		if videoEnabled.CompareAndSwap(current, next) {
+			notifyListeners()
+			return next
+		}
+	}
+}
+
 // StateSnapshot returns a copy of the current media switches.
 func StateSnapshot() State {
 	return State{
 		CaptureEnabled:  captureEnabled.Load(),
 		PlaybackEnabled: playbackEnabled.Load(),
+		VideoEnabled:    videoEnabled.Load(),
 	}
 }
 

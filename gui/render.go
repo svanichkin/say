@@ -196,6 +196,9 @@ func (g *game) rasterize(f *codec.TextFrame, pix []byte, w int, tint color.RGBA)
 	rgbOf := g.in.FrameRGB
 	if (g.in.Mono != nil && g.in.Mono()) || monochrome(f, total) {
 		rgbOf = func(y, _, _ byte) (byte, byte, byte) {
+			if g.in.FrameY != nil {
+				y = g.in.FrameY(y)
+			}
 			return byte(int(y) * int(tint.R) / 255), byte(int(y) * int(tint.G) / 255), byte(int(y) * int(tint.B) / 255)
 		}
 	}

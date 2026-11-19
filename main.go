@@ -48,8 +48,8 @@ func main() {
 		run = func() error {
 			return gui.Run(app, gui.Input{
 				Key: ui.KeyInput, Paste: ui.PasteInput, Click: ui.ClickAt, Interrupt: ui.Interrupt,
-				Resized: ui.RequestRedraw, Detail: ui.SetVideoDetail,
-				Frame: ui.PixelFrame, FrameRGB: ui.FrameRGB,
+				Resized: ui.RequestRedraw, Detail: ui.StepVideoDetail,
+				Frame: ui.PixelFrame, FrameRGB: ui.FrameRGB, FrameY: ui.FrameY,
 				Accents: ui.Accents, Chat: ui.ChatAccent, Brick: ui.BrickColour, Mono: ui.AccentMono, Seeds: ui.FrameSeeds, Latency: ui.PeerLatencySnapshot,
 			})
 		}

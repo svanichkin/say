@@ -22,12 +22,15 @@ import (
 //	4  video frames may be range coded instead of zstd (codec frame types 4-7);
 //	   voice datagrams carry bundles of frames, video datagrams a flags byte
 //	   and may carry voice frames (network/udp/audio_bundle.go)
+//	5  every video frame is one range-coded stream, the palette and palette
+//	   patches included, with new models (codec/frames.go; frame types 0-3,
+//	   no zstd)
 //
-// Since protocol 4 older peers are refused: their video formats and loss
-// recovery (periodic keyframes) are gone.
+// Only peers of the current protocol are accepted: the video formats of
+// older ones are gone.
 const (
-	ProtocolVersion    = 4
-	MinProtocolVersion = 4
+	ProtocolVersion    = 5
+	MinProtocolVersion = 5
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

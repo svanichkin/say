@@ -44,18 +44,9 @@ func SetVideoShapeHold(threshold int) {
 	videoShapeHold = max(0, threshold)
 }
 
-// Protocol versions (network/tcp ProtocolVersion) from which a peer decodes
-// palette patches and range-coded change frames.
-const (
-	videoPalettePatchProtocol = 3
-	videoRangeCodingProtocol  = 4
-)
-
 // videoPeer is what the peer's handshake tells about the video it wants.
 type videoPeer struct {
-	palettePatches bool // its decoder knows palette patches
-	rangeCoding    bool // its decoder knows range-coded frames
-	mono           bool // it shows brightness only (a colour filter)
+	mono bool // it shows brightness only (a colour filter)
 }
 
 // initVideoCodec returns the self view and the network encoders. A pane
@@ -69,7 +60,5 @@ func initVideoCodec(peer videoPeer, selfMono bool) (previewEncoder, netEncoder *
 	netEncoder.SetShapeHold(videoShapeHold)
 	previewEncoder.SetHoldDebug(videoHoldDebug)
 	netEncoder.SetHoldDebug(videoHoldDebug)
-	netEncoder.SetPalettePatches(peer.palettePatches)
-	netEncoder.SetRangeCoding(peer.rangeCoding)
 	return
 }

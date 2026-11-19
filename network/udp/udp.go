@@ -468,9 +468,7 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 	voice := &voiceMux{} // voice frames waiting for a datagram, shared with video
 	startSender(&wg, pc, stop, stopCh, getPeer, enc, aec, frameSamples, mediaEpoch, audioMicIn, videoCamIn, videoSelfScreenOut, videoPeerScreenOut, voice,
 		videoPeer{
-			palettePatches: peerProto >= videoPalettePatchProtocol,
-			rangeCoding:    peerProto >= videoRangeCodingProtocol,
-			mono:           peerMono,
+			mono: peerMono,
 		})
 
 	// ======== Video screen layer: queues → local/remote slots ========
@@ -484,8 +482,8 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 					return
 
 				case tv := <-videoSelfScreenOut:
-					if tv == nil {
-						continue
+					if tv == nil || !mediactrl.VideoEnabled() {
+						continue // one encoded just before the camera went off
 					}
 					if ui.SetLocalFrame(tv) {
 						ui.RequestRedraw()
@@ -587,6 +585,8 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 
 			frames                   uint64
 			tEncodeLocal, tEncodeNet time.Duration
+
+			cameraOff bool // mediactrl turned the camera off
 		)
 
 		tick := time.NewTicker(time.Second)
@@ -696,7 +696,21 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				if frame.Data == nil {
 					continue
 				}
-				// Muting (mediactrl) is for the sound only: the camera keeps going.
+				// The camera switched off (mediactrl): its frames go nowhere,
+				// and the peer's pane loses the signal. Back on, a keyframe:
+				// the peer may have dropped what it held meanwhile.
+				if !mediactrl.VideoEnabled() {
+					if !cameraOff {
+						cameraOff = true
+						log.Printf("[video] camera off")
+					}
+					continue
+				}
+				if cameraOff {
+					cameraOff = false
+					netEncoder.ForceKeyframe()
+					log.Printf("[video] camera on")
+				}
 				if fpsLimiter != nil {
 					select {
 					case <-fpsLimiter.C:

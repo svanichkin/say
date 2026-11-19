@@ -70,6 +70,10 @@ const (
 	AwaitConfirm
 	AskMode
 	Stopped
+	MenuMic
+	MenuCam
+	MicMode
+	MicPrivacy
 
 	numKeys
 )
@@ -130,6 +134,10 @@ var en = map[Key]string{
 	AwaitConfirm:  "Awaiting confirmation: %s",
 	AskMode:       "GUI or TUI? [G/t] ",
 	Stopped:       "Say stopped: %v\n\nDetails, if it crashed: %s",
+	MenuMic:       "Microphone",
+	MenuCam:       "Camera",
+	MicMode:       "Microphone mode",
+	MicPrivacy:    "Microphone privacy",
 }
 
 func init() { tables["en"] = en }

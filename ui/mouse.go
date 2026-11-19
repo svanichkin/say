@@ -202,19 +202,21 @@ func handleMouseEvent(evt mouseEvent) {
 		return
 	}
 
+	if selfMenuOpen() {
+		// Any click closes the menu; one on an item does it first.
+		selfMenuClick(evt.col, evt.row)
+		RequestRedraw()
+		return
+	}
+
 	if statusClickHandlePoint(evt.col, evt.row) {
 		return
 	}
 
 	switch viewportForPoint(evt.col, evt.row) {
 	case viewportSelf:
-		enabled := mediactrl.ToggleCapture()
-		if enabled {
-			logs.LogV("[ui] local capture resumed via click")
-		} else {
-			logs.LogV("[ui] local capture paused via click")
-		}
-	case viewportPeer:
+		setSelfMenu(true)
+	case viewportPeer: // the peer's sound, at once
 		enabled := mediactrl.TogglePlayback()
 		if enabled {
 			logs.LogV("[ui] remote playback resumed via click")
@@ -259,8 +261,9 @@ func viewportForPoint(col, row int) viewportID {
 		return viewportNone
 	}
 
-	local, _, _ := localFrameSnapshot()
-	remote, _, _ := remoteFrameSnapshot()
+	if !ChatConnected() {
+		return viewportNone // no call on the screen
+	}
 
 	slots, ok := calcViewportSlots(ts.Cols, ts.Rows)
 	if !ok {
@@ -286,16 +289,11 @@ func viewportForPoint(col, row int) viewportID {
 		return viewportNone
 	}
 	if col >= videoLeft && col < videoLeft+slots.selfSlot.cols {
-		if local != nil {
-			return viewportSelf
-		}
-		return viewportNone
+		return viewportSelf
 	}
 	peerLeft := videoLeft + slots.selfSlot.cols + termGap
 	if col >= peerLeft && col < peerLeft+slots.peerSlot.cols {
-		if remote != nil {
-			return viewportPeer
-		}
+		return viewportPeer
 	}
 	return viewportNone
 }
