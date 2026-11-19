@@ -511,6 +511,8 @@ type Encoder struct {
 	codeGen uint32
 
 	glyphCache *[2]glyphCache // per worker of buildCellData, kept by Restart
+
+	refs encoderRefs // frames with numbers and references (refs.go)
 }
 
 var defaultEncoder = NewEncoder(false, defaultKeyframeInterval, 0, false)
@@ -568,6 +570,8 @@ type Decoder struct {
 	rcFrame   rcFrame
 	rc        rcChange
 	rcChanged []bool
+
+	refs decoderRefs // frames with numbers and references (refs.go)
 }
 
 // Frame types (the byte after the magic); after the header (cols, rows) a
@@ -824,6 +828,18 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	}
 	fgColors = e.emptyFg
 
+	// The peer lost a frame: code against the newest one it holds, or a
+	// keyframe when that one is gone (refs.go).
+	if e.refs.on {
+		if id := e.refs.recover.Swap(-1); id >= 0 {
+			if !e.rewind(uint16(id), cols, rows) {
+				e.forceKey = true
+			}
+		} else if id := e.refs.acked.Swap(-1); id >= 0 {
+			e.rewind(uint16(id), cols, rows) // gone: on from the frame before
+		}
+	}
+
 	keyframe := byte(1)
 	var finalFgIdx []byte
 	var finalBgIdx []byte
@@ -907,7 +923,7 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 				frameType = frameTypeDeltaPatch
 			}
 		}
-		if e.skipEmpty && frameType == frameTypeDelta && changed == 0 {
+		if e.skipEmpty && frameType == frameTypeDelta && changed == 0 && e.refs.showsSame(glyphs[:totalCells], finalFgIdx, finalBgIdx) {
 			// Nothing changed: nothing to send. Returned before any state the
 			// receiver follows (the range coder's models above all) moves.
 			return nil, nil
@@ -925,9 +941,20 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	e.sentCells = totalCells
 
 	out := append(e.payloadBuf[:0], PayloadMagic...)
-	out = append(out, frameType)
+	id, ref := e.refs.next, e.refs.last
+	if e.refs.on {
+		out = append(out, frameType+frameTypeRefs)
+	} else {
+		out = append(out, frameType)
+	}
 	out = binary.LittleEndian.AppendUint16(out, uint16(cols))
 	out = binary.LittleEndian.AppendUint16(out, uint16(rows))
+	if e.refs.on {
+		out = binary.LittleEndian.AppendUint16(out, id)
+		if frameType != frameTypeKey {
+			out = binary.LittleEndian.AppendUint16(out, ref)
+		}
+	}
 	e.rcEnc.reset(e.rcEnc.out)
 	c := rcCoder{e: &e.rcEnc}
 	switch frameType {
@@ -953,6 +980,10 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	out = append(out, e.rcEnc.finish()...)
 	e.payloadBuf = out
 	e.updateKeyframeCounter(keyframe)
+	if e.refs.on {
+		e.refs.frames.slot(id).save(id, cols, rows, e.sentGlyphs, e.sentFg, e.sentBg, e.lastPalette, &e.rc, e.patchedSinceKey)
+		e.refs.last, e.refs.sent, e.refs.next, e.refs.any = id, id, id+1, true
+	}
 	return bytes.Clone(out), nil
 }
 
@@ -1109,14 +1140,32 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	if cols == 0 || rows == 0 || cols > MaxFrameCols || rows > MaxFrameRows {
 		return nil, fmt.Errorf("frame size %dx%d outside 1..%dx%d", cols, rows, MaxFrameCols, MaxFrameRows)
 	}
-	if frameType > frameTypeDeltaPatch {
+	if frameType > frameTypeDeltaPatch+frameTypeRefs {
 		return nil, fmt.Errorf("unknown frame type %d", frameType)
+	}
+	// A frame with a number and, but for a keyframe, a reference (refs.go).
+	withRefs := frameType >= frameTypeRefs
+	var id, ref uint16
+	if withRefs {
+		frameType -= frameTypeRefs
+		n := 4
+		if frameType == frameTypeKey {
+			n = 2
+		}
+		if len(data) < offset+n {
+			return nil, fmt.Errorf("payload too short")
+		}
+		id, ref = binary.LittleEndian.Uint16(data[offset:]), binary.LittleEndian.Uint16(data[offset+n-2:])
+		offset += n
 	}
 	totalCells := cols * rows
 	c := rcCoder{d: &d.rcDec}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if withRefs && frameType != frameTypeKey && !d.rewindLocked(ref, cols, rows) {
+		return nil, ErrNoBase
+	}
 	var glyphs, fgIdx, bgIdx []byte
 	d.rcDec.reset(data[offset:])
 	switch frameType {
@@ -1174,6 +1223,10 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	d.baseFg = append(d.baseFg[:0], fgIdx...)
 	d.baseBg = append(d.baseBg[:0], bgIdx...)
 	d.baseCols, d.baseRows, d.baseValid = cols, rows, true
+	if withRefs {
+		d.refs.frames.slot(id).save(id, cols, rows, glyphs, fgIdx, bgIdx, d.lastPalette, &d.rc, false)
+		d.refs.last, d.refs.any = id, true
+	}
 
 	return &TextFrame{
 		Cols:    cols,
