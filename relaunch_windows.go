@@ -6,14 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// relaunchInWindowsTerminal reopens Say in Windows Terminal when it was
+// relaunchInTerminal reopens Say in Windows Terminal when it was
 // started in a classic console of its own (a double click in Explorer). The
 // classic console (conhost) has no font fallback: every character missing
 // from its font, as many of the picture's block and line characters are,
@@ -24,7 +23,7 @@ import (
 // Nothing happens in Windows Terminal already (WT_SESSION), when the console
 // is shared with a shell (Say was typed into cmd or PowerShell: that window
 // stays the user's choice), or when Windows Terminal is not installed.
-func relaunchInWindowsTerminal() bool {
+func relaunchInTerminal() bool {
 	if os.Getenv("WT_SESSION") != "" || !ownsConsole() {
 		return false
 	}
@@ -94,59 +93,9 @@ func hideConsole() {
 // its own. Taken at start, before hideConsole lets the console go.
 var fromExplorer = ownsConsole()
 
-// askModeDialog asks in a message box, not in the console, when Say was
-// started from Explorer (the console is its own): two buttons, GUI (the
-// window) and TUI (the terminal). asked is false elsewhere; then the
-// console asks.
-func askModeDialog() (window, asked bool) {
-	if !fromExplorer {
-		return false, false
-	}
-	const yesNo, yes = 0x4, 6
-	runtime.LockOSThread() // the hook is for this thread's message box
-	defer runtime.UnlockOSThread()
-	unhook := relabelButtons(map[int]string{6: "GUI", 7: "TUI"}) // IDYES, IDNO
-	ret := messageBox("Say", "", yesNo)
-	unhook()
-	if ret == 0 {
-		return false, false
-	}
-	return ret == yes, true
-}
-
-// relabelButtons renames, by their ids, the buttons of the next message box
-// this thread shows (a message box has no labels of its own choosing): a
-// CBT hook catches the box as it is shown. It returns the unhook.
-func relabelButtons(labels map[int]string) (unhook func()) {
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	setHook := user32.NewProc("SetWindowsHookExW")
-	unhookProc := user32.NewProc("UnhookWindowsHookEx")
-	next := user32.NewProc("CallNextHookEx")
-	setText := user32.NewProc("SetDlgItemTextW")
-	if setHook.Find() != nil || unhookProc.Find() != nil || next.Find() != nil || setText.Find() != nil {
-		return func() {}
-	}
-	const whCBT, hcbtActivate = 5, 5
-	var hook uintptr
-	cb := windows.NewCallback(func(code, wparam, lparam uintptr) uintptr {
-		if int32(code) == hcbtActivate {
-			for id, label := range labels {
-				if p, err := windows.UTF16PtrFromString(label); err == nil {
-					setText.Call(wparam, uintptr(id), uintptr(unsafe.Pointer(p)))
-				}
-			}
-		}
-		r, _, _ := next.Call(hook, code, wparam, lparam)
-		return r
-	})
-	hook, _, _ = setHook.Call(whCBT, cb, 0, uintptr(windows.GetCurrentThreadId()))
-	return func() {
-		if hook != 0 {
-			unhookProc.Call(hook)
-			hook = 0
-		}
-	}
-}
+// doubleClicked reports whether Say was started by a double click in
+// Explorer (not typed into cmd, PowerShell or Windows Terminal).
+func doubleClicked() bool { return fromExplorer }
 
 // showError shows a message box when Say was started from Explorer (the
 // error printed to the console would vanish with it).

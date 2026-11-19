@@ -71,8 +71,13 @@ const (
 )
 
 // videoBandRows is the bands' height in rows (-video-band; 0: one band, the
-// whole grid).
-var videoBandRows = 1
+// whole grid). 0 by default: over Yggdrasil every datagram costs some 300
+// bytes of headers, and bands of a row sent 360 datagrams a second instead of
+// 30, several times the traffic, with the path's delay swinging and the
+// sound's jitter buffer growing to 600 ms; a whole frame per datagram kept it
+// near 130 ms on the same route. 16 rows looked the most whole by eye (Babe's
+// cmd/babecam), the share of the picture in noise about the same from 1 to 32.
+var videoBandRows = 0
 
 // SetVideoBandRows sets the bands' height for future sessions.
 func SetVideoBandRows(rows int) { videoBandRows = max(0, rows) }
@@ -285,7 +290,7 @@ func (s *layerSender) adaptGrid(now time.Duration) {
 	switch {
 	case float64(want) <= videoGridDownAt*float64(s.hiRows) && now-s.lastGrid >= videoGridDownGap:
 		s.setHi(now, want)
-	case float64(want) >= videoGridUpAt*float64(s.hiRows) && now-s.lastGrid >= videoGridUpGap:
+	case want > s.hiRows && (float64(want) >= videoGridUpAt*float64(s.hiRows) || want == s.paneRows) && now-s.lastGrid >= videoGridUpGap:
 		s.setHi(now, min(want, max(s.hiRows+1, int(float64(s.hiRows)*videoGridUpMost))))
 	}
 }

@@ -122,7 +122,7 @@ func (t *yggTransport) ListenUDP(port int) (net.PacketConn, error) {
 		st := t.node.Net.Stack
 		t.statsOnce.Do(func() {
 			go logNetstackDrops(st, t.statsStop)
-			go watchPeers(t.node.Core, t.statsStop) // DEBUG-TEMP
+			go watchPeers(t.node.Core, t.statsStop)
 		})
 	}
 	return pc, err

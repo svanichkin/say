@@ -52,9 +52,19 @@ func TestTermHUDDrawsTheWindowsFrames(t *testing.T) {
 				t.Fatalf("%dx%d: no frame round the pane at column %d", cols, rows, left)
 			}
 		}
+		// The chat's frame under the panes' frames; the captions' row as
+		// wide as the input line in it.
+		canvasCols := cols - 2*termSide
+		frameLeft := max(canvasLeft, videoLeft-1)
+		frameRight := min(canvasLeft+canvasCols, videoLeft+groupCols+1)
+		chatLeft, chatCols := frameLeft+2, frameRight-frameLeft-4
 		captionRow := canvasTop + vs.selfSlot.rows + 1
-		if at(captionRow, videoLeft) != '▐' || at(captionRow, videoLeft+groupCols-1) != '▌' || at(captionRow, videoLeft+1) != '─' {
-			t.Fatalf("%dx%d: the captions' row is not bracketed", cols, rows)
+		if at(captionRow, chatLeft) != '▐' || at(captionRow, chatLeft+chatCols-1) != '▌' || at(captionRow, chatLeft+1) != '─' {
+			t.Fatalf("%dx%d: the captions' row is not bracketed across the input's width", cols, rows)
+		}
+		chatTop := captionRow + 1 + termSeparator
+		if at(chatTop-1, frameLeft) == 0 || at(chatTop-1, frameLeft-1) != 0 && frameLeft > canvasLeft {
+			t.Fatalf("%dx%d: the chat's frame does not start under the panes' (column %d)", cols, rows, frameLeft)
 		}
 		for r := 1; r <= rows; r++ {
 			if at(r, 1) == 0 || at(r, cols) == 0 {

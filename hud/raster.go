@@ -21,6 +21,7 @@ type Pane struct {
 	Remote, Chat bool
 	Colour       color.RGBA
 	Seed         uint64 // the frame's style (see StyleOf)
+	Caption      string // the caption's plate is drawn for it (its text is not)
 }
 
 // Scene is what the HUD draws on a screen.
@@ -69,8 +70,49 @@ func Render(sc Scene, gr Grid, w, h int) *image.RGBA {
 		r.fill(r.img, shapes, 1, solid(HazardOrange))
 		r.fill(r.glow, shapes, glowScale, solid(HazardOrange))
 	}
-	r.addGlow()
+	r.addGlow(glowStrength, func(o int, add [3]float32) {
+		p := r.img.Pix[o*4 : o*4+4]
+		peak := float32(p[3]) / 255
+		for c := 0; c < 3; c++ {
+			v := min(1, float32(p[c])/255+add[c])
+			peak = max(peak, v)
+			p[c] = byte(v*255 + 0.5)
+		}
+		p[3] = byte(min(1, peak)*255 + 0.5)
+	})
 	return r.img
+}
+
+// WindowGlow is how bright the window adds the glow (gui's glowStrength).
+const WindowGlow = 1.6
+
+// RenderLight draws scene as Render does, but keeps the glow apart: light
+// to add (strength times the halo, three bytes a pixel, red first) over
+// everything, as the window adds it, rather than a layer that covers what
+// is under it.
+func RenderLight(sc Scene, gr Grid, w, h int, strength float32) (img *image.RGBA, light []byte) {
+	r := &raster{
+		img:  image.NewRGBA(image.Rect(0, 0, w, h)),
+		glow: image.NewRGBA(image.Rect(0, 0, max(1, int(float64(w)*glowScale)), max(1, int(float64(h)*glowScale)))),
+	}
+	if sc.Border {
+		r.border(gr, w, h, sc.BorderSeed)
+	}
+	for _, p := range sc.Panes {
+		r.frame(gr, p)
+	}
+	for _, b := range sc.Brackets {
+		shapes := BracketShapes(gr, b)
+		r.fill(r.img, shapes, 1, solid(HazardOrange))
+		r.fill(r.glow, shapes, glowScale, solid(HazardOrange))
+	}
+	light = make([]byte, w*h*3)
+	r.addGlow(strength, func(o int, add [3]float32) {
+		for c := 0; c < 3; c++ {
+			light[o*3+c] = byte(min(1, add[c])*255 + 0.5)
+		}
+	})
+	return r.img, light
 }
 
 type raster struct {
@@ -161,7 +203,7 @@ func (r *raster) fill(dst *image.RGBA, polys [][]Pt, scale float64, p paint) {
 
 // frame draws a pane's frame as the window's frameShapes does.
 func (r *raster) frame(gr Grid, p Pane) {
-	fr := FrameOf(gr, p.Rect, p.Remote, "", StyleOf(p.Seed, p.Chat))
+	fr := FrameOf(gr, p.Rect, p.Remote, p.Caption, StyleOf(p.Seed, p.Chat))
 	c := p.Colour
 	u := float64(gr.CW)
 	inner, outer, trace := Widths(u)
@@ -247,9 +289,10 @@ func (h hazard) at(x, y int) color.RGBA {
 }
 
 // addGlow blurs the glow layer (three box blurs across and down, close to
-// a Gaussian of glowSigma) and adds it, scaled up, onto the image: over the
-// transparent parts as light of its own.
-func (r *raster) addGlow() {
+// a Gaussian of glowSigma), scales it up (bilinear, as the window does) and
+// hands each lit pixel's light, times strength, to emit (o: the pixel's
+// index in the image).
+func (r *raster) addGlow(strength float32, emit func(o int, add [3]float32)) {
 	gw, gh := r.glow.Bounds().Dx(), r.glow.Bounds().Dy()
 	n := gw * gh
 	ch := [4][]float32{}
@@ -259,42 +302,9 @@ func (r *raster) addGlow() {
 			ch[c][i] = float32(r.glow.Pix[i*4+c]) / 255
 		}
 	}
-	// Box widths whose three passes make a Gaussian of glowSigma.
-	radius := int((math.Sqrt(12*glowSigma*glowSigma/3+1) - 1) / 2)
-	tmp := make([]float32, max(gw, gh))
-	blur := func(v []float32, start, count, step int) {
-		for i := 0; i < count; i++ {
-			tmp[i] = v[start+i*step]
-		}
-		norm := 1 / float32(2*radius+1)
-		var acc float32
-		for k := -radius; k <= radius; k++ {
-			if k >= 0 && k < count {
-				acc += tmp[k]
-			}
-		}
-		for i := 0; i < count; i++ {
-			v[start+i*step] = acc * norm
-			if j := i + radius + 1; j < count {
-				acc += tmp[j]
-			}
-			if j := i - radius; j >= 0 {
-				acc -= tmp[j]
-			}
-		}
-	}
 	for c := range ch {
-		for range 3 {
-			for y := 0; y < gh; y++ {
-				blur(ch[c], y*gw, gw, 1)
-			}
-			for x := 0; x < gw; x++ {
-				blur(ch[c], x, gh, gw)
-			}
-		}
+		BlurGlow(ch[c], gw, gh)
 	}
-	// Add it on (bilinear, as the window scales it up). The image is
-	// premultiplied: light added over transparency becomes coverage.
 	w, h := r.img.Bounds().Dx(), r.img.Bounds().Dy()
 	xs := make([]struct {
 		x0, x1 int
@@ -318,21 +328,52 @@ func (r *raster) addGlow() {
 			for c := 0; c < 3; c++ {
 				v := (ch[c][r0+sx.x0]*(1-sx.t)+ch[c][r0+sx.x1]*sx.t)*(1-ty) +
 					(ch[c][r1+sx.x0]*(1-sx.t)+ch[c][r1+sx.x1]*sx.t)*ty
-				add[c] = v * glowStrength
+				add[c] = v * strength
 				lit = lit || add[c] >= 1.0/255
 			}
-			if !lit {
-				continue
+			if lit {
+				emit(y*w+x, add)
 			}
-			o := (y*w + x) * 4
-			p := r.img.Pix[o : o+4]
-			peak := float32(p[3]) / 255
-			for c := 0; c < 3; c++ {
-				v := min(1, float32(p[c])/255+add[c])
-				peak = max(peak, v)
-				p[c] = byte(v*255 + 0.5)
+		}
+	}
+}
+
+// GlowRadius is the box radius of BlurGlow's passes: three of them make a
+// Gaussian of glowSigma.
+var GlowRadius = int((math.Sqrt(12*glowSigma*glowSigma/3+1) - 1) / 2)
+
+// BlurGlow blurs a channel of a glow layer (w x h, half the image's size)
+// in place, as the window's glow: three box blurs across and down.
+func BlurGlow(v []float32, w, h int) {
+	radius := GlowRadius
+	tmp := make([]float32, max(w, h))
+	blur := func(start, count, step int) {
+		for i := 0; i < count; i++ {
+			tmp[i] = v[start+i*step]
+		}
+		norm := 1 / float32(2*radius+1)
+		var acc float32
+		for k := -radius; k <= radius; k++ {
+			if k >= 0 && k < count {
+				acc += tmp[k]
 			}
-			p[3] = byte(min(1, peak)*255 + 0.5)
+		}
+		for i := 0; i < count; i++ {
+			v[start+i*step] = acc * norm
+			if j := i + radius + 1; j < count {
+				acc += tmp[j]
+			}
+			if j := i - radius; j >= 0 {
+				acc -= tmp[j]
+			}
+		}
+	}
+	for range 3 {
+		for y := 0; y < h; y++ {
+			blur(y*w, w, 1)
+		}
+		for x := 0; x < w; x++ {
+			blur(x, h, w)
 		}
 	}
 }

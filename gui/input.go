@@ -26,4 +26,6 @@ type Input struct {
 	Mono    func() bool                      // -bw: each pane in its owner's colour
 	Seeds   func() (self, peer, chat uint64) // the frames' seeds
 	Latency func() time.Duration             // the round trip to the peer (0: unknown)
+
+	Place string // the file keeping the window's place and size ("": none)
 }

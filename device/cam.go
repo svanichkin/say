@@ -20,6 +20,14 @@ type CameraFrame struct {
 // StartCameraStream starts camera capture using gocam and returns a frame channel.
 // Frames are center-cropped to CIF aspect and resized to 352x288 before being sent to consumers.
 func StartCameraStream(ctx context.Context) (<-chan CameraFrame, error) {
+	if p := cameraFile.Load(); p != nil && *p != "" {
+		src, err := startFileCamera(ctx, *p)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("[video] the camera is the file %s", *p)
+		return cameraFrames(ctx, src), nil
+	}
 	src, err := gocam.StartStream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("camera start: %w", err)

@@ -58,9 +58,18 @@ func Run(app func() error, in Input) error {
 	mw, mh := ebiten.Monitor().Size()
 	w := min(int(float64(Cols*g.cw)/g.scale), mw-marginW)
 	h := min(int(float64(Rows*g.ch)/g.scale), mh-marginH)
+	minW, minH := int(float64(minCols*g.cw)/g.scale), int(float64(minRows*g.ch)/g.scale)
 	ebiten.SetWindowTitle("Say")
+	setWindowIcon()
 	ebiten.SetWindowSize(w, h)
-	ebiten.SetWindowSizeLimits(int(float64(minCols*g.cw)/g.scale), int(float64(minRows*g.ch)/g.scale), -1, -1)
+	g.place.path = in.Place
+	if p, ok := loadPlace(in.Place); ok {
+		// Where it was closed, as large (no smaller than the window can be).
+		ebiten.SetWindowSize(max(p.W, minW), max(p.H, minH))
+		ebiten.SetWindowPosition(p.X, p.Y)
+		g.place.saved, g.place.seen = p, p
+	}
+	ebiten.SetWindowSizeLimits(minW, minH, -1, -1)
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowClosingHandled(true)
 	ebiten.SetRunnableOnUnfocused(true)
@@ -77,6 +86,7 @@ type game struct {
 	done      atomic.Bool
 	closing   bool
 	closingAt time.Time
+	place     placeKeeper // the window's place, kept for the next start
 
 	// Cell size and font, in device pixels, for the monitor's scale.
 	scale  float64
@@ -126,6 +136,7 @@ func (g *game) Update() error {
 	if ebiten.IsWindowBeingClosed() && !g.closing {
 		g.closing = true
 		g.closingAt = time.Now()
+		g.place.flush()
 		log.Printf("[gui] the window is being closed")
 		if g.in.Interrupt != nil {
 			g.in.Interrupt() // Say hangs up and stops; the window goes with it
@@ -136,6 +147,9 @@ func (g *game) Update() error {
 		// process (Run returns).
 		log.Printf("[gui] Say did not stop within %v of closing the window: quitting", closeWait)
 		return ebiten.Termination
+	}
+	if !g.closing {
+		g.place.update(time.Now())
 	}
 	g.keys()
 	g.mouse()

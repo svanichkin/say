@@ -62,13 +62,16 @@ external Yggdrasil daemon or web stack.
   latency (especially Bluetooth) can differ from this estimate.
 - Video in a two-pane terminal layout (square panes), synchronised with the
   audio of the same peer.
-- **Video in bands that do not stop on loss.** The picture goes in bands
-  of rows (one row each by default, `-video-band`), each band a stream of
-  its own in its own small datagram: a lost datagram breaks its band only,
-  which shows the no-signal noise until it recovers (from the newest frame
-  the receiver decoded, no keyframe). After a loss every frame of a band is
-  coded against one the receiver acknowledged, so a lost datagram is lost
-  alone.
+- **Video that does not stop on loss.** Each frame goes whole in one
+  datagram by default; `-video-band N` cuts the picture into bands of N
+  rows, each a stream of its own in its own datagram, so that a lost
+  datagram breaks its band only, which shows the no-signal noise until it
+  recovers. Either way a frame recovers from the newest one the receiver
+  decoded (no keyframe), and after a loss every frame is coded against one
+  the receiver acknowledged, so a lost datagram is lost alone. Bands cost
+  more: over Yggdrasil every datagram carries some 300 bytes of headers, and
+  bands of a row sent 360 datagrams a second instead of 30, with the path's
+  delay swinging and the sound waiting longer.
 - **Rate control as WebRTC's.** The receiver reports every 100 ms what
   arrived, its loss and the standing queue on the way; the sender cuts its
   rate to below what arrived when a queue stands and less arrives than went,
@@ -282,6 +285,35 @@ make build-windows/amd64 GOTAGS=debug        # any target of make build-all
 go build -tags debug .                       # without make
 ```
 
+### macOS app
+
+`make app` puts `Say.app` into `bin/` (`make app GOTAGS=debug` for a debug
+build). Started from it (a double click, Launchpad) Say opens its window; the
+bare `say` is the terminal utility and works in a terminal, however started.
+
+### Plan 9 window
+
+Started in a rio window of its own (not in `vt`; drawterm too), Say draws
+the same window as on macOS and Windows through `/dev/draw`: the video panes
+as pictures in their neon frames, the border, the captions, the chat. It is
+drawn by the CPU (no Ebitengine there), at Unifont's 8x16 cells, and only
+what changed is sent. Keys come from `/dev/cons` (Del or Ctrl-C stop Say),
+clicks from `/dev/mouse`; the window can be resized. In `vt` Say stays the
+terminal utility, in 16 colours.
+
+### Linux and BSD desktop
+
+`make install-desktop` puts Say into the desktop's menu for this user (a
+launcher and the icon, `say` must be on the `PATH`); the launcher opens Say in
+a terminal. Started without a terminal in a graphical session (a double click
+in a file manager) Say reopens itself in one: `$TERMINAL`, then
+`x-terminal-emulator`, then the common terminals (GNOME's, Konsole, Xfce's,
+kitty, Ghostty, Alacritty, WezTerm, foot, xterm). A package puts the same files
+into `/usr/share/applications` and `/usr/share/icons/hicolor`.
+The bundle has the camera and microphone usage strings macOS asks for. It is
+signed ad hoc, so macOS may ask for the camera and the microphone again after
+each new build.
+
 ## Configuration
 
 Say stores its configuration under your OS config directory: on Linux this is
@@ -376,12 +408,14 @@ codec on both sides). Relevant CLI switches:
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is coded, and the rate control sends what the path allows.
 - `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `10`, `0` disables; higher is calmer, but low-contrast details start to lag). N holds up to 88x36 cells, the camera's own pixels; a larger frame holds harder, up to 2N at 160x65: finer cells mostly carry the camera's noise there (160x65 at 2N takes about 40% fewer bytes than at N and looks the same).
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
-- `-video-band=N` – the height of the video's bands in rows (default `1`; `0`: one band, the whole picture). Each band is its own stream in its own datagrams: a loss breaks only its band, shown as noise until it recovers. Taller bands send fewer, larger datagrams.
+- `-video-band=N` – the height of the video's bands in rows (default `0`: one band, the whole picture in one datagram). Each band is its own stream in its own datagrams: a loss breaks only its band, shown as noise until it recovers. Shorter bands send more, smaller datagrams, each with Yggdrasil's headers: more traffic and more delay.
+- `-netsim[=NAME]` – for testing (bare: `heavy`, the worst): this side's outgoing sound and video go through a simulated bad path on top of the real one, and the peer shows what arrives. `loss`: 3% loss in bursts; `narrow`: a link of 1000 kbit/s narrowing to 150 for 10 s of every 30; `switch`: a path switch every 40 s (1 s of outage, the round trip up to 6 s and back down to about 200 ms over some 15 s); `mixed`: these in turn over 60 s; `heavy`: all at once (300 kbit/s dropping to 100, 3% loss in bursts, a switch every 30 s). Datagrams wait in the link's queue (dropped past 1 s), take half the round trip plus up to 50 ms more, and are lost by 1400-byte fragment. Set it on both peers for both ways; the control connection is not touched.
 - `-camera /dev/videoN` – use this camera device only (Linux). Without it every `/dev/video*` capture node is tried in turn. Use it when a phone or board exposes several nodes, for example a `v4l2loopback` device that another program (such as a PinePhone camera service) fills: `-camera /dev/video0`.
+- `-camera clip.y4m` (or `clip.frames`) – a video file as the camera, in a loop at its own rate: where there is no camera (a virtual machine, Plan 9 without a USB one) or for a repeatable picture. `.y4m` is uncompressed YUV4MPEG2, what video test sets come in and ffmpeg writes (`ffmpeg -i clip.mp4 -vf scale=352:288 -pix_fmt yuv420p clip.y4m`); `.frames` is what `go run ./cmd/recordframes` records from a camera.
 - `-colors 16|truecolor` – colour output. `16` uses only the 16 ANSI colours (8 for backgrounds), with dithering, for terminals without 24-bit colour such as Plan 9's `vt`; it is the default on Plan 9, `truecolor` elsewhere.
 - `-nomic` – listen only: the microphone is not opened and no audio is sent (handy for testing two instances on one machine without an echo loop).
 - `-lang <code>` – the language Say speaks to you (`-lang ru`, `-lang ja`, …). Without it Say takes the first of the system's preferred languages that it knows, else English. It knows en, ru, uk, be, kk, uz, az, ka, hy, de, fr, es, pt, it, nl, pl, cs, sk, sl, hr, sr, bg, ro, hu, fi, sv, nb, da, et, lv, lt, el, tr, id, ms, vi, zh, zh-Hant, ja and ko.
-- `-gui` – a window instead of the terminal (macOS and Windows for now); `-text` – the terminal. With neither, Say asks at start which one, where the window can be shown and Say was started in a terminal. The window draws the same interface with the system's monospace font: video panes and the chat in neon HUD frames (their shapes follow each person's address), glints running along them, a hazard-striped border. Cmd+ and Cmd- (Ctrl on Windows) change video detail by one row and proportionally one or two columns per press. Clean incoming video adds one such step after 10 seconds, then every 2 seconds; loss removes one step. Detail can reach twice the pane size, within the codec's 160x80-cell limit.
+- `-gui` – a window instead of the terminal (macOS, Windows, Plan 9); `-text` – the terminal. With neither: on macOS `Say.app` opens its window and the bare `say` is the terminal utility, however it is started; on Windows a double click in Explorer (or a shortcut) opens the window and `say` typed in cmd, PowerShell or Windows Terminal works in it, its output redirected or not; on Plan 9 `say` in a rio window of its own (or drawterm's) draws the window, and in `vt` it is the terminal utility. Over SSH always the terminal. The window opens where it was closed, as large (kept beside the configuration, `config-window.json` for `config.json`). The window draws the same interface with the system's monospace font: video panes and the chat in neon HUD frames (their shapes follow each person's address), glints running along them, a hazard-striped border. Cmd+ and Cmd- (Ctrl on Windows) change video detail by one row and proportionally one or two columns per press. Clean incoming video adds one such step after 10 seconds, then every 2 seconds; loss removes one step. Detail can reach twice the pane size, within the codec's 160x80-cell limit.
 - `-nolan` – turn off Yggdrasil LAN discovery (multicast peering in the local network).
 - `-nodirect` – no direct calls. By default a call goes directly between the two machines, without public Yggdrasil peers in between: they connect through their NATs (UDP hole punching, as WebRTC does) for lower latency and fewer delay spikes and drop-outs, and fall back to the Yggdrasil route when the direct link does not get through or turns out worse. Each side then sees the other's public IP address, which Yggdrasil otherwise hides, and Say asks public STUN servers (Google, Cloudflare, Sipnet) for its own. With `-nodirect` on either side the call stays on its Yggdrasil route and the IP addresses stay hidden.
 - `-nowt` – Windows: stay in the classic console. Started by a double click in a console of its own, Say reopens itself in Windows Terminal when it is installed: the classic console has no font fallback, so it shows the picture's block and line characters as boxes.

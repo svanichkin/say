@@ -68,7 +68,6 @@ const (
 	NotRegular
 	PeerSaid
 	AwaitConfirm
-	AskMode
 	Stopped
 	MenuMic
 	MenuCam
@@ -132,7 +131,6 @@ var en = map[Key]string{
 	NotRegular:    "only regular files can be sent",
 	PeerSaid:      "peer: %s",
 	AwaitConfirm:  "Awaiting confirmation: %s",
-	AskMode:       "GUI or TUI? [G/t] ",
 	Stopped:       "Say stopped: %v\n\nDetails, if it crashed: %s",
 	MenuMic:       "Microphone",
 	MenuCam:       "Camera",

@@ -33,7 +33,9 @@ func setTermHUD(on bool) {
 	}
 	termHUD = on
 	if on {
-		termBorder, termSeparator = 2, 3
+		// A row less under the captions than the window has: the terminal
+		// shows no glow there, and two blank rows read as a gap.
+		termBorder, termSeparator = 2, 2
 		termSide, termGap = 4, 6
 	} else {
 		termBorder, termSeparator = 1, 1

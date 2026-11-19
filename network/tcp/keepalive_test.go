@@ -29,3 +29,23 @@ func TestPongCarriesAudioAndVideoLoss(t *testing.T) {
 		t.Fatal("legacy 9-byte pong rejected")
 	}
 }
+
+// The call is lost after keepaliveTimeout without anything from the peer;
+// its media arriving keeps the call alive while the pongs are held up.
+func TestKeepaliveExpiresOnlyInSilence(t *testing.T) {
+	start := time.Now()
+	ka := &tcpKeepalive{lastPong: start, timeout: keepaliveTimeout, pending: map[uint64]time.Time{}}
+	if ka.expired(start.Add(keepaliveTimeout - time.Second)) {
+		t.Fatal("expired before the timeout")
+	}
+	if !ka.expired(start.Add(keepaliveTimeout + time.Second)) {
+		t.Fatal("not expired after the timeout in silence")
+	}
+	ui.NotePeerHeard() // a packet of the call, now
+	if ka.expired(time.Now().Add(keepaliveTimeout - time.Second)) {
+		t.Fatal("expired while the peer's media comes in")
+	}
+	if !ka.expired(time.Now().Add(keepaliveTimeout + time.Second)) {
+		t.Fatal("not expired after the media stopped too")
+	}
+}

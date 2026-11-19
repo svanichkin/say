@@ -35,8 +35,16 @@ daemon with clients attached over a socket can be added later without a rewrite.
   do not get through), Settings, Quit.
 - A window but no tray (a Linux desktop without one, if Say gets a window
   there): the window only; closing it quits.
-- No window (Linux, BSD, Plan 9 today, or `-text`): the terminal, as now.
-- The "GUI or TUI?" question at start goes away; `-gui` / `-text` choose.
+- No window (Linux, BSD, or `-text`): the terminal, as now.
+- Done (Plan 9): the window through /dev/draw, drawn by the CPU (gui/soft*.go,
+  gui/*_plan9.go), with the pixel panes, frames, border and captions; not yet
+  tried in 9front.
+- Done: the "GUI or TUI?" question at start is gone. Typed in a terminal Say
+  works in it; started as a program (a double click in Explorer, no terminal)
+  it opens its window; `-gui` / `-text` choose; over SSH the terminal. The
+  window keeps its place and size per configuration.
+- Done (macOS): Say.app (`make app`, with the icon) is the program and opens
+  its window; the bare `say` is the terminal utility however started.
 - Started from a terminal into the tray, Say detaches from it, so closing the
   terminal does not end it.
 - One Say per configuration (the lock): a second start asks the running one to

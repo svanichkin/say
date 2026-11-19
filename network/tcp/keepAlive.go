@@ -18,7 +18,12 @@ const (
 	pongPayloadLen    = 10 // ping id, audio loss %, video loss %
 	pongLegacyLen     = 9  // older peers report audio loss only
 	keepaliveInterval = 2 * time.Second
-	keepaliveTimeout  = 30 * time.Second
+	// keepaliveTimeout: nothing from the peer this long (no pong, no
+	// packet of the call) and the call is lost; the caller dials again.
+	// The worst stall seen on a live path (a queued direct link) kept
+	// pongs away 8.2 s, with the media trickling through; a dead path
+	// waited out 30 s before, with the picture frozen.
+	keepaliveTimeout = 10 * time.Second
 )
 
 // tcpKeepalive tracks outstanding ping timestamps using the local monotonic clock.
@@ -112,11 +117,17 @@ func (ka *tcpKeepalive) acceptPong(payload []byte) (time.Duration, float64, bool
 	return rtt, loss, true
 }
 
-// expired reports whether a matching pong has been missing for too long.
+// expired reports whether nothing came from the peer for too long: no
+// matching pong and no packet of the call (TCP stalls in retransmissions
+// on a lossy path while the media still gets through).
 func (ka *tcpKeepalive) expired(now time.Time) bool {
 	ka.mu.Lock()
-	defer ka.mu.Unlock()
-	return now.Sub(ka.lastPong) > ka.timeout
+	last := ka.lastPong
+	ka.mu.Unlock()
+	if heard := ui.PeerHeardAt(); heard.After(last) {
+		last = heard
+	}
+	return now.Sub(last) > ka.timeout
 }
 
 // startTCPKeepalive sends periodic pings and closes the connection if no matching pong arrives.
@@ -180,7 +191,7 @@ func startTCPKeepalive(ctx context.Context, conn net.Conn, interval, timeout tim
 				return
 			case <-ticker.C:
 				if ka.expired(time.Now()) {
-					log.Printf("[keepalive] timeout waiting for pong (conn=%T)", conn)
+					log.Printf("[keepalive] nothing from the peer for %v: the call is lost", ka.timeout)
 					_ = conn.Close()
 					return
 				}

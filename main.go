@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -17,11 +16,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/svanichkin/say/conf"
 	"github.com/svanichkin/say/dbg"
+	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/gui"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/network"
@@ -37,12 +35,13 @@ const donateMonero = "Monero: 41uoDd1PNKm7j4LaBHHZ77ZPbEwEJzaRHhjEqFtKLZeWjd4sNf
 const support = "Say support: https://github.com/svanichkin/say"
 
 func main() {
+	os.Args = dropProcessSerial(os.Args)
 	lang.Init(os.Args[1:])
 	crashLog := keepCrashes()
 	run := run
 	if chooseGUI(os.Args[1:]) {
-		// The pixel window takes the main thread; Say runs beside it and
-		// draws into it as into a terminal.
+		// The window takes the main thread; Say runs beside it and draws
+		// into it as into a terminal.
 		ui.SetPixelMode()
 		app := run
 		run = func() error {
@@ -51,6 +50,7 @@ func main() {
 				Resized: ui.RequestRedraw, Detail: ui.StepVideoDetail,
 				Frame: ui.PixelFrame, FrameRGB: ui.FrameRGB, FrameY: ui.FrameY,
 				Accents: ui.Accents, Chat: ui.ChatAccent, Brick: ui.BrickColour, Mono: ui.AccentMono, Seeds: ui.FrameSeeds, Latency: ui.PeerLatencySnapshot,
+				Place: windowPlacePath(os.Args[1:]),
 			})
 		}
 	}
@@ -88,73 +88,92 @@ func keepCrashes() string {
 
 // chooseGUI decides between the window and the terminal before anything
 // starts (the window has to be set up first; the arguments are parsed
-// properly later). -gui and -text decide; with neither, where the window
-// can be shown and Say runs in a terminal, it asks. The answer is added to
-// the arguments, so that a relaunch in Windows Terminal does not ask again.
+// properly later). -gui and -text decide. With neither: started in a
+// terminal, Say works in it; started as a program (a double click in
+// Explorer, which gives Say a console of its own; an app bundle or a
+// launcher, with no terminal at all), it opens its window where this build
+// has one. Over SSH always the terminal (a window would open on the remote
+// machine's screen, if at all). The choice is added to the arguments, so that
+// what parses them later knows it.
 func chooseGUI(args []string) bool {
 	switch {
 	case flagGiven(args, "gui", "gui=true", "gui=1", "gui=on"):
 		return true
 	case flagGiven(args, "text", "gui=false", "gui=0", "gui=off"):
 		return false
-	case !gui.Available() || flagGiven(args, "version", "donate", "support", "help", "h"):
+	case !gui.Available() || overSSH() || flagGiven(args, "version", "donate", "support", "help", "h"):
 		return false
-	case !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())):
-		return false
-	}
-	window, asked := askModeDialog() // Windows, started from Explorer
-	if !asked {
-		fmt.Print(lang.T(lang.AskMode))
-		window = askModeKey()
-		if window {
-			fmt.Println("GUI")
-		} else {
-			fmt.Println("TUI")
-		}
-	}
-	if !window {
-		os.Args = append(os.Args, "-text")
+	case !startedAsProgram():
 		return false
 	}
 	os.Args = append(os.Args, "-gui")
-	hideConsole() // Windows: the console it was started in is not needed
+	hideConsole() // Windows: the console Explorer opened for Say is not needed
 	return true
 }
 
-// askModeKey takes the answer as a single key, without Enter: g (or Enter)
-// for the window, t for the terminal; the same keys on a Russian layout
-// (п, е) too. Other keys are ignored; Ctrl+C quits. Where the terminal
-// cannot read single keys, a line is read instead.
-func askModeKey() (window bool) {
-	fd := int(os.Stdin.Fd())
-	old, err := term.MakeRaw(fd)
-	if err != nil {
-		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "t", "tui", "text", "т", "е":
+// startedAsProgram reports whether Say was started as a program rather than
+// as the terminal utility. On macOS the program is Say.app: started from the
+// bundle; the bare say is the utility, in a terminal however it is started
+// (a double click on it opens Terminal anyway). On Windows a double click in
+// Explorer (a console of its own); typed in cmd, PowerShell or Windows
+// Terminal it is the utility, its output redirected or not. On Plan 9 a rio
+// window of its own, not vt. Elsewhere there is no window yet: no terminal
+// at all.
+var startedAsProgram = func() bool {
+	switch runtime.GOOS {
+	case "windows":
+		return doubleClicked()
+	case "plan9":
+		// In vt (it sets $TERM) Say is the terminal utility; in a rio
+		// window of its own (or drawterm's) it draws the window.
+		return os.Getenv("TERM") == ""
+	case "darwin":
+		exe, err := os.Executable()
+		if err != nil {
 			return false
 		}
-		return true
-	}
-	defer term.Restore(fd, old)
-	buf := make([]byte, 8)
-	for {
-		n, err := os.Stdin.Read(buf)
-		if err != nil || n == 0 {
-			return true
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
 		}
-		r, _ := utf8.DecodeRune(buf[:n])
-		switch unicode.ToLower(r) {
-		case 'g', 'п', '\r', '\n':
-			return true
-		case 't', 'е', 'т':
-			return false
-		case 3: // Ctrl+C
-			term.Restore(fd, old)
-			fmt.Println()
-			os.Exit(130)
+		return inAppBundle(exe)
+	}
+	return !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// inAppBundle reports whether the executable at path is a macOS app
+// bundle's (…/Say.app/Contents/MacOS/say).
+func inAppBundle(path string) bool {
+	dir := filepath.Dir(path)
+	return filepath.Base(dir) == "MacOS" && filepath.Base(filepath.Dir(dir)) == "Contents" &&
+		strings.HasSuffix(filepath.Dir(filepath.Dir(dir)), ".app")
+}
+
+// windowPlacePath is the file that keeps the window's place, beside the
+// configuration: config.json keeps it in config-window.json.
+func windowPlacePath(args []string) string {
+	cfg := conf.ConfigPathFromArgs(args)
+	if cfg == "" {
+		return ""
+	}
+	return strings.TrimSuffix(cfg, filepath.Ext(cfg)) + "-window.json"
+}
+
+// dropProcessSerial drops the -psn_… argument that macOS adds when Finder
+// starts an app bundle (older versions do): it is not Say's, and an unknown
+// flag would stop it.
+func dropProcessSerial(args []string) []string {
+	out := args[:0:0]
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-psn_") {
+			out = append(out, a)
 		}
 	}
+	return out
+}
+
+// overSSH reports whether Say was started in an SSH session.
+func overSSH() bool {
+	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != ""
 }
 
 // flagGiven reports whether one of the flags (without dashes) is among the
@@ -193,8 +212,8 @@ func run() (err error) {
 		printSupportInfo()
 		return nil
 	}
-	if !opts.NoWT && !opts.GUI && relaunchInWindowsTerminal() {
-		return nil // Say goes on in a Windows Terminal window
+	if !opts.NoWT && !opts.GUI && relaunchInTerminal() {
+		return nil // Say goes on in a terminal window of its own
 	}
 	// One configuration (one Yggdrasil address) runs once: two copies with
 	// it reset each other's calls.
@@ -208,7 +227,10 @@ func run() (err error) {
 	if err := udptransport.SetAudioCodec(opts.AudioCodec); err != nil {
 		return err
 	}
-	if opts.Camera != "" {
+	switch {
+	case device.IsCameraFile(opts.Camera):
+		device.SetCameraFile(opts.Camera) // a clip as the camera
+	case opts.Camera != "":
 		// gocam opens this device only (Linux; e.g. a v4l2loopback node).
 		os.Setenv("GOCAM_DEVICE", opts.Camera)
 	}
@@ -281,6 +303,9 @@ func run() (err error) {
 	udptransport.SetSystemVoice(opts.SysAudio)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoBandRows(opts.VideoBand)
+	if err := udptransport.SetNetSim(opts.NetSim); err != nil {
+		return err
+	}
 	udptransport.SetVideoHoldDebug(opts.HoldDebug)
 	network.SetLAN(!opts.NoLAN)
 	network.SetDirect(!opts.NoDirect)

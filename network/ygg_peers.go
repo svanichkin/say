@@ -1,7 +1,7 @@
 package network
 
-// DEBUG-TEMP: Yggdrasil's peers and the clock, traced for unreliable calls.
-// Remove once calls are reliable.
+// Yggdrasil's peers and the clock, logged as they change, in every build: a
+// call that stops hearing its peer tells whether our side lost its links.
 
 import (
 	"encoding/hex"
@@ -35,7 +35,7 @@ func watchPeers(c *core.Core, stop <-chan struct{}) {
 			return
 		case now := <-tick.C:
 			if jump := now.Sub(last); jump > 6*time.Second {
-				log.Printf("[debug] clock: %v passed in a 2 s tick (the system slept or the process stalled)", jump.Round(time.Millisecond))
+				log.Printf("[clock] %v passed in a 2 s tick (the system slept or the process stalled)", jump.Round(time.Millisecond))
 			}
 			last = now
 			cur := map[string]state{}
@@ -79,7 +79,7 @@ func watchPeers(c *core.Core, stop <-chan struct{}) {
 						up++
 					}
 				}
-				log.Printf("[debug] ygg peers %d up of %d: %s", up, len(cur), strings.Join(changes, "; "))
+				log.Printf("[ygg] peers %d up of %d: %s", up, len(cur), strings.Join(changes, "; "))
 			}
 			prev = cur
 		}

@@ -31,7 +31,7 @@ TARGETS := \
 	plan9/386 \
 	plan9/arm
 
-.PHONY: build debug run test tidy fmt clean build-all $(TARGETS:%=build-%)
+.PHONY: build debug app icons install-desktop run test tidy fmt clean build-all $(TARGETS:%=build-%)
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -40,6 +40,27 @@ build:
 # debug: a debug build for this machine (see README, "Debug build").
 debug:
 	$(MAKE) build GOTAGS=debug
+
+# icons: draws Say's icon (cmd/sayicon) into assets/icon and gui/icon, and
+# puts it into the Windows executable (rsrc_windows_amd64.syso; needs mingw).
+icons:
+	$(GO) run ./cmd/sayicon -out assets/icon -gui gui/icon
+	sh scripts/windows-icon.sh
+
+# install-desktop: Say in the desktop's menu (Linux, BSD): its launcher and
+# icon for this user. The launcher opens Say in a terminal; say must be on
+# the PATH.
+DATA_HOME ?= $(HOME)/.local/share
+install-desktop:
+	mkdir -p $(DATA_HOME)/applications $(DATA_HOME)/icons/hicolor/256x256/apps $(DATA_HOME)/icons/hicolor/48x48/apps
+	install -m 644 packaging/linux/say.desktop $(DATA_HOME)/applications/say.desktop
+	install -m 644 gui/icon/icon-256.png $(DATA_HOME)/icons/hicolor/256x256/apps/say.png
+	install -m 644 gui/icon/icon-48.png $(DATA_HOME)/icons/hicolor/48x48/apps/say.png
+
+# app: Say.app for macOS in bin/: started from it (a double click) Say opens
+# its window. GOTAGS=debug for a debug build.
+app: build
+	sh scripts/macos-app.sh $(HOST_BIN) "$(VERSION)" $(BIN_DIR)
 
 run:
 	$(GO) run .

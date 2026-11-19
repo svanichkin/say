@@ -2,8 +2,25 @@ package ui
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// peerHeard is when the last packet of the call came from the peer (Unix
+// nanoseconds): its media, not only the control connection's pongs, tells
+// that it is still there.
+var peerHeard atomic.Int64
+
+// NotePeerHeard notes a packet from the peer.
+func NotePeerHeard() { peerHeard.Store(time.Now().UnixNano()) }
+
+// PeerHeardAt is when the last packet from the peer came (zero: none yet).
+func PeerHeardAt() time.Time {
+	if n := peerHeard.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
 
 var netRateMu sync.RWMutex
 

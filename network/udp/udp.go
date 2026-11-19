@@ -278,6 +278,9 @@ func StartSession(pc net.PacketConn, remote *net.UDPAddr, peerCodec string, peer
 	sessionCtx, cancelSession := context.WithCancel(context.Background())
 	stopCh := make(chan struct{})
 	pc = newMediaPacketConn(pc, stopCh)
+	if netSim != "" {
+		pc = newSimPacketConn(pc, netSim, stopCh) // -netsim: a simulated bad path for our media
+	}
 	var stopOnce sync.Once
 	var cleanupOnce sync.Once
 	var wg sync.WaitGroup
@@ -867,6 +870,9 @@ func startReceiver(wg *sync.WaitGroup, pc net.PacketConn,
 					continue
 				}
 			}
+			// The call is alive, whatever the control connection does.
+			ui.NotePeerHeard()
+
 			if gap := time.Since(lastRx); gap > time.Second { // DEBUG-TEMP
 				log.Printf("[debug] udp: the peer's packets back after %v without any", gap.Round(time.Millisecond))
 			}
@@ -1170,6 +1176,18 @@ func startVideoReceiver(wg *sync.WaitGroup,
 				return
 			}
 			newestIndex, haveNewest = index, true
+			// A frame's bands come in datagrams of their own, decoded in
+			// separate drains: each one updates its frame's picture in the
+			// queue rather than queueing another. Otherwise a frame took a
+			// slot per band, the queue held a fraction of a second instead of
+			// the span the sound runs behind, and the frames for the sound
+			// were dropped (as lost) before their time.
+			for i := len(queue) - 1; i >= 0; i-- {
+				if queue[i].index == index {
+					queue[i].frame = tv
+					return
+				}
+			}
 			queue = append(queue, timedFrame{index: index, frame: tv, at: time.Now()})
 			sort.Slice(queue, func(i, j int) bool {
 				return mediaIndexDelta(queue[i].index, queue[j].index) < 0

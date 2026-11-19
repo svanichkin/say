@@ -277,9 +277,10 @@ type AppOptions struct {
 	NoDirect    bool // -nodirect: no direct links through the NATs, calls stay on Yggdrasil routes
 	GUI         bool // -gui: a pixel window instead of the terminal
 	NoMic       bool
-	SysAudio    bool // the system voice processing (default on macOS and Windows)
-	VideoHold   int  // cell hold threshold (mean colour difference per pixel); -video-hold
-	VideoBand   int  // video band height in rows (0: one band); -video-band
+	SysAudio    bool   // the system voice processing (default on macOS and Windows)
+	VideoHold   int    // cell hold threshold (mean colour difference per pixel); -video-hold
+	VideoBand   int    // video band height in rows (0: one band); -video-band
+	NetSim      string // outgoing media through a simulated bad path (network/udp/netsim.go); -netsim
 	HoldDebug   bool
 	ShowVersion bool
 	ShowDonate  bool
@@ -311,7 +312,7 @@ func ParseCLI() (*AppOptions, error) {
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
 		VideoHold:   10,
-		VideoBand:   1,
+		VideoBand:   0,
 		// The system voice processing (echo cancellation, noise suppression)
 		// is the default where Say has it: macOS and Windows.
 		// -sysaudio=false opts out.
@@ -810,6 +811,11 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 				boolVal = parsed
 			}
 			opts.HoldDebug = boolVal
+		case "netsim":
+			opts.NetSim = "heavy" // bare: the worst
+			if hasValue && value != "" {
+				opts.NetSim = value
+			}
 		case "video-band":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-video-band requires a value (rows; 0: one band)")
@@ -991,4 +997,32 @@ func flagConsumesOptionalValue(key string) bool {
 	default:
 		return false
 	}
+}
+
+// ConfigPathFromArgs is the configuration file the arguments name with
+// -config (the default one without it), resolved as ParseCLI resolves it,
+// without touching the filesystem: for what is needed before the arguments
+// are parsed (the window's place).
+func ConfigPathFromArgs(args []string) string {
+	var cfg string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if name != "config" {
+			continue
+		}
+		if !hasValue && i+1 < len(args) {
+			value = args[i+1]
+			i++
+		}
+		cfg = value
+	}
+	path, err := previewConfigPath(cfg)
+	if err != nil {
+		return ""
+	}
+	return path
 }

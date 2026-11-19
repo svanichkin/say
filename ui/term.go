@@ -1156,9 +1156,16 @@ func renderChatScreen(cols, rows int) string {
 	chatBottom := inputRow - 1 - gap
 	chatRows := chatBottom - chatTop + 1
 	// The conversation's columns: in the window, inside its frame.
+	// The chat's frame: across the canvas in the window; in a terminal
+	// under the panes' frames, its edges below theirs.
+	frameLeft, frameCols := canvasLeft, canvasCols
+	if termHUD && !pixelMode {
+		frameLeft = max(canvasLeft, videoLeft-1)
+		frameCols = min(canvasLeft+canvasCols, videoLeft+videoGroupCols+1) - frameLeft
+	}
 	chatLeft, chatCols := canvasLeft, canvasCols
 	if framed() {
-		chatLeft, chatCols = canvasLeft+2, canvasCols-4
+		chatLeft, chatCols = frameLeft+2, frameCols-4
 	}
 	if chatRows < 1 {
 		return ""
@@ -1283,8 +1290,14 @@ func renderChatScreen(cols, rows int) string {
 		}
 		extra := min(spread, max(0, (displayWidth(ping)-termGap+1)/2))
 		pingText := writeGapPing(lines.at(videoCaptionRow), videoCaptionRow, sepCol-extra, termGap+2*extra, ping)
-		rel := func(sp [2]int) [2]int { return [2]int{sp[0] - videoLeft, sp[1] - videoLeft} }
-		writePixelBracket(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, videoGroupCols, rel(selfText), rel(pingText), rel(peerText))
+		// The bracketed line spans the panes in the window; in a terminal the
+		// chat's input line below it.
+		bracketLeft, bracketCols := videoLeft, videoGroupCols
+		if termHUD && !pixelMode {
+			bracketLeft, bracketCols = chatLeft, chatCols
+		}
+		rel := func(sp [2]int) [2]int { return [2]int{sp[0] - bracketLeft, sp[1] - bracketLeft} }
+		writePixelBracket(lines.at(videoCaptionRow), videoCaptionRow, bracketLeft, bracketCols, rel(selfText), rel(pingText), rel(peerText))
 	}
 
 	chatState.RLock()
@@ -1360,7 +1373,7 @@ func renderChatScreen(cols, rows int) string {
 	if v := shownVersion(); v != "" && displayWidth(v) <= canvasCols/2 {
 		row, end := rows, canvasLeft+canvasCols-1
 		if framed() {
-			row, end = inputRow+2, canvasLeft+canvasCols-3
+			row, end = inputRow+2, frameLeft+frameCols-3
 			lineAt(row, canvasLeft).WriteString(canvasBlank)
 		}
 		lineAt(row, end-displayWidth(v)+1).WriteString(versionSGR() + v + "\x1b[0m")
@@ -1368,7 +1381,7 @@ func renderChatScreen(cols, rows int) string {
 
 	if framed() {
 		// The frame takes a row above the chat and one below the input.
-		writeChatFrame(&out, hud, chatTop-1, canvasLeft, canvasCols, inputRow-chatTop+3)
+		writeChatFrame(&out, hud, chatTop-1, frameLeft, frameCols, inputRow-chatTop+3)
 	}
 	if hud != nil {
 		// Written last, over the margins and the rows the chat clears.

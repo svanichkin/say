@@ -2,12 +2,12 @@
 
 package main
 
-// relaunchInWindowsTerminal is Windows-only (see relaunch_windows.go).
-func relaunchInWindowsTerminal() bool { return false }
-
 // hideConsole is Windows-only (see relaunch_windows.go).
 func hideConsole() {}
 
-// askModeDialog and showError are Windows-only (see relaunch_windows.go).
-func askModeDialog() (window, asked bool) { return false, false }
-func showError(string)                    {}
+// showError is Windows-only (see relaunch_windows.go).
+func showError(string) {}
+
+// doubleClicked is Windows-only: elsewhere a double click on a bare binary
+// opens a terminal for it (macOS Finder), indistinguishable from typing it.
+func doubleClicked() bool { return false }

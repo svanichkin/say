@@ -404,6 +404,23 @@ func (b Bracket) equal(o Bracket) bool {
 	return b.Row == o.Row && b.Col == o.Col && b.Cols == o.Cols && slices.Equal(b.Spans, o.Spans)
 }
 
+// Brackets returns the rows to bracket, in order.
+func (s *Screen) Brackets() []Bracket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Bracket, 0, len(s.brackets))
+	for _, b := range s.brackets {
+		out = append(out, b)
+	}
+	slices.SortFunc(out, func(a, b Bracket) int {
+		if a.Row != b.Row {
+			return a.Row - b.Row
+		}
+		return a.Col - b.Col
+	})
+	return out
+}
+
 // bracketMark handles OSC 5580: a row to bracket (1-based row and column,
 // its width, then where each piece of text starts and ends in it).
 func (s *Screen) bracketMark() {

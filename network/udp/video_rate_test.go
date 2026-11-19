@@ -251,3 +251,65 @@ func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
 	wg.Wait()
 	close(out)
 }
+
+// A frame's bands come in datagrams of their own and are decoded in
+// separate drains. They make one frame waiting for its sound, not one per
+// band: with a slot per band the queue held a fraction of a second, and
+// frames waiting a second for their sound were dropped as lost.
+func TestVideoBandsQueueAsOneFrame(t *testing.T) {
+	defer func(rows int) { videoBandRows = rows }(videoBandRows)
+	videoBandRows = 1
+	const bands = 12
+	start := time.Now()
+	clock := func() (uint16, bool) {
+		return uint16(time.Since(start)/mediaTickDuration+1000) & mediaIndexMask, true
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	in := make(chan []byte, 64)
+	out := make(chan *codec.TextFrame, 256)
+	shown := make(chan int)
+	go func() {
+		n := 0
+		for range out {
+			n++
+		}
+		shown <- n
+	}()
+	ui.UpdateRxVideoLoss(0)
+	startVideoReceiver(&wg, stop, in, out, clock)
+	encs := make([]*codec.Encoder, bands)
+	for b := range encs {
+		encs[b] = codec.NewEncoder(false, 10, 0, false)
+	}
+	img := make([]byte, 64*16*3)
+	deadline := time.Now().Add(2 * time.Second)
+	for seq := 0; time.Now().Before(deadline); seq++ {
+		for i := range img {
+			img[i] = byte(i + seq*13)
+		}
+		now, _ := clock()
+		index := advanceMediaIndex(now, int32(time.Second/mediaTickDuration)) // a second ahead of its sound
+		for b := 0; b < bands; b++ {
+			payload, err := encs[b].Encode(codec.Frame{Data: img, Width: 64, Height: 16}, 16, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkt := []byte{byte(index >> 8), byte(index), byte(seq)}
+			pkt = appendLayerHead(pkt, layerHead{layer: byte(b), gen: 1, rows: bands, bands: bands, seq: byte(seq)})
+			in <- append(pkt, payload...)
+			time.Sleep(2500 * time.Microsecond) // the next band in another drain
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	close(out)
+	n := <-shown
+	loss, _ := ui.RxVideoLossSnapshot()
+	// About 2 s of frames at 30 fps were sent, the first second still waits
+	// for its sound: some 25 shown.
+	if n < 15 || loss > 0.1 {
+		t.Fatalf("%d frames shown, loss %.2f reported; want about 25 shown and no loss", n, loss)
+	}
+}
