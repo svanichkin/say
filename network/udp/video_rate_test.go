@@ -145,12 +145,13 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 	}()
 	startVideoReceiver(&wg, stop, in, out, nil)
 	enc := codec.NewEncoder(false, 0, 0, false)
+	enc.SetRefs(true) // as the sender codes: a frame names the one it is coded against
 	enc.SetShapeHold(10)
 	img := make([]byte, 64*64*3)
 	for i := range img {
 		img[i] = byte(i * 3)
 	}
-	send := func(seq int) {
+	encode := func(seq int) []byte {
 		for i := 0; i < 8*64*3; i++ { // a small part changes: change frames
 			img[i] = byte(i*3 + seq*40)
 		}
@@ -158,10 +159,12 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		in <- lowPacket(uint16(seq), byte(seq), payload)
+		return payload
 	}
+	send := func(seq int) { in <- lowPacket(uint16(seq), byte(seq), encode(seq)) }
 	requests := func() int {
-		time.Sleep(50 * time.Millisecond)
+		// A frame after a gap waits videoReorderWait for the one before.
+		time.Sleep(videoReorderWait + 70*time.Millisecond)
 		return recoveryRequests()
 	}
 	send(0)
@@ -169,7 +172,8 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 	if n := requests(); n != 0 {
 		t.Fatalf("%d keyframe requests without loss", n)
 	}
-	send(3) // frame 2 lost
+	encode(2) // lost on the way
+	send(3)   // coded against frame 2
 	if n := requests(); n != 1 {
 		t.Fatalf("%d keyframe requests after a loss, want 1", n)
 	}
@@ -191,9 +195,14 @@ func TestVideoReceiverRequestsKeyframeOnLoss(t *testing.T) {
 // video receiver gets it: the media index, the datagram counter, the frame
 // as the one band's (its own counter the same).
 func lowPacket(index uint16, seq byte, frame []byte) []byte {
+	return bandPacket(index, seq, 8, frame)
+}
+
+// bandPacket is lowPacket for a frame rows rows tall.
+func bandPacket(index uint16, seq byte, rows int, frame []byte) []byte {
 	videoBandRows = 0 // one band: the whole frame
 	pkt := []byte{byte(index >> 8), byte(index), seq}
-	pkt = appendLayerHead(pkt, layerHead{gen: 1, rows: 8, bands: 1, seq: seq})
+	pkt = appendLayerHead(pkt, layerHead{gen: 1, rows: rows, bands: 1, seq: seq})
 	return append(pkt, frame...)
 }
 
@@ -210,8 +219,10 @@ func recoveryRequests() int {
 }
 
 // After a long silence frames may have been lost unnoticed (the 8-bit
-// counter wraps), so the next frame, even with the next counter, must not be
-// applied to the old base: the receiver asks for a keyframe.
+// counter wraps), so the next frame is taken as the next whatever its
+// counter, and its reference decides: coded against a frame the receiver
+// holds it is shown, with no request; against one it never got, it asks to
+// recover.
 func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
 	recoveryRequests()
 	var wg sync.WaitGroup
@@ -224,12 +235,13 @@ func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
 	}()
 	startVideoReceiver(&wg, stop, in, out, nil)
 	enc := codec.NewEncoder(false, 0, 0, false)
+	enc.SetRefs(true)
 	enc.SetShapeHold(10)
 	img := make([]byte, 64*64*3)
 	for i := range img {
 		img[i] = byte(i * 3)
 	}
-	send := func(seq int) {
+	encode := func(seq int) []byte {
 		for i := 0; i < 8*64*3; i++ {
 			img[i] = byte(i*3 + seq*40)
 		}
@@ -237,15 +249,25 @@ func TestVideoReceiverTreatsSilenceAsLoss(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		in <- lowPacket(uint16(seq), byte(seq), payload)
+		return payload
+	}
+	send := func(seq int) { in <- lowPacket(uint16(seq), byte(seq), encode(seq)) }
+	wait := func() int {
+		time.Sleep(videoReorderWait + 70*time.Millisecond)
+		return recoveryRequests()
 	}
 	send(0)
 	send(1)
 	time.Sleep(videoLayerSilence + 100*time.Millisecond)
-	send(2) // the next counter, but after a silence
-	time.Sleep(50 * time.Millisecond)
-	if recoveryRequests() != 1 {
-		t.Fatalf("no keyframe request after %v of silence", videoLayerSilence)
+	send(2) // after a silence, against frame 1, which the receiver holds
+	if n := wait(); n != 0 {
+		t.Fatalf("%d requests for a frame coded against one held", n)
+	}
+	encode(3) // lost in the silence
+	time.Sleep(videoLayerSilence + 100*time.Millisecond)
+	send(4) // against frame 3, never received
+	if n := wait(); n != 1 {
+		t.Fatalf("%d requests after %v of silence and a frame against a lost one, want 1", n, videoLayerSilence)
 	}
 	close(stop)
 	wg.Wait()
