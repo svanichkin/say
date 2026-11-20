@@ -35,6 +35,8 @@ type renderer struct {
 	bgPix    []byte
 	shapes   map[uint32]*ebiten.Image
 	paneImgs map[[2]int]*paneImage
+	scan     *ebiten.Image // the effect's scan lines (scanImage)
+	scanOf   effectScan
 	white    *ebiten.Image
 
 	static     *ebiten.Image // the cells and the text, redrawn when they change
@@ -56,9 +58,10 @@ type renderer struct {
 }
 
 type paneImage struct {
-	img   *ebiten.Image
-	frame uint64
-	pix   []byte
+	img    *ebiten.Image
+	frame  uint64
+	pix    []byte
+	pixels bool // a picture in pixels at its own size (rasterizeSource)
 }
 
 func (g *game) Draw(dst *ebiten.Image) {
@@ -85,8 +88,14 @@ func (g *game) Draw(dst *ebiten.Image) {
 		b := dst.Bounds()
 		same := !g.dirty && version == g.drawnVersion && b.Dx() == g.drawnW && b.Dy() == g.drawnH
 		// Nothing new: the window keeps its picture. With panes the bricks
-		// move, but animateEvery is plenty for them.
-		if same && (len(panes) == 0 || time.Since(g.drawnAt) < animateEvery) {
+		// move, but animateEvery is plenty for them. Something new waits
+		// for animateEvery too (a resize does not): the panes' frames come
+		// apart, each pane's some 30 a second, and each redrew the whole
+		// window (60 a second, and the window server with it).
+		if (same || !g.dirty && b.Dx() == g.drawnW && b.Dy() == g.drawnH) && time.Since(g.drawnAt) < animateEvery {
+			return
+		}
+		if same && len(panes) == 0 {
 			return
 		}
 		g.drawnAt = time.Now()

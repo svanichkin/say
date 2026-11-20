@@ -303,6 +303,19 @@ func run() (err error) {
 	udptransport.SetSystemVoice(opts.SysAudio)
 	udptransport.SetVideoShapeHold(opts.VideoHold)
 	udptransport.SetVideoBandRows(opts.VideoBand)
+	if err := udptransport.SetVideoCodec(opts.VideoCodec, opts.VideoQ, opts.VideoQMax); err != nil {
+		return err
+	}
+	// Smooth video in the window: the peer is asked for pixels, not cells;
+	// and told when it asks the same of us.
+	tcpsignal.SetPixelVideo(opts.VideoCodec != "say" && ui.PixelMode())
+	tcpsignal.SetOnPeerPixels(udptransport.SetPeerPixels)
+	if err := gui.SetVideoEffect(opts.VideoFX); err != nil {
+		return err
+	}
+	gui.SetVideoLight(opts.VideoLight)
+	gui.SetVideoSharp(opts.VideoSharp)
+	gui.SetVideoDelay(ui.VideoLagSnapshot)
 	if err := udptransport.SetNetSim(opts.NetSim); err != nil {
 		return err
 	}

@@ -3,6 +3,8 @@ package udp
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"log"
 	"math"
 	"math/bits"
 	"sort"
@@ -147,7 +149,7 @@ func bandRanges(rows int) [][2]int {
 
 // layerTx is a band at the sender.
 type layerTx struct {
-	enc           *codec.Encoder
+	enc           bandCoder
 	cols, rows    int
 	r0, r1        int // the grid's rows it covers
 	seq           byte
@@ -178,10 +180,28 @@ type layerSender struct {
 	gen                byte
 	rc                 rateCtl
 	lastGrid           time.Duration
+
+	// smooth video (video_smooth.go): the receiver's newest report
+	queue      time.Duration // its standing queue
+	got, went  float64       // kbit/s arrived in its second, sent in the second before its newest datagram
+	prevQNow   time.Duration // what its newest datagram waited, by the report before
+	lastReport time.Duration
+	silentAt   time.Duration     // the reports stopped last (an outage)
+	rxHas      map[byte][]uint16 // per band of the grid gen: the frames the receiver has (newest, mark)
+	trouble    time.Duration     // the path showed trouble last (loss, a queue, a cut, a recovery)
+	qCap       float64           // the smooth coder's quality allowed now
+	qCapAt     time.Duration
+	badQ       float64 // the quality allowed when trouble came last above videoSmoothQ
+	badAt      time.Duration
+	capNow     time.Duration // the frame's time, for smoothQCap
+	crop       []byte        // the camera's frame in the pane's shape
+	cropW      int           // its size, kept while the pane's shape stays near (smoothCropKeep)
+	cropH      int
+	small      []byte // and at the pane's pixels
 }
 
 func newLayerSender(mono bool) *layerSender {
-	return &layerSender{mono: mono, rc: newRateCtl(), lastGrid: -time.Hour}
+	return &layerSender{mono: mono, rc: newRateCtl(), lastGrid: -time.Hour, silentAt: -time.Hour}
 }
 
 func (s *layerSender) newEncoder(hold int) *codec.Encoder {
@@ -216,13 +236,36 @@ func (s *layerSender) setPane(now time.Duration, cols, rows int) {
 func (s *layerSender) setHi(now time.Duration, rows int) {
 	s.gen++
 	s.lastGrid = now
+	old := s.hi
 	s.hi = nil
 	s.hiRows, s.hiCols = rows, s.colsFor(rows)
 	hold := baseVideoHold(videoShapeHold, s.hiCols*rows)
-	for _, r := range bandRanges(rows) {
-		s.hi = append(s.hi, &layerTx{enc: s.newEncoder(hold), cols: s.hiCols, rows: r[1] - r[0], r0: r[0], r1: r[1],
+	ranges := bandRanges(rows)
+	for i, r := range ranges {
+		var enc bandCoder = sayBand{s.newEncoder(hold)}
+		if videoSmooth {
+			share := float64(r[1]-r[0]) / float64(rows)
+			if b, ok := smoothKept(old, ranges, i); ok {
+				// The pixels do not depend on the grid: the band's coder goes
+				// on (its references, its quality), no keyframe.
+				b.share, enc = share, b
+			} else {
+				enc = newSmoothBand(s.effRate, s.smoothQCap, share)
+			}
+		}
+		s.hi = append(s.hi, &layerTx{enc: enc, cols: s.hiCols, rows: r[1] - r[0], r0: r[0], r1: r[1],
 			lastSent: -time.Hour, lastForcedKey: -time.Hour})
 	}
+}
+
+// smoothKept is band i's smooth coder of the grid before when the grid
+// keeps as many bands (one, by default): it goes on in the new grid.
+func smoothKept(old []*layerTx, ranges [][2]int, i int) (*smoothBand, bool) {
+	if len(old) != len(ranges) || i >= len(old) {
+		return nil, false
+	}
+	b, ok := old[i].enc.(*smoothBand)
+	return b, ok
 }
 
 // forceKeyframes makes every band's next frame a keyframe.
@@ -251,6 +294,9 @@ func (s *layerSender) control(now time.Duration, msg []byte, sentAt func(index u
 		}
 		r.newestAt = sentAt(binary.LittleEndian.Uint16(msg[8:]))
 		s.rc.report(now, r)
+		if videoSmooth {
+			s.smoothReport(now, r, msg[11:])
+		}
 		return
 	}
 	if msg[0] == ctlAcks {
@@ -274,14 +320,117 @@ func (s *layerSender) control(now time.Duration, msg []byte, sentAt func(index u
 	case ctlKeyframe:
 		t.keyReq = true
 	case ctlRecover:
-		t.enc.RecoverFrom(id)
+		t.enc.RecoverFrom(append([]uint16{id}, s.rxHas[msg[1]]...)...)
 	}
+	s.troubled(now, "кадр потерян, просят восстановить") // a frame lost
+}
+
+// smoothReport takes a report's smooth part (after Say's): what the
+// newest datagram waited (ms, uint16 LE; 0xffff none), what arrived in the
+// last three windows (uint32 LE), the grid, and per band the frames the
+// receiver has (band, newest, mark; uint16 LE each).
+func (s *layerSender) smoothReport(now time.Duration, r rateReport, ext []byte) {
+	if s.lastReport > 0 && now-s.lastReport >= smoothSilent {
+		s.silentAt = now // an outage: the path may be another
+	}
+	switch {
+	case r.silent:
+		s.troubled(now, "тишина")
+	case now-s.rc.lastCut < rateReportEvery:
+		s.troubled(now, "срез скорости: "+s.rc.why)
+	case r.loss1s >= smoothTroubleLoss:
+		s.troubled(now, fmt.Sprintf("потери %.1f%%", 100*r.loss1s))
+	case r.queue >= rateHoldQ:
+		s.troubled(now, fmt.Sprintf("очередь %d мс", r.queue.Milliseconds()))
+	}
+	s.lastReport = now
+	if len(ext) < 8 {
+		return
+	}
+	qNow := time.Duration(binary.LittleEndian.Uint16(ext)) * time.Millisecond
+	got300 := float64(binary.LittleEndian.Uint32(ext[2:])*8) / 1000 / smoothFastWin.Seconds()
+	if !r.none {
+		if ext[0] != 0xff || ext[1] != 0xff {
+			if qNow >= smoothQueueFast && qNow > s.prevQNow && now-s.silentAt >= smoothAfterSilent &&
+				got300 < rateOverShare*s.rc.sentBetween(r.newestAt-smoothFastWin, r.newestAt) {
+				s.rc.queueing(now, got300, qNow)
+			}
+			s.prevQNow = qNow
+		}
+		s.queue, s.got = r.queue, float64(r.bytes1s*8)/1000
+		s.went = s.rc.sentBetween(r.newestAt-time.Second, r.newestAt)
+	}
+	if ext[6] != s.gen {
+		return
+	}
+	n := int(ext[7])
+	has := map[byte][]uint16{}
+	for p := ext[8:]; n > 0 && len(p) >= 5; n, p = n-1, p[5:] {
+		has[p[0]] = []uint16{binary.LittleEndian.Uint16(p[1:]), binary.LittleEndian.Uint16(p[3:])}
+	}
+	s.rxHas = has
+}
+
+// smoothQCap is the smooth coder's quality allowed now: videoSmoothQ after
+// trouble, up to videoSmoothQMax a point every smoothQRise once the path
+// has been clean for smoothCleanFor.
+func (s *layerSender) smoothQCap() float64 {
+	now := s.capNow
+	if s.qCap == 0 || now-s.trouble < smoothCleanFor {
+		s.qCap, s.qCapAt = float64(videoSmoothQ), now
+		return s.qCap
+	}
+	top := float64(videoSmoothQMax)
+	if s.badQ > 0 && now-s.badAt < smoothBadHold {
+		// Trouble came at badQ a while ago: no higher than a little below it.
+		top = max(float64(videoSmoothQ), min(top, s.badQ-smoothBadMargin))
+	}
+	if steps := float64((now - s.qCapAt) / smoothQRise); steps > 0 {
+		s.qCap = min(top, s.qCap+steps)
+		s.qCapAt += time.Duration(steps) * smoothQRise
+	}
+	return s.qCap
+}
+
+// troubled notes trouble on the path at now (why, for the log): the
+// quality allowed falls to videoSmoothQ; when it was above, that height is
+// remembered for smoothBadHold (smoothQCap).
+func (s *layerSender) troubled(now time.Duration, why string) {
+	if s.qCap > float64(videoSmoothQ) {
+		s.badQ, s.badAt = s.qCap, now
+	}
+	if now-s.trouble >= smoothCleanFor && s.qCap > float64(videoSmoothQ) {
+		log.Printf("[video/smooth] trouble at q%.0f: %s; the quality allowed back to %d, no higher than %.0f for %v",
+			s.qCap, why, videoSmoothQ, max(float64(videoSmoothQ), s.badQ-smoothBadMargin), smoothBadHold)
+	}
+	s.trouble = now
+}
+
+// queued says whether a standing queue is on the way (smooth video): the
+// receiver's standing queue of smoothQueueHigh with less arriving than went
+// (a path turned shorter after a longer one looks like a queue, but more
+// arrives).
+func (s *layerSender) queued() bool {
+	return videoSmooth && s.queue >= smoothQueueHigh && s.got > 0 && s.got < rateOverShare*s.went
+}
+
+// effRate is the kbit/s to send at: the rate's, but while a queue stands at
+// most smoothDrain of what arrives, so that it drains (the rate's own cuts
+// come a round trip apart, and the round trip grows with the queue).
+func (s *layerSender) effRate() float64 {
+	if s.queued() {
+		return min(s.rc.rate, smoothDrain*s.got)
+	}
+	return s.rc.rate
 }
 
 // adaptGrid picks the grid for the rate.
 func (s *layerSender) adaptGrid(now time.Duration) {
 	if s.rc.perCellN < 1 || s.rc.perCell <= 0 || s.paneRows == 0 {
 		return // not known yet
+	}
+	if videoSmooth {
+		return // the pane's grid: the smooth coder meets the rate by its quality
 	}
 	aspect := float64(s.paneCols) / float64(s.paneRows)
 	cells := max(0, videoGridFill*s.rc.rate*1000/s.rc.perCell)
@@ -301,7 +450,27 @@ func (s *layerSender) frame(now time.Duration, f codec.Frame) ([]layerPacket, er
 		return nil, nil
 	}
 	s.rc.tick(now)
+	s.capNow = now
+	if videoSmooth {
+		// Only what the peer's pane shows of the camera is sent, and no
+		// more pixels than it has (4 x 8 a cell: a terminal's pane is
+		// often smaller than the camera).
+		nw, nh := cropSize(f.Width, f.Height, s.hiCols, s.hiRows)
+		if s.cropW == 0 || math.Abs(float64(nw*s.cropH)/float64(nh*s.cropW)-1) > smoothCropKeep || s.cropW > f.Width || s.cropH > f.Height {
+			s.cropW, s.cropH = nw, nh
+		}
+		f = cropTo(f, s.cropW, s.cropH, &s.crop)
+		if !peerPixels.Load() {
+			f = shrinkCover(f, s.hiCols*4, s.hiRows*8, &s.small)
+		}
+	}
 	s.rc.demand = s.rc.perCell * float64(s.paneCols*s.paneRows) / 1000
+	if videoSmooth {
+		// A still picture's smooth frames are a few copies: the rate held to
+		// twice them left no room when the picture moved (the quality fell
+		// to its least each time). A queue or loss cuts it at once.
+		s.rc.demand = max(s.rc.demand, smoothRateFloor/1.5)
+	}
 	s.adaptGrid(now)
 	s.rc.allow(now)
 	// The bands, the longest waiting first, while the budget holds (an
@@ -314,7 +483,7 @@ func (s *layerSender) frame(now time.Duration, f codec.Frame) ([]layerPacket, er
 	var out []layerPacket
 	for _, b := range order {
 		t := s.hi[b]
-		if s.rc.tokens <= 0 && now-t.lastSent < videoBandHeartbeat {
+		if (s.rc.tokens <= 0 || s.queued() && s.rc.sending(now) >= s.effRate()) && now-t.lastSent < videoBandHeartbeat {
 			continue
 		}
 		y0, y1 := f.Height*t.r0/s.hiRows, f.Height*t.r1/s.hiRows
@@ -339,16 +508,22 @@ func (s *layerSender) encode(now time.Duration, t *layerTx, band byte, f codec.F
 	t.keyReq = false
 	// After a loss (the peer acknowledges then), every frame against the
 	// newest frame acknowledged: a lost datagram is lost alone.
-	if t.haveAck && now-t.ackedAt < videoAckHold {
-		t.enc.CodeAgainst(t.acked)
+	switch has := s.rxHas[band]; {
+	case t.haveAck && now-t.ackedAt < videoAckHold:
+		t.enc.CodeAgainst(append([]uint16{t.acked}, has...)...)
+	case videoSmooth && len(has) > 0 && s.lastReport > 0 && now-s.lastReport >= smoothSilent:
+		t.enc.CodeAgainst(has...) // an outage: what goes in it may be lost
 	}
 	t.enc.SetSkipEmpty(now-t.lastSent < videoBandHeartbeat)
+	if c, ok := t.enc.(interface{ setNow(time.Duration) }); ok {
+		c.setNow(now) // the smooth coder steers its quality by the frames' times
+	}
 	b, err := t.enc.Encode(f, t.cols, t.rows)
 	if err != nil || b == nil {
 		return nil, err
 	}
 	p := &layerPacket{head: layerHead{layer: band, gen: s.gen, rows: s.hiRows, bands: len(s.hi), seq: t.seq}, frame: b,
-		key: len(b) > 4 && b[4] == 5} // a keyframe with references
+		key: isKeyframe(b)}
 	t.seq++
 	if !p.key {
 		s.rc.measure(len(b), t.cols*t.rows, min(now-t.lastSent, time.Second))
@@ -362,7 +537,7 @@ func (s *layerSender) encode(now time.Duration, t *layerTx, band byte, f codec.F
 
 // layerRx is a band at the receiver.
 type layerRx struct {
-	dec         *codec.Decoder
+	dec         bandDecoder
 	haveSeq     bool
 	lastSeq     byte
 	tf          *codec.TextFrame
@@ -373,7 +548,11 @@ type layerRx struct {
 }
 
 func newLayerRx() *layerRx {
-	return &layerRx{dec: codec.NewDecoder(), lastArrival: -time.Hour, lastRequest: -time.Hour, lastLoss: -time.Hour}
+	var dec bandDecoder = codec.NewDecoder()
+	if videoSmooth {
+		dec = newSmoothRx()
+	}
+	return &layerRx{dec: dec, lastArrival: -time.Hour, lastRequest: -time.Hour, lastLoss: -time.Hour}
 }
 
 // layerArrival is a datagram waiting for its turn.
@@ -408,6 +587,8 @@ type layerReceiver struct {
 	rExpected   int
 	rGot        int
 	rQueue      time.Duration // the least a datagram waited since the last report (-1: none)
+	qNow        time.Duration // what the newest sent of them waited (smooth video's report; -1: none)
+	qNowU       int64         // its sending, in the receiver's ticks
 	lossWin     [10][3]int
 	qWin        [3]time.Duration // rateStanding
 	lossK       int
@@ -420,7 +601,7 @@ type layerReceiver struct {
 }
 
 func newLayerReceiver(send func([]byte)) *layerReceiver {
-	return &layerReceiver{start: time.Now(), send: send, rQueue: -1, lastArrival: -time.Hour}
+	return &layerReceiver{start: time.Now(), send: send, rQueue: -1, qNow: -1, lastArrival: -time.Hour}
 }
 
 // arrive takes a datagram's video part: seq the datagram counter, index its
@@ -458,8 +639,12 @@ func (r *layerReceiver) arrive(at time.Time, seq byte, index uint16, payload []b
 	}
 	owd := time.Duration(r.relU) * mediaTickDuration
 	r.floor.note(now, owd)
-	if q := owd - r.floor.get(now); r.rQueue < 0 || q < r.rQueue {
+	q := owd - r.floor.get(now)
+	if r.rQueue < 0 || q < r.rQueue {
 		r.rQueue = q
+	}
+	if sendU := int64(now/mediaTickDuration) - r.relU; r.qNow < 0 || sendU >= r.qNowU {
+		r.qNow, r.qNowU = q, sendU
 	}
 	r.newestU = max(r.newestU, int64(now/mediaTickDuration)-r.relU)
 	r.pending = append(r.pending, layerArrival{head: h, frame: frame, index: index, at: now})
@@ -505,9 +690,15 @@ func (r *layerReceiver) process(p layerArrival, now time.Duration) bool {
 	if !r.haveGen || h.gen != r.gen && byte(h.gen-r.gen) < 128 {
 		r.haveGen, r.gen, r.rows = true, h.gen, h.rows
 		clear(r.acks)
+		old := r.hi
 		r.hi = make([]*layerRx, h.bands)
 		for i := range r.hi {
 			r.hi[i] = newLayerRx()
+			if _, smooth := r.hi[i].dec.(*smoothRx); smooth && len(old) == len(r.hi) {
+				// The sender's smooth coder goes on across grids: so do the
+				// band's decoder and its references.
+				r.hi[i].dec = old[i].dec
+			}
 		}
 	}
 	if h.gen == r.gen && int(h.layer) < len(r.hi) {
@@ -543,7 +734,9 @@ func (r *layerReceiver) take(rx *layerRx, band, gen, seq byte, data []byte, now 
 				r.send(ctlMessage(ctlKeyframe, band, gen, 0))
 			}
 		}
-		return !wasBroken // the band turns to noise
+		// The band turns to noise; in the window a TV's snow, drawn afresh
+		// with each frame that does not decode (it moves).
+		return !wasBroken || videoSmooth && ui.PixelMode()
 	}
 	rx.broken, rx.tf = false, tf
 	if now-rx.lastLoss < videoAckWindow {
@@ -555,6 +748,39 @@ func (r *layerReceiver) take(rx *layerRx, band, gen, seq byte, data []byte, now 
 		}
 	}
 	return true
+}
+
+// smoothReport appends a report's smooth part (layerSender.smoothReport).
+func (r *layerReceiver) smoothReport(msg []byte) []byte {
+	q := uint16(0xffff)
+	if r.qNow >= 0 {
+		q = uint16(min(r.qNow, 65534*time.Millisecond) / time.Millisecond)
+		ui.UpdateVideoLag(r.qNow) // the window's hologram rolls by it
+	}
+	msg = binary.LittleEndian.AppendUint16(msg, q)
+	b3 := 0
+	for j := 1; j <= 3; j++ {
+		b3 += r.lossWin[(r.lossK-j+len(r.lossWin))%len(r.lossWin)][2]
+	}
+	msg = binary.LittleEndian.AppendUint32(msg, uint32(b3))
+	type marker interface{ LastMark() (uint16, bool) }
+	var bands []byte
+	n := 0
+	for b, rx := range r.hi {
+		g, ok := rx.dec.LastGood()
+		if !ok || b > 255 {
+			continue
+		}
+		m := g
+		if mk, isM := rx.dec.(marker); isM {
+			if v, ok := mk.LastMark(); ok {
+				m = v
+			}
+		}
+		bands = binary.LittleEndian.AppendUint16(binary.LittleEndian.AppendUint16(append(bands, byte(b)), g), m)
+		n++
+	}
+	return append(append(msg, r.gen, byte(min(n, 255))), bands...)
 }
 
 func ctlMessage(kind, band, gen byte, id uint16) []byte {
@@ -606,9 +832,12 @@ func (r *layerReceiver) report(at time.Time) {
 			msg = binary.LittleEndian.AppendUint16(msg, uint16(min(max(0, standing), 65535*time.Millisecond)/time.Millisecond))
 			msg = binary.LittleEndian.AppendUint16(msg, uint16(r.newestU)&mediaIndexMask)
 			msg = append(msg, flags)
+			if videoSmooth {
+				msg = r.smoothReport(msg)
+			}
 			r.send(msg)
 		}
-		r.rBytes, r.rExpected, r.rGot, r.rQueue = 0, 0, 0, -1
+		r.rBytes, r.rExpected, r.rGot, r.rQueue, r.qNow = 0, 0, 0, -1, -1
 		r.nextReport += rateReportEvery
 	}
 }
@@ -655,7 +884,64 @@ func (r *layerReceiver) picture() *codec.TextFrame {
 			ui.NoiseRows(out, b[0], b[1])
 		}
 	}
+	out.Pixels = r.pixels(cols, rows)
 	r.last = out
+	return out
+}
+
+// pixels is the bands' pixels put together (smooth video in the window,
+// cols x rows cells), nil unless every band has its own: then the window
+// draws the cells. A band that hung (a frame of it lost on a bad path)
+// shows a TV's snow (ui.StaticPixels), the window's no-signal noise, not
+// the cells' glyphs.
+func (r *layerReceiver) pixels(cols, rows int) *codec.Pixels {
+	if len(r.hi) == 0 {
+		return nil
+	}
+	snow := videoSmooth && ui.PixelMode()
+	if len(r.hi) == 1 {
+		switch rx := r.hi[0]; {
+		case rx.broken && snow:
+			return ui.StaticPixels(cols*4, rows*8, time.Now())
+		case rx.broken:
+			return nil
+		case rx.tf != nil:
+			return rx.tf.Pixels
+		case r.last != nil:
+			return r.last.Pixels // a new grid's band not here yet: the picture before
+		}
+		return nil
+	}
+	// The bands' width: a decoded band's; the snow of a broken one as tall
+	// as its rows at that width.
+	w := 0
+	for _, rx := range r.hi {
+		if !rx.broken && rx.tf != nil && rx.tf.Pixels != nil {
+			w = rx.tf.Pixels.W
+			break
+		}
+	}
+	if w == 0 {
+		w = cols * 4
+	}
+	ranges := bandRanges(rows)
+	parts := make([]*codec.Pixels, len(r.hi))
+	h := 0
+	for i, rx := range r.hi {
+		switch {
+		case rx.broken && snow && i < len(ranges):
+			parts[i] = ui.StaticPixels(w, (ranges[i][1]-ranges[i][0])*8*w/max(1, cols*4), time.Now())
+		case rx.broken || rx.tf == nil || rx.tf.Pixels == nil || rx.tf.Pixels.W != w:
+			return nil
+		default:
+			parts[i] = rx.tf.Pixels
+		}
+		h += parts[i].H
+	}
+	out := &codec.Pixels{W: w, H: h, Y: make([]byte, 0, w*h), Cb: make([]byte, 0, w*h), Cr: make([]byte, 0, w*h)}
+	for _, p := range parts {
+		out.Y, out.Cb, out.Cr = append(out.Y, p.Y...), append(out.Cb, p.Cb...), append(out.Cr, p.Cr...)
+	}
 	return out
 }
 

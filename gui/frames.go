@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"image"
 	"image/color"
 	"math"
 	"slices"
@@ -109,24 +110,58 @@ func (g *game) drawPanes(dst *ebiten.Image, panes []Pane) {
 		if p.Chat {
 			continue
 		}
-		f := g.frameImage(p, g.paneColour(p))
+		f, iw, ih, pixels := g.frameImage(p, g.paneColour(p))
 		if f == nil {
 			continue
 		}
 		fr := g.paneFrame(p)
 		px, py := float64(g.ox+p.Col*g.cw), float64(g.oy+p.Row*g.ch)
 		pw, ph := float64(p.Cols*g.cw), float64(p.Rows*g.ch)
-		iw, ih := float64(f.Bounds().Dx()), float64(f.Bounds().Dy())
 		k := math.Min(pw/iw, ph/ih)
 		fx, fy := px+(pw-iw*k)/2, py+(ph-ih*k)/2
+		// The image's own pixels to the frame's cells (a picture in pixels
+		// at its size), bilinear as the cells' rasterizePixels was.
+		sx, sy := float64(f.Bounds().Dx())/iw, float64(f.Bounds().Dy())/ih
+		filter := ebiten.FilterNearest
+		if pixels {
+			filter = ebiten.FilterLinear
+		}
 		vs, is := polygon(fr.Inner)
 		for i := range vs {
-			vs[i].SrcX = float32((float64(vs[i].DstX) - fx) / k)
-			vs[i].SrcY = float32((float64(vs[i].DstY) - fy) / k)
+			vs[i].SrcX = float32((float64(vs[i].DstX) - fx) / k * sx)
+			vs[i].SrcY = float32((float64(vs[i].DstY) - fy) / k * sy)
 			vs[i].ColorR, vs[i].ColorG, vs[i].ColorB, vs[i].ColorA = 1, 1, 1, 1
 		}
-		dst.DrawTriangles(vs, is, f, &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest, FillRule: ebiten.FillRuleNonZero})
+		dst.DrawTriangles(vs, is, f, &ebiten.DrawTrianglesOptions{Filter: filter, FillRule: ebiten.FillRuleNonZero})
+		if sc, ok := currentScan(); ok {
+			// The effect's scan lines, in the screen's pixels: as fine in
+			// every pane.
+			for i := range vs {
+				vs[i].SrcX, vs[i].SrcY = vs[i].DstX, vs[i].DstY
+			}
+			dst.DrawTriangles(vs, is, g.scanImage(sc), &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest,
+				FillRule: ebiten.FillRuleNonZero, Address: ebiten.AddressRepeat})
+		}
 	}
+}
+
+// scanImage is a column of the scan lines' pattern: its first rows dark.
+func (g *game) scanImage(sc effectScan) *ebiten.Image {
+	r := &g.r
+	if r.scan != nil && r.scanOf == sc {
+		return r.scan
+	}
+	if r.scan != nil {
+		r.scan.Deallocate()
+	}
+	img := ebiten.NewImage(1, sc.period)
+	pix := make([]byte, 4*sc.period)
+	for y := range sc.dark {
+		pix[4*y+3] = byte(scanAlpha(sc, y) * 255) // black, premultiplied
+	}
+	img.WritePixels(pix)
+	r.scan, r.scanOf = img, sc
+	return img
 }
 
 // drawFrames draws the frames over the cells and the text. They change only
@@ -358,31 +393,45 @@ func (g *game) drawCaptions(dst *ebiten.Image, panes []Pane, glow bool) {
 // frameImage returns the pane's frame as an image (a pixel per subpixel),
 // rasterizing it when it is a new one; a black and white frame is tinted
 // with tint, its owner's colour.
-func (g *game) frameImage(p Pane, tint color.RGBA) *ebiten.Image {
+func (g *game) frameImage(p Pane, tint color.RGBA) (img *ebiten.Image, vw, vh float64, pixels bool) {
 	if g.in.Frame == nil || g.in.FrameRGB == nil {
-		return nil
+		return nil, 0, 0, false
 	}
 	f := g.in.Frame(p.Frame)
 	if f == nil || f.Cols <= 0 || f.Rows <= 0 {
-		return nil
+		return nil, 0, 0, false
 	}
 	r := &g.r
 	key := [2]int{p.Row, p.Col}
 	pi := r.paneImgs[key]
+	// The image stands for the frame's cells, cellW x cellH each (vw x
+	// vh); a picture in pixels is kept at its own size and drawn larger.
+	vw, vh = float64(f.Cols*cellW), float64(f.Rows*cellH)
+	pixels = hasPixels(f)
 	w, h := f.Cols*cellW, f.Rows*cellH
-	if pi == nil || pi.img.Bounds().Dx() != w || pi.img.Bounds().Dy() != h {
+	if pixels {
+		w, h = f.Pixels.W, f.Pixels.H
+	}
+	if pi == nil || pi.pixels != pixels || pi.img.Bounds().Dx() != w || pi.img.Bounds().Dy() != h {
 		if pi != nil {
 			pi.img.Deallocate()
 		}
-		pi = &paneImage{img: ebiten.NewImage(w, h), pix: make([]byte, w*h*4)}
+		// Its own texture: drawn larger with the bilinear filter, the
+		// edges sample no other image's.
+		im := ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), &ebiten.NewImageOptions{Unmanaged: pixels})
+		pi = &paneImage{img: im, pix: make([]byte, w*h*4), pixels: pixels}
 		r.paneImgs[key] = pi
 	}
 	if pi.frame != p.Frame {
-		g.rasterize(f, pi.pix, w, tint)
+		if pixels {
+			rasterizeSource(g.in, f.Pixels, pi.pix, tint)
+		} else {
+			g.rasterize(f, pi.pix, w, tint)
+		}
 		pi.img.WritePixels(pi.pix)
 		pi.frame = p.Frame
 	}
-	return pi.img
+	return pi.img, vw, vh, pixels
 }
 
 // drawCaption writes the caption on its plate, digits bold (with glow: into

@@ -9,12 +9,22 @@ permissions:
   contents: write
   packages: write
 
+# Babe (the smooth video coder) is a private module: go fetches it with
+# BABE_TOKEN (a token that can read svanichkin/Babe), not through the
+# public proxy and checksum database.
+env:
+  GOPRIVATE: github.com/svanichkin/Babe
+
 jobs:
   build_check:
     name: Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Access the private Babe module
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -43,6 +53,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Access the private Babe module
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -68,6 +82,10 @@ jobs:
     needs: build_check
     steps:
       - uses: actions/checkout@v4
+
+      - name: Access the private Babe module
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -104,6 +122,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Access the private Babe module
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -134,6 +156,10 @@ jobs:
         arch: [amd64, 386, arm]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Access the private Babe module
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5

@@ -3,6 +3,7 @@ package tcp
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestClientReportsIncompatibleServer(t *testing.T) {
 		if _, err := br.ReadString('\n'); err != nil {
 			return
 		}
-		remote.Write([]byte("INCOMPATIBLE srv\tproto=9 min=9 app=v9.0.0 codec=opus\n"))
+		remote.Write([]byte(fmt.Sprintf("INCOMPATIBLE srv\tproto=%d min=%d app=v9.0.0 codec=opus\n", ProtocolVersion+1, ProtocolVersion+1)))
 	}()
 	dial := func(string, int) (net.Conn, error) { return local, nil }
 	_, _, err := StartSignalClientTCP("me", "127.0.0.1", 1, nil, nil, dial)
@@ -72,7 +73,7 @@ func TestClientReportsIncompatibleServer(t *testing.T) {
 	if !errors.As(err, &inc) {
 		t.Fatalf("got %v, want an IncompatibleError", err)
 	}
-	if inc.Peer.App != "v9.0.0" || inc.Peer.Proto != 9 {
+	if inc.Peer.App != "v9.0.0" || inc.Peer.Proto != ProtocolVersion+1 {
 		t.Fatalf("peer info %+v", inc.Peer)
 	}
 	if msg := err.Error(); !strings.Contains(msg, "v9.0.0") || !strings.Contains(msg, "v2.0.0") {
@@ -91,7 +92,7 @@ func TestServerRejectsIncompatibleClient(t *testing.T) {
 		defer close(done)
 		serverHandleIncoming(remote, &callOwner{}, nil, nil, nil)
 	}()
-	local.Write([]byte("HELLO future\tproto=9 min=9 app=v9.0.0\n"))
+	local.Write([]byte(fmt.Sprintf("HELLO future\tproto=%d min=%d app=v9.0.0\n", ProtocolVersion+1, ProtocolVersion+1)))
 	local.SetReadDeadline(time.Now().Add(3 * time.Second))
 	line, err := bufio.NewReader(local).ReadString('\n')
 	if err != nil {

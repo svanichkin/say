@@ -201,6 +201,9 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 		case frameTermSize:
 			if cols, rows, ok := decodeTermSizeFrame(payload); ok && s.termSync != nil {
 				s.termSync.notifyPeer(cols, rows)
+				if onPeerPixels != nil {
+					onPeerPixels(termSizePixels(payload))
+				}
 			}
 		case framePing:
 			if s.keepalive == nil {

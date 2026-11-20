@@ -25,6 +25,10 @@ import (
 
 var pixelMode bool
 
+// PixelMode reports whether Say draws into its window (SetPixelMode), not
+// a terminal.
+func PixelMode() bool { return pixelMode }
+
 // SetPixelMode prepares the interface for the pixel window: 24-bit colour,
 // no terminal input (the window sends it). Call it before the renderer
 // starts.
@@ -484,4 +488,61 @@ func writePixelBracket(out *strings.Builder, row, left, width int, spans ...[2]i
 func AccentMono() bool {
 	spec := activeColorFilter.Load()
 	return pixelMode && spec != nil && spec.key == "bw"
+}
+
+// staticPixelFrame is the window's no-signal noise for a pane of cols x
+// rows cells: a TV's snow in pixels (StaticPixels, 4 x 8 a cell, as the
+// window draws cells), not glyphs.
+func staticPixelFrame(cols, rows int, now time.Time) *codec.TextFrame {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	n := cols * rows
+	cells := make([]byte, 7*n)
+	return &codec.TextFrame{Cols: cols, Rows: rows, Width: cols * 4, Height: rows * 8,
+		Glyphs: cells[:n:n], FgYCbCr: cells[n : 4*n : 4*n], BgYCbCr: cells[4*n:],
+		Pixels: StaticPixels(cols*4, rows*8, now)}
+}
+
+// StaticPixels is a w x h picture of a TV's snow (the window's no-signal
+// noise, and a picture lost on a bad path): each grain a pixel, smeared a
+// little along its row as an analog picture's; each row a little brighter
+// or darker than the next, now and then one much brighter; a darker band
+// rolling down slowly (the hum). Grey: the window's effects tone it as any
+// picture.
+func StaticPixels(w, h int, now time.Time) *codec.Pixels {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	buf := make([]byte, 3*w*h)
+	y, chroma := buf[:w*h:w*h], buf[w*h:]
+	for i := range chroma {
+		chroma[i] = 128
+	}
+	rng := rand.NewPCG(uint64(now.UnixNano()), uint64(nextNoiseSeed()))
+	// The hum: a band of a third of the picture, once down in 3 s.
+	t := float64(now.UnixMilli()%3000) / 3000
+	for r := range h {
+		row := y[r*w : (r+1)*w]
+		bits := rng.Uint64()
+		gain := 0.88 + float64(bits&63)/63*0.24 // the row's own
+		if bits>>6&255 == 0 {
+			gain = 1.6 // a bright streak
+		}
+		if d := math.Abs(float64(r)/float64(h) - t); min(d, 1-d) < 1.0/6 {
+			gain *= 0.75
+		}
+		prev := 128.0
+		for x := 0; x < w; x += 4 {
+			bits = rng.Uint64()
+			for k := 0; k < 4 && x+k < w; k++ {
+				// Two uniforms summed: most grains grey, some black or white.
+				v := float64(bits>>(16*k)&255) + float64(bits>>(16*k+8)&255) - 255
+				v = 128 + v*0.9
+				prev = 0.6*v + 0.4*prev                                // smeared along the row
+				row[x+k] = byte(math.Min(255, math.Max(0, prev*gain))) // the package has its own int max
+			}
+		}
+	}
+	return &codec.Pixels{W: w, H: h, Y: y, Cb: chroma[:w*h], Cr: chroma[w*h:]}
 }

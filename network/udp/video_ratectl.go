@@ -26,7 +26,9 @@ type rateCtl struct {
 	secStart time.Duration // the second being measured: since, its bits, the cells times the time they cover
 	secBits  float64
 	secCellS float64
-	cutFrom  float64  // the rate before the last cut
+	cutFrom  float64 // the rate before the last cut
+	capacity float64 // kbit/s that arrived when the link was last over (0: not known; smooth video)
+	capAt    time.Duration
 	demand   float64  // kbit/s the whole picture would take at the full grid, as it is now (the sender's estimate)
 	why      string   // why the last cut, for the log
 	sentWin  []sentAt // what went in the last rateSentKeep
@@ -68,6 +70,14 @@ const (
 	rateSilent    = 500 * time.Millisecond // no frame this long (one goes every sayHeartbeat at least): the path is gone
 	rateSentKeep  = 15 * time.Second
 	rateSeries    = 5 * time.Second // cuts this close are one series
+	// Smooth video (video_smooth.go): near what the link took when it was
+	// last over the rate rises slowly for a while (no sawtooth back into
+	// it), and forgets it when as much more goes through without a queue
+	// (a path changing gave a false one).
+	rateCapNear = 0.9
+	rateUpCap   = 1.005
+	rateCapHold = 5 * time.Second
+	rateCapPast = 1.05
 )
 
 func newRateCtl() rateCtl { return rateCtl{rate: rateStart, lastCut: -time.Hour, cutFrom: rateMax} }
@@ -114,6 +124,7 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 				// To below what arrived, but at most half what went at once: a
 				// path that turned longer looks the same for a moment.
 				c.rate = max(rateMin, min(c.rate, max(got*rateCut, min(c.rate, c.sending(now))/2)))
+				c.capacity, c.capAt = got, now
 			default: // loss: frames of fewer fragments lose less, gently (as WebRTC's)
 				c.rate = max(rateMin, c.rate*(1-r.loss1s/2))
 			}
@@ -124,6 +135,14 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 		if c.rate < 0.9*c.cutFrom {
 			up = rateUp
 		}
+		if videoSmooth && c.capacity > 0 && now-c.capAt < rateCapHold {
+			switch {
+			case c.sending(now) >= rateCapPast*c.capacity:
+				c.capacity = 0
+			case c.rate*up >= rateCapNear*c.capacity && c.rate < c.capacity:
+				up = rateUpCap
+			}
+		}
 		// Not past twice what the stream uses, or half again what the
 		// picture would take at the full grid: a still picture proves
 		// nothing about the path, and when it moves again it must not pour
@@ -131,6 +150,23 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 		// narrow path must still be let grow back.
 		c.rate = min(rateMax, c.rate*up, max(rateFloorCap, 2*c.sending(now), 1.5*c.demand))
 	}
+}
+
+// queueing takes a queue growing on the way now (smooth video: the newest
+// frame waited long, longer than the report before, less arriving than
+// went: got kbit/s), before the standing queue shows it: the rate drops to
+// below what arrives at once, not a round trip later.
+func (c *rateCtl) queueing(now time.Duration, got float64, q time.Duration) {
+	if now-c.lastCut < 2*rateReportEvery {
+		return
+	}
+	if now-c.lastCut >= rateSeries {
+		c.cutFrom = c.rate
+	}
+	c.lastCut = now
+	c.rate = max(rateMin, min(c.rate, got*rateCut))
+	c.capacity, c.capAt = got, now
+	c.why = fmt.Sprintf("очередь растёт (%d мс), доходит %.0f кбит/с", q.Milliseconds(), got)
 }
 
 // sentBetween is what went from a to b, kbit/s over that time.

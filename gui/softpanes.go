@@ -196,8 +196,14 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 			continue
 		}
 		pr := sp.place.Intersect(r)
+		sc, scanOn := currentScan()
 		for y := pr.Min.Y; y < pr.Max.Y; y++ {
 			vy := (y - sp.place.Min.Y) * sp.vh / sp.place.Dy()
+			// The effect's scan lines, in the screen's pixels.
+			keep := 256
+			if scanOn && (y-sp.place.Min.Y)%sc.period < sc.dark {
+				keep = int(256 * (1 - scanAlpha(sc, (y-sp.place.Min.Y)%sc.period)))
+			}
 			for x := pr.Min.X; x < pr.Max.X; x++ {
 				m := int(sp.mask.Pix[(y-sp.bounds.Min.Y)*sp.mask.Stride+x-sp.bounds.Min.X])
 				if m == 0 {
@@ -206,9 +212,9 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 				vx := (x - sp.place.Min.X) * sp.vw / sp.place.Dx()
 				v := sp.video[(vy*sp.vw+vx)*4:]
 				o := (y*s.w + x) * softBytes
-				s.out[o] = blend(s.out[o], v[2], m)
-				s.out[o+1] = blend(s.out[o+1], v[1], m)
-				s.out[o+2] = blend(s.out[o+2], v[0], m)
+				s.out[o] = blend(s.out[o], byte(int(v[2])*keep>>8), m)
+				s.out[o+1] = blend(s.out[o+1], byte(int(v[1])*keep>>8), m)
+				s.out[o+2] = blend(s.out[o+2], byte(int(v[0])*keep>>8), m)
 			}
 		}
 	}

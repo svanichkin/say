@@ -700,7 +700,14 @@ func startVideoSender(wg *sync.WaitGroup, pc net.PacketConn, stop func(),
 				if selfOK {
 					start := time.Now()
 					// The self view never leaves this process: no palette or payload.
-					selfView, err := previewEncoder.SelfView(rawFrame, selfCols, selfRows)
+					// With smooth video in the window: the camera's pixels.
+					var selfView *codec.TextFrame
+					var err error
+					if videoSmooth && ui.PixelMode() {
+						selfView = pixelSelfView(rawFrame, selfCols, selfRows)
+					} else {
+						selfView, err = previewEncoder.SelfView(rawFrame, selfCols, selfRows)
+					}
 					tEncodeLocal += time.Since(start)
 					if err != nil {
 						log.Printf("[video/udp] Encode local: %v", err)

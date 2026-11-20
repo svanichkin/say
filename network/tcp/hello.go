@@ -36,12 +36,14 @@ import (
 //	   receiver's reports on what arrived (0x0c, 0x0f, 0x10 are gone)
 //	8  video in bands of rows only, no lower layer; a band that hung shows
 //	   noise; after a loss every frame is coded against an acknowledged one
+//	9  a band's frame may be Babe's smooth coder's pixels (network/udp/
+//	   video_smooth.go, mark 0xB5) in place of Say's cells, the default
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 8
-	MinProtocolVersion = 8
+	ProtocolVersion    = 9
+	MinProtocolVersion = 9
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

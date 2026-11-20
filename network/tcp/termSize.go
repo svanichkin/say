@@ -54,6 +54,32 @@ func sendTermSizeFrame(conn net.Conn, cols, rows int) error {
 	return writeFrameSafe(conn, frameTermSize, payload)
 }
 
+// pixelVideo: this side shows the peer's video in pixels (the window, with
+// Babe's smooth coder): its size requests say so (termSizePixels), and the
+// peer sends the camera's picture in the pane's shape, not shrunk to the
+// cells. Older builds and Say's cells never see the flag.
+var pixelVideo bool
+
+// SetPixelVideo says whether this side shows video in pixels.
+func SetPixelVideo(on bool) { pixelVideo = on }
+
+// onPeerPixels receives whether the peer shows our video in pixels.
+var onPeerPixels func(bool)
+
+// SetOnPeerPixels sets what is told whether the peer shows our video in
+// pixels (with each of its size requests).
+func SetOnPeerPixels(f func(bool)) { onPeerPixels = f }
+
+// termSizePixelsFlag follows cols and rows when the requester shows video
+// in pixels.
+const termSizePixelsFlag = 'P'
+
+// termSizePixels reports whether a size request asks for pixels.
+func termSizePixels(payload []byte) bool {
+	n := len(codec.PayloadMagic) + 4
+	return len(payload) == n+1 && payload[n] == termSizePixelsFlag
+}
+
 // encodeTermSizeFrame кодирует (cols, rows) в payload для frameTermSize с магическим префиксом "TEXT".
 func encodeTermSizeFrame(cols, rows int) ([]byte, bool) {
 	if cols <= 0 || rows <= 0 {
@@ -70,13 +96,16 @@ func encodeTermSizeFrame(cols, rows int) ([]byte, bool) {
 	offset := len(codec.PayloadMagic)
 	binary.BigEndian.PutUint16(buf[offset:offset+2], uint16(cols))
 	binary.BigEndian.PutUint16(buf[offset+2:offset+4], uint16(rows))
+	if pixelVideo {
+		buf = append(buf, termSizePixelsFlag)
+	}
 	return buf, true
 }
 
 // decodeTermSizeFrame decodes a frameTermSize payload into terminal dimensions (cols, rows).
 // It expects the payloadMagic prefix followed by two big-endian uint16 values.
 func decodeTermSizeFrame(payload []byte) (cols, rows int, ok bool) {
-	if len(payload) != len(codec.PayloadMagic)+4 {
+	if len(payload) != len(codec.PayloadMagic)+4 && !termSizePixels(payload) {
 		return 0, 0, false
 	}
 	if string(payload[:len(codec.PayloadMagic)]) != codec.PayloadMagic {

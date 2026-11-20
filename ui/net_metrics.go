@@ -175,3 +175,30 @@ func PeerVideoLossSnapshot() (loss float64, updatedAt time.Time) {
 	defer netRateMu.RUnlock()
 	return peerVideoLoss, peerVideoLossUpdatedAt
 }
+
+// The peer's video's lag: how much longer its newest datagram took than
+// the shortest trip of the last 10 s (network/udp's queue measure, in each
+// report of the rate), smoothed.
+var videoLag struct {
+	sync.Mutex
+	d   time.Duration
+	set bool
+}
+
+// UpdateVideoLag notes the incoming video's lag d.
+func UpdateVideoLag(d time.Duration) {
+	videoLag.Lock()
+	if !videoLag.set {
+		videoLag.d, videoLag.set = d, true
+	} else {
+		videoLag.d += (d - videoLag.d) / 4
+	}
+	videoLag.Unlock()
+}
+
+// VideoLagSnapshot is the incoming video's lag now (0: none known).
+func VideoLagSnapshot() time.Duration {
+	videoLag.Lock()
+	defer videoLag.Unlock()
+	return videoLag.d
+}

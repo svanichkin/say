@@ -281,6 +281,12 @@ type AppOptions struct {
 	VideoHold   int    // cell hold threshold (mean colour difference per pixel); -video-hold
 	VideoBand   int    // video band height in rows (0: one band); -video-band
 	NetSim      string // outgoing media through a simulated bad path (network/udp/netsim.go); -netsim
+	VideoCodec  string // "smooth" (Babe's, the default) or "say" (the cells, as before; both peers); -video-codec
+	VideoQ      int    // the smooth coder's quality on a path with trouble (0: its default); -video-q
+	VideoQMax   int    // and on a clean one; -video-qmax
+	VideoFX     string // an effect over the video panes in the window (default hologram; none: off); -video-fx
+	VideoLight  bool   // dark video drawn brighter in the window; -video-light
+	VideoSharp  int    // the video's sharpness in the window, percent (0: off); -video-sharp
 	HoldDebug   bool
 	ShowVersion bool
 	ShowDonate  bool
@@ -313,6 +319,8 @@ func ParseCLI() (*AppOptions, error) {
 		AudioCodec:  "amrnb",
 		VideoHold:   10,
 		VideoBand:   0,
+		VideoFX:     "hologram",
+		VideoSharp:  100,
 		// The system voice processing (echo cancellation, noise suppression)
 		// is the default where Say has it: macOS and Windows.
 		// -sysaudio=false opts out.
@@ -816,6 +824,31 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 			if hasValue && value != "" {
 				opts.NetSim = value
 			}
+		case "video-codec":
+			if value != "say" && value != "smooth" {
+				return fmt.Errorf("invalid -video-codec %q: want say or smooth", value)
+			}
+			opts.VideoCodec = value
+		case "video-q", "video-qmax":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 1 || n > 99 {
+				return fmt.Errorf("invalid -%s %q: want 1..99", key, value)
+			}
+			if key == "video-q" {
+				opts.VideoQ = n
+			} else {
+				opts.VideoQMax = n
+			}
+		case "video-fx":
+			opts.VideoFX = value
+		case "video-sharp":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 || n > 400 {
+				return fmt.Errorf("invalid -video-sharp %q: want 0..400 (percent; 0: off)", value)
+			}
+			opts.VideoSharp = n
+		case "video-light":
+			opts.VideoLight = !hasValue || value == "" || value == "true" || value == "1" || value == "on"
 		case "video-band":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-video-band requires a value (rows; 0: one band)")
@@ -967,7 +1000,7 @@ func normalizeFlagKey(raw string) string {
 
 func flagRequiresValue(key string) bool {
 	switch key {
-	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "video-band", "camera", "colors", "lang":
+	case "config", "transport", "proto", "contacts", "port", "fps", "audio-codec", "video-hold", "video-band", "video-codec", "video-q", "video-qmax", "video-fx", "video-sharp", "camera", "colors", "lang":
 		return true
 	default:
 		return false

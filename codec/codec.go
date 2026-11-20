@@ -33,6 +33,16 @@ type TextFrame struct {
 	Glyphs  []byte
 	FgYCbCr []byte
 	BgYCbCr []byte
+	// Pixels, when set, is the picture itself (video in pixels, Babe's
+	// smooth coder, in the window): the window draws it in place of the
+	// cells, which the terminal draws.
+	Pixels *Pixels
+}
+
+// Pixels is a picture of W x H pixels, its Y, Cb and Cr planes (4:4:4).
+type Pixels struct {
+	W, H      int
+	Y, Cb, Cr []byte
 }
 
 // CharData describes a single terminal character cell and its colors.

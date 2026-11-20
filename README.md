@@ -87,7 +87,7 @@ external Yggdrasil daemon or web stack.
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. Both peers need this
-  version (protocol 8).
+  version (protocol 9).
 - **Small fixed buffers.** Every call plays with a 10 ms x 2 speaker buffer
   (like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms jitter
   buffer, in the LAN and over the internet alike. Steady clock drift between
@@ -269,6 +269,15 @@ $env:CGO_ENABLED = "1"
 go run .
 ```
 
+### The video coder (Babe)
+
+The smooth video coder is Babe's (`github.com/svanichkin/Babe`), a private
+module: building Say fetches it with `GOPRIVATE=github.com/svanichkin/Babe`
+and a git login that can read it (the release workflow: the `BABE_TOKEN`
+secret, a token with read access to that repository). Working on both, a
+`go.work` beside `go.mod` (ignored by git) builds Say against a Babe
+checkout instead: `go work init . ../path/to/Babe`.
+
 ### Debug build
 
 Builds are release builds by default. A debug build (`-tags debug`) traces
@@ -408,6 +417,10 @@ codec on both sides). Relevant CLI switches:
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is coded, and the rate control sends what the path allows.
 - `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `10`, `0` disables; higher is calmer, but low-contrast details start to lag). N holds up to 88x36 cells, the camera's own pixels; a larger frame holds harder, up to 2N at 160x65: finer cells mostly carry the camera's noise there (160x65 at 2N takes about 40% fewer bytes than at N and looks the same).
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
+- `-video-codec=say` – (both peers) Say's video of cells as before (as protocol 8 sent it). By default the video goes in pixels by Babe's smooth coder: blocks that copy the frame before (moved or not) or are drawn anew; the window shows the pixels, the terminal turns them into its cells; the rate is met by the quality (down to q10) and by frames left out. `-video-q=N` – its quality on a path with loss, a queue or a cut of the rate (default 40); `-video-qmax=N` – how high it rises on a path clean for 3 s, a point every 0.5 s (default 50).
+- `-video-fx=NAME` – (the window) the effect over both video panes, `hologram` by default (`none`: off): `hologram`, `neon`, `thermal`, `duotone`, `bladerunner`, `poster`, `aberration`, `crt`, `glitch`.
+- `-video-light` – (the window) the exposure as a photo editor's shadows and highlights with auto levels, both panes: each place lifted or toned by its own light (a dark face before a bright window lifted, the window not burnt), then the range stretched to full; slowly following the picture (the hologram has it anyway); the stream is not touched.
+- `-video-sharp=N` – (the window) the video's sharpness, percent, 100 by default (`0`: off): an unsharp mask over the luma at the picture's own size before it is drawn larger, the coder's faint noise left alone and no rings round edges; the stream is not touched.
 - `-video-band=N` – the height of the video's bands in rows (default `0`: one band, the whole picture in one datagram). Each band is its own stream in its own datagrams: a loss breaks only its band, shown as noise until it recovers. Shorter bands send more, smaller datagrams, each with Yggdrasil's headers: more traffic and more delay.
 - `-netsim[=NAME]` – for testing (bare: `heavy`, the worst): this side's outgoing sound and video go through a simulated bad path on top of the real one, and the peer shows what arrives. `loss`: 3% loss in bursts; `narrow`: a link of 1000 kbit/s narrowing to 150 for 10 s of every 30; `switch`: a path switch every 40 s (1 s of outage, the round trip up to 6 s and back down to about 200 ms over some 15 s); `mixed`: these in turn over 60 s; `heavy`: all at once (300 kbit/s dropping to 100, 3% loss in bursts, a switch every 30 s). Datagrams wait in the link's queue (dropped past 1 s), take half the round trip plus up to 50 ms more, and are lost by 1400-byte fragment. Set it on both peers for both ways; the control connection is not touched.
 - `-camera /dev/videoN` – use this camera device only (Linux). Without it every `/dev/video*` capture node is tried in turn. Use it when a phone or board exposes several nodes, for example a `v4l2loopback` device that another program (such as a PinePhone camera service) fills: `-camera /dev/video0`.

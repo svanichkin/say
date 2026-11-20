@@ -1,7 +1,7 @@
 package codec
 
 // A cell's mask and colour sums (findCharDataBlock), for every cell of a
-// frame: in NEON on arm64 (cell_arm64.s), in Go elsewhere and with the
+// frame: in NEON on arm64 (cell_arm64.s), SSE2 on amd64 (cell_amd64.s), in Go elsewhere and with the
 // purego tag; the same results.
 //
 // cellMask splits a cell along its widest channel (the first wins a tie) at

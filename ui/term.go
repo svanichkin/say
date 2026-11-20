@@ -1465,9 +1465,12 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 	idle := frame == nil || (!updatedAt.IsZero() && now.Sub(updatedAt) > frameFreezeThreshold)
 	if idle {
 		cols, rows := detailSize(slot.cols, slot.rows)
-		if updateIdlePatternSlot(frameType, true, now) {
+		switch {
+		case updateIdlePatternSlot(frameType, true, now):
 			frame = testCardTextFrame(cols, rows)
-		} else {
+		case pixelMode:
+			frame = staticPixelFrame(cols, rows, now) // the window: a TV's snow
+		default:
 			frame = noiseTextFrame(cols, rows)
 		}
 	} else {
@@ -2594,9 +2597,11 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	}
 	leftCols := availableCols / 2
 	rightCols := availableCols - leftCols
-	// Panes are physically square (1:1): with cells twice as tall as wide,
-	// a pane has twice as many columns as rows. Keep at least three rows for
-	// chat history, plus the caption, separators and the input row.
+	// Panes are at most physically square (1:1): with cells twice as tall as
+	// wide, a pane has twice as many columns as rows. Keep at least three
+	// rows for chat history, plus the caption, separators and the input row.
+	// A short terminal makes them wider than square, the full width (no
+	// gaps at the sides): the picture is cropped to the pane's shape.
 	paneCols := min(min(leftCols, rightCols), codec.MaxFrameCols)
 	// What the call screen puts under the panes (renderChatScreen): the
 	// caption, the separator, three rows of chat, the input. The window has
@@ -2609,9 +2614,6 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	paneRows := min(height-reserved, codec.MaxFrameRows)
 	if fromCols := int(math.Round(float64(paneCols) * termCellWidthToHeight)); fromCols < paneRows {
 		paneRows = fromCols
-	} else {
-		// The terminal is too short: narrow the panes and center them.
-		paneCols = min(paneCols, int(math.Round(float64(paneRows)/termCellWidthToHeight)))
 	}
 	if paneRows < 1 || paneCols < 1 {
 		return
