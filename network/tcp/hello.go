@@ -38,12 +38,14 @@ import (
 //	   noise; after a loss every frame is coded against an acknowledged one
 //	9  a band's frame may be Babe's smooth coder's pixels (network/udp/
 //	   video_smooth.go, mark 0xB5) in place of Say's cells, the default
+////	10 Babe's smooth change frames take their image header from their
+//	   reference's when the same (a byte instead of 20 of them)
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 9
-	MinProtocolVersion = 9
+	ProtocolVersion    = 10
+	MinProtocolVersion = 10
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.

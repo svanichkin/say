@@ -11,7 +11,7 @@ require (
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade
 	github.com/klauspost/compress v1.20.3
 	github.com/rivo/uniseg v0.4.7
-	github.com/svanichkin/Babe v0.2.2-0.20261120103235-b18c245d2df7
+	github.com/svanichkin/Babe v0.2.2-0.20261120160256-475d7fdae6b6
 	github.com/svanichkin/gocam v0.4.0
 	github.com/svanichkin/ygg v0.6.6
 	github.com/thesyncim/gopus v0.2.2
