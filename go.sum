@@ -51,8 +51,8 @@ github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef h1:Ch6Q+AZUxDBCVqd
 github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef/go.mod h1:nXTWP6+gD5+LUJ8krVhhoeHjvHTutPxMYl5SvkcnJNE=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/svanichkin/Babe v0.2.2-0.20261120203147-f589788c99af h1:Qvodp1rXT+WsSPntm9JTJsVNjb0se5vqMG56C2HhNVA=
-github.com/svanichkin/Babe v0.2.2-0.20261120203147-f589788c99af/go.mod h1:FIes0igqO55S4bkkzUFYHq+on0F5DVPfrN6RO00atmU=
+github.com/svanichkin/Babe v0.2.2-0.20261120204647-88784da0b33b h1:oJtH06OT+55hyGoPs4HoBeOMAJfFI0XUU5llx+0C1do=
+github.com/svanichkin/Babe v0.2.2-0.20261120204647-88784da0b33b/go.mod h1:FIes0igqO55S4bkkzUFYHq+on0F5DVPfrN6RO00atmU=
 github.com/svanichkin/gocam v0.4.0 h1:DhiOmhx9/gGKpF0CRPmdyCccpf+TpBkgYpMNnDMSfYo=
 github.com/svanichkin/gocam v0.4.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
 github.com/svanichkin/ygg v0.6.6 h1:LmJADEochEjf8DVnjze/DEAGAmDRE46uRETqOUURtjc=

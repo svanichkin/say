@@ -87,7 +87,7 @@ external Yggdrasil daemon or web stack.
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. Both peers need this
-  version (protocol 11).
+  version (protocol 12).
 - **Small fixed buffers.** Every call plays with a 10 ms x 2 speaker buffer
   (like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms jitter
   buffer, in the LAN and over the internet alike. Steady clock drift between

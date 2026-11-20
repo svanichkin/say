@@ -42,12 +42,14 @@ import (
 //	   reference's when the same (a byte instead of 20 of them)
 //	11 Say's frames with the compact header (codec.appendCompactHeader:
 //	   1-4 bytes where TEXT took 9-13)
+//	12 Babe's cell colour layer may start its bands from the trained
+//	   models (flag 128 of the layer)
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 11
-	MinProtocolVersion = 11
+	ProtocolVersion    = 12
+	MinProtocolVersion = 12
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.
