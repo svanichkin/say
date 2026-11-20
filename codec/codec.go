@@ -448,8 +448,14 @@ type Encoder struct {
 	bgColors []paletteColor
 	xMap     []int
 	yMap     []int
-	xOff     []int // byte offset of each sampled column in a row
-	rowOff   []int // byte offset of each sampled row
+	xOff     []int    // byte offset of each sampled column in a row
+	rowOff   []int    // byte offset of each sampled row
+	box      []byte   // the frame averaged down to the cells' pixels (boxScale)
+	boxEven  []uint64 // a row's sums of the even bytes, four 16-bit lanes a word
+	boxOdd   []uint64 // and of the odd
+	boxSum   []uint16 // the sums unpacked
+	boxX     []int    // the first source column of each of its pixels (and the end)
+	boxY     []int    // the first source row of each of its rows (and the end)
 	cellMemo cellMemo
 
 	// match finds the nearest entry of lastPalette and remembers the answers
@@ -493,6 +499,7 @@ type Encoder struct {
 	holdBits   int
 	holdDebug  bool // tint held cells lilac (-video-hold-debug)
 	held       []bool
+	holdAge    []uint16 // frames each cell has been held for
 	prevGlyphs []byte
 	prevFg     []paletteColor
 	prevBg     []paletteColor
@@ -1340,6 +1347,20 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 	for y, sy := range yMap {
 		rowOff[y] = sy * srcW * 3
 	}
+	data := frame.Data
+	if BoxScale && scale < 1 {
+		data = e.boxScale(frame.Data, srcW, w, h, scaledW, scaledH, srcH, xOffset, yOffset)
+		for x := range xOff {
+			sx := x
+			if e.mirror {
+				sx = w - 1 - x
+			}
+			xOff[x] = sx * 3
+		}
+		for y := range rowOff {
+			rowOff[y] = y * w * 3
+		}
+	}
 
 	totalCells := cols * rows
 	glyphLookup := glyphIndexLookup()
@@ -1390,7 +1411,6 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 			defer wg.Done()
 			gc := &e.glyphCache[start]
 			var block cellBlock
-			data := frame.Data
 			for by := start; by < rows; by += workers {
 				for bx := 0; bx < cols; bx++ {
 					cell := by*cols + bx
@@ -1451,6 +1471,95 @@ func (e *Encoder) buildCellData(frame Frame, cols, rows int, bw bool) ([]byte, [
 	wg.Wait()
 
 	return glyphs, fgColors, bgColors, w, h, nil
+}
+
+// BoxScale: a frame larger than the cells' pixels is averaged down to them
+// (each pixel the mean of the camera's pixels it covers) instead of taking
+// one camera pixel for each.
+var BoxScale = true
+
+// boxScale averages the part of the frame the cells take (scaled to
+// scaledW x scaledH, the cells' w x h from xOffset, yOffset) down to w x h
+// pixels, each the mean of the source pixels it covers. The rows of a
+// pixel are summed first, eight bytes at a time in 16-bit lanes (a pixel
+// covers far fewer than 257 rows), then the columns.
+func (e *Encoder) boxScale(src []byte, srcW, w, h, scaledW, scaledH, srcH, xOffset, yOffset int) []byte {
+	if cap(e.boxX) < w+1 {
+		e.boxX = make([]int, w+1)
+	}
+	if cap(e.boxY) < h+1 {
+		e.boxY = make([]int, h+1)
+	}
+	bx, by := e.boxX[:w+1], e.boxY[:h+1]
+	// scaledW may come out a pixel short of w (float truncation): the last
+	// pixels then still take a column of their own, as the nearest
+	// sampling's clamp.
+	for x := range w {
+		bx[x] = min(srcW-1, (x+xOffset)*srcW/scaledW)
+	}
+	bx[w] = max(bx[w-1]+1, min(srcW, (w+xOffset)*srcW/scaledW))
+	for y := range h {
+		by[y] = min(srcH-1, (y+yOffset)*srcH/scaledH)
+	}
+	by[h] = max(by[h-1]+1, min(srcH, (h+yOffset)*srcH/scaledH))
+	c0, c1 := bx[0]*3, bx[w]*3 // the bytes of a row the cells take
+	words := (c1 - c0 + 7) / 8
+	if cap(e.box) < w*h*3 {
+		e.box = make([]byte, w*h*3)
+	}
+	if cap(e.boxEven) < words {
+		e.boxEven, e.boxOdd = make([]uint64, words), make([]uint64, words)
+	}
+	if cap(e.boxSum) < words*8 {
+		e.boxSum = make([]uint16, words*8)
+	}
+	out, ev, od, sum := e.box[:w*h*3], e.boxEven[:words], e.boxOdd[:words], e.boxSum[:words*8]
+	const lanes = 0x00ff00ff00ff00ff
+	var tail [8]byte
+	for y := 0; y < h; y++ {
+		clear(ev)
+		clear(od)
+		y0, y1 := by[y], max(by[y+1], by[y]+1)
+		for sy := y0; sy < y1; sy++ {
+			row := src[sy*srcW*3+c0 : sy*srcW*3+c1]
+			full := len(row) / 8
+			for i := 0; i < full; i++ {
+				v := binary.LittleEndian.Uint64(row[i*8:])
+				ev[i] += v & lanes
+				od[i] += v >> 8 & lanes
+			}
+			if full < words {
+				tail = [8]byte{}
+				copy(tail[:], row[full*8:])
+				v := binary.LittleEndian.Uint64(tail[:])
+				ev[full] += v & lanes
+				od[full] += v >> 8 & lanes
+			}
+		}
+		for i := range ev {
+			ve, vo := ev[i], od[i]
+			s := sum[i*8 : i*8+8 : i*8+8]
+			s[0], s[2], s[4], s[6] = uint16(ve), uint16(ve>>16), uint16(ve>>32), uint16(ve>>48)
+			s[1], s[3], s[5], s[7] = uint16(vo), uint16(vo>>16), uint16(vo>>32), uint16(vo>>48)
+		}
+		o := out[y*w*3 : (y+1)*w*3]
+		ny := uint32(y1 - y0)
+		for x := 0; x < w; x++ {
+			x0, x1 := bx[x]*3-c0, max(bx[x+1], bx[x]+1)*3-c0
+			var a0, a1, a2 uint32
+			for i := x0; i < x1; i += 3 {
+				p := sum[i : i+3 : i+3]
+				a0 += uint32(p[0])
+				a1 += uint32(p[1])
+				a2 += uint32(p[2])
+			}
+			n := uint32(x1-x0) / 3 * ny
+			o[x*3] = byte((a0 + n/2) / n)
+			o[x*3+1] = byte((a1 + n/2) / n)
+			o[x*3+2] = byte((a2 + n/2) / n)
+		}
+	}
+	return out
 }
 
 // cellMemo keeps each cell's pixels and the result computed from them.
@@ -1821,14 +1930,28 @@ func (e *Encoder) holdShapes(glyphs []byte, fg, bg []paletteColor) {
 	clear(held)
 	if e.prevCells == n && len(e.prevGlyphs) >= n && len(e.prevFg) >= n && len(e.prevBg) >= n {
 		limit := e.holdBits * 32 // threshold is per pixel; a cell has 32
+		if len(e.holdAge) != n {
+			e.holdAge = make([]uint16, n)
+		}
+		age := e.holdAge
 		for i, g := range glyphs {
 			p := e.prevGlyphs[i]
 			if int(g) >= len(glyphPatterns) || int(p) >= len(glyphPatterns) {
+				age[i] = 0
 				continue
 			}
-			if cellDifference(glyphPatterns[p], e.prevFg[i], e.prevBg[i], glyphPatterns[g], fg[i], bg[i]) <= limit {
-				glyphs[i], fg[i], bg[i] = p, e.prevFg[i], e.prevBg[i]
-				held[i] = true
+			l := limit
+			if HoldAge > 0 && int(age[i]) >= HoldAge {
+				l /= 2
+			}
+			if cellDifference(glyphPatterns[p], e.prevFg[i], e.prevBg[i], glyphPatterns[g], fg[i], bg[i]) > l {
+				age[i] = 0
+				continue
+			}
+			glyphs[i], fg[i], bg[i] = p, e.prevFg[i], e.prevBg[i]
+			held[i] = true
+			if age[i] < math.MaxUint16 {
+				age[i]++
 			}
 		}
 	}
@@ -1861,6 +1984,15 @@ func tintLilac(c paletteColor) paletteColor {
 func (e *Encoder) SetHoldDebug(on bool) {
 	e.holdDebug = on
 }
+
+// HoldAge: a cell held for HoldAge frames is kept only while it differs by
+// less than half the threshold (0: no such limit), so the stale cells a slow
+// change leaves behind get sent in the end. On a recorded call (44x18 cells)
+// 5, 8 and 15 frames gave the same quality for the bytes, 30 less; tried
+// too and dropped: a per-pixel limit and a lower threshold beside a cell
+// that changed (no better for the bytes, the tails beside a moving head
+// stayed).
+var HoldAge = 8
 
 // cellDifference is the summed colour difference over the 32 pixels of two
 // cells, each drawn as fg on its pattern's set bits and bg elsewhere.

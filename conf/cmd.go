@@ -317,7 +317,7 @@ func ParseCLI() (*AppOptions, error) {
 		ListenPort:  network.DefaultListenPort,
 		MaxVideoFPS: 0, // no cap: the frame rate adapts to the peer's loss
 		AudioCodec:  "amrnb",
-		VideoHold:   10,
+		VideoHold:   13,
 		VideoBand:   0,
 		VideoFX:     "hologram",
 		VideoSharp:  100,

@@ -40,7 +40,10 @@ package codec
 // context of empty left and upper cells (+0.1%), the foreground predicted
 // from the cell's background (±0.3%), slower adaptation (+1 to +7%).
 
-import "math/bits"
+import (
+	"math"
+	"math/bits"
+)
 
 // rcCoder is the encoder or the decoder (one of them nil), so both sides
 // run the same code: the value given is ignored when decoding.
@@ -51,6 +54,9 @@ type rcCoder struct {
 
 func (c rcCoder) bit(p *uint16, b int) int {
 	if c.e != nil {
+		if StatsOn {
+			statBit(*p, b)
+		}
 		c.e.bit(p, b)
 		return b
 	}
@@ -59,6 +65,13 @@ func (c rcCoder) bit(p *uint16, b int) int {
 
 func (c rcCoder) tree(probs []uint16, n, v int) int {
 	if c.e != nil {
+		if StatsOn {
+			for i, m := n-1, 1; i >= 0; i-- {
+				b := v >> i & 1
+				statBit(probs[m], b)
+				m = m<<1 | b
+			}
+		}
 		c.e.tree(probs, n, v)
 		return v & (1<<n - 1)
 	}
@@ -332,6 +345,7 @@ func (m *rcChange) restart(cells int) {
 // patch codes a palette patch: entries (slot, code lo, hi), 1 to 256 of
 // them; the decoder passes nil and gets it.
 func (m *rcChange) patch(c rcCoder, p []byte) []byte {
+	statCat = StatPatch
 	n := c.tree(m.patchN[:], 8, len(p)/3-1) + 1
 	if c.d != nil {
 		p = make([]byte, 3*n)
@@ -353,6 +367,7 @@ func (m *rcChange) cells(c rcCoder, glyphs, fg, bg, prevG, prevF, prevB, mask []
 	planes := [3][]byte{glyphs, bg, fg}
 	for i := range glyphs {
 		ch := c.e != nil && mask[i/8]&(1<<(i%8)) != 0
+		statCat = StatChanged
 		ch = c.bit(&m.changed[changedContext(changed, m.prev, i, cols)], b2i(ch)) == 1
 		changed[i] = ch
 		if !ch {
@@ -369,12 +384,14 @@ func (m *rcChange) cells(c rcCoder, glyphs, fg, bg, prevG, prevF, prevB, mask []
 				continue
 			}
 			p, v := int(prevs[f]), int(plane[i])
+			statCat = StatSame
 			if same = c.bit(&m.same[f][b2i(same)], b2i(v == p)) == 1; same {
 				plane[i] = byte(p)
 				continue
 			}
 			left, above, hasLeft, hasAbove := spatialCell(plane, i, cols)
 			eq := false
+			statCat = StatNeighbour
 			if hasLeft && left != p {
 				if eq = c.bit(&m.eqLeft[f][b2i(hasAbove && left == above)], b2i(v == left)) == 1; eq {
 					v = left
@@ -387,8 +404,10 @@ func (m *rcChange) cells(c rcCoder, glyphs, fg, bg, prevG, prevF, prevB, mask []
 			}
 			if !eq {
 				if f == 0 {
+					statCat = StatGlyph
 					v = c.tree(m.glyph[p&63][:], 6, v)
 				} else {
+					statCat = StatColour
 					v = c.colour(&m.pred[2-f], v, p)
 				}
 			}
@@ -422,4 +441,31 @@ func paletteCodes(palette []paletteColor) []uint16 {
 func expandCode(v uint16) paletteColor {
 	e := expandPaletteEntry(paletteColor{byte(v >> 10 & 0x3f), byte(v >> 5 & 0x1f), byte(v & 0x1f)})
 	return paletteColor{byte(e[0]), byte(e[1]), byte(e[2])}
+}
+
+// Statistics of change frames (measurements, cmd tools): the bits each
+// part takes, estimated from the models as coded (-log2 p); the colours'
+// own bits are not counted (their coder is inlined): the rest of a frame.
+const (
+	StatChanged   = iota // a changed bit per cell
+	StatSame             // a changed cell's field as it was
+	StatNeighbour        // ... as the left or the upper cell's
+	StatGlyph            // a glyph's value
+	StatColour           // (not counted)
+	StatPatch            // palette patches
+	StatParts
+)
+
+var (
+	StatsOn bool
+	Stats   [StatParts]float64
+	statCat int
+)
+
+func statBit(p uint16, b int) {
+	pr := float64(p) / rcProbOne
+	if b == 1 {
+		pr = 1 - pr
+	}
+	Stats[statCat] -= math.Log2(max(pr, 1e-9))
 }

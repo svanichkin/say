@@ -42,7 +42,9 @@ const (
 // videoShapeHold is the mean per-pixel colour difference (sum of three
 // channels) below which a cell keeps its previous glyph and colours
 // (-video-hold; 0 disables). It stops a still picture from shimmering.
-var videoShapeHold = 10
+// 13 with the codec's refresh of cells held 8 frames (codec.HoldAge) takes
+// as many bytes as 10 did without it, and the picture follows slow changes.
+var videoShapeHold = 13
 
 // videoHoldDebug tints held cells lilac (-video-hold-debug).
 var videoHoldDebug bool
