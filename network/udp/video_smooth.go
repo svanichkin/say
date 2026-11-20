@@ -169,7 +169,7 @@ func isKeyframe(b []byte) bool {
 	if len(b) > 3 && b[0] == videoSmoothMark {
 		return b[3] == 'K'
 	}
-	return len(b) > 4 && b[4] == 5 // Say's keyframe with references
+	return codec.IsKeyframe(b) // Say's
 }
 
 // smoothBand is a band's smooth encoder: its quality steered to the bytes a

@@ -960,19 +960,24 @@ func (e *Encoder) encodeCells(glyphs []byte, fgColors, bgColors []paletteColor, 
 	e.sentBg = append(e.sentBg[:0], finalBgIdx...)
 	e.sentCells = totalCells
 
-	out := append(e.payloadBuf[:0], PayloadMagic...)
 	id, ref := e.refs.next, e.refs.last
-	if e.refs.on {
-		out = append(out, frameType+frameTypeRefs)
+	var out []byte
+	if gap := id - ref; frameType == frameTypeKey || !e.refs.on || gap >= 1 && gap <= 255 {
+		out = appendCompactHeader(e.payloadBuf[:0], frameType, cols, rows, e.refs.on, id, ref)
 	} else {
-		out = append(out, frameType)
-	}
-	out = binary.LittleEndian.AppendUint16(out, uint16(cols))
-	out = binary.LittleEndian.AppendUint16(out, uint16(rows))
-	if e.refs.on {
-		out = binary.LittleEndian.AppendUint16(out, id)
-		if frameType != frameTypeKey {
-			out = binary.LittleEndian.AppendUint16(out, ref)
+		out = append(e.payloadBuf[:0], PayloadMagic...)
+		if e.refs.on {
+			out = append(out, frameType+frameTypeRefs)
+		} else {
+			out = append(out, frameType)
+		}
+		out = binary.LittleEndian.AppendUint16(out, uint16(cols))
+		out = binary.LittleEndian.AppendUint16(out, uint16(rows))
+		if e.refs.on {
+			out = binary.LittleEndian.AppendUint16(out, id)
+			if frameType != frameTypeKey {
+				out = binary.LittleEndian.AppendUint16(out, ref)
+			}
 		}
 	}
 	e.rcEnc.reset(e.rcEnc.out)
@@ -1146,6 +1151,9 @@ func Decode(data []byte) (*TextFrame, error) {
 // previous frame returns ErrNoBase.
 func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 	initGlyphTables() // the glyphs' range is checked below, a decoder may come first
+	if len(data) >= 1 && data[0]&^compactHeaderBits == compactHeaderTag {
+		return d.decodeCompact(data)
+	}
 	if len(data) < len(PayloadMagic)+1+2+2 {
 		return nil, fmt.Errorf("payload too short")
 	}
@@ -1178,6 +1186,20 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 		id, ref = binary.LittleEndian.Uint16(data[offset:]), binary.LittleEndian.Uint16(data[offset+n-2:])
 		offset += n
 	}
+	if withRefs {
+		frameType += frameTypeRefs
+	}
+	return d.decodeBody(data[offset:], frameType, cols, rows, id, ref)
+}
+
+// decodeBody decodes a frame's range-coded body: frameType (frameTypeRefs
+// added when the frame has a number id and, but for a keyframe, its
+// reference ref), cols x rows cells.
+func (d *Decoder) decodeBody(body []byte, frameType byte, cols, rows int, id, ref uint16) (*TextFrame, error) {
+	withRefs := frameType >= frameTypeRefs
+	if withRefs {
+		frameType -= frameTypeRefs
+	}
 	totalCells := cols * rows
 	c := rcCoder{d: &d.rcDec}
 
@@ -1187,7 +1209,7 @@ func (d *Decoder) Decode(data []byte) (*TextFrame, error) {
 		return nil, ErrNoBase
 	}
 	var glyphs, fgIdx, bgIdx []byte
-	d.rcDec.reset(data[offset:])
+	d.rcDec.reset(body)
 	switch frameType {
 	case frameTypeDelta, frameTypeDeltaPatch:
 		if !d.baseValid || d.baseCols != cols || d.baseRows != rows || len(d.lastPalette) == 0 {
@@ -2008,4 +2030,100 @@ func (e *Encoder) Restart() {
 		maxFPS:           e.maxFPS,
 		mirror:           e.mirror,
 	}
+}
+
+// The compact header (appendCompactHeader): a byte compactHeaderTag | the
+// frame type (frameTypeRefs added with numbers); for a key or full frame
+// the cells across and down (a byte each); with numbers the frame's (two
+// bytes) and, but for a keyframe, how far back its reference is (a byte,
+// 1-255). A change frame's size is its reference's. 1-4 bytes where the
+// TEXT header took 9-13.
+const (
+	compactHeaderTag  byte = 0xA0
+	compactHeaderBits byte = 0x07 // the frame type and frameTypeRefs
+)
+
+func appendCompactHeader(out []byte, frameType byte, cols, rows int, refs bool, id, ref uint16) []byte {
+	t := frameType
+	if refs {
+		t += frameTypeRefs
+	}
+	out = append(out, compactHeaderTag|t)
+	if frameType == frameTypeKey || frameType == frameTypeFull {
+		out = append(out, byte(cols), byte(rows))
+	}
+	if refs {
+		out = binary.LittleEndian.AppendUint16(out, id)
+		if frameType != frameTypeKey {
+			out = append(out, byte(id-ref))
+		}
+	}
+	return out
+}
+
+// decodeCompact decodes a frame with the compact header.
+func (d *Decoder) decodeCompact(data []byte) (*TextFrame, error) {
+	t := data[0] & compactHeaderBits
+	frameType, withRefs := t, t >= frameTypeRefs
+	if withRefs {
+		frameType -= frameTypeRefs
+	}
+	pos := 1
+	var cols, rows int
+	if frameType == frameTypeKey || frameType == frameTypeFull {
+		if len(data) < pos+2 {
+			return nil, fmt.Errorf("payload too short")
+		}
+		cols, rows = int(data[pos]), int(data[pos+1])
+		pos += 2
+	}
+	var id, ref uint16
+	if withRefs {
+		n := 3
+		if frameType == frameTypeKey {
+			n = 2
+		}
+		if len(data) < pos+n {
+			return nil, fmt.Errorf("payload too short")
+		}
+		id = binary.LittleEndian.Uint16(data[pos:])
+		if frameType != frameTypeKey {
+			if data[pos+2] == 0 {
+				return nil, fmt.Errorf("a reference of itself")
+			}
+			ref = id - uint16(data[pos+2])
+		}
+		pos += n
+	}
+	if cols == 0 {
+		// A change frame: its reference's size.
+		d.mu.Lock()
+		switch {
+		case withRefs && !(d.refs.any && d.refs.last == ref && d.baseValid):
+			if r := d.refs.frames.at(ref); r != nil {
+				cols, rows = r.cols, r.rows
+			}
+		case d.baseValid:
+			cols, rows = d.baseCols, d.baseRows
+		}
+		d.mu.Unlock()
+		if cols == 0 {
+			return nil, ErrNoBase
+		}
+	}
+	if cols > MaxFrameCols || rows > MaxFrameRows || rows == 0 {
+		return nil, fmt.Errorf("frame size %dx%d outside 1..%dx%d", cols, rows, MaxFrameCols, MaxFrameRows)
+	}
+	if withRefs {
+		frameType += frameTypeRefs
+	}
+	return d.decodeBody(data[pos:], frameType, cols, rows, id, ref)
+}
+
+// IsKeyframe says whether data (Encoder.Encode's) is a keyframe.
+func IsKeyframe(data []byte) bool {
+	if len(data) >= 1 && data[0]&^compactHeaderBits == compactHeaderTag {
+		return data[0]&compactHeaderBits&^frameTypeRefs == frameTypeKey
+	}
+	return len(data) > 4 && string(data[:4]) == PayloadMagic && data[4]&^frameTypeRefs == frameTypeKey
 }
