@@ -1276,15 +1276,13 @@ func renderChatScreen(cols, rows int) string {
 	txAudio, txVideo, rxAudio, rxVideo := NetRateSnapshot()
 	latencyLabel := buildLatencyLabel(PeerLatencySnapshot())
 	pathLabel := PeerPathSnapshot()
-	localCaption := currentFPSLabel(localFrameType) + " " + buildRateLabel("TX", '↑', txAudio, txVideo)
-	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo)
+	// What is switched off (mediactrl) in place of its rate: our microphone
+	// and camera, the peer's sound and video.
+	localCaption := currentFPSLabel(localFrameType) + " " + buildRateLabel("TX", '↑', txAudio, txVideo, mediactrl.CaptureEnabled(), mediactrl.VideoEnabled())
+	remoteCaption := currentFPSLabel(remoteFrameType) + " " + buildRateLabel("RX", '↓', rxAudio, rxVideo, mediactrl.PlaybackEnabled(), mediactrl.PeerVideoShown())
 	if latencyLabel != "" && !framed() { // the window shows it between the panes
 		remoteCaption += " " + joinLabels(pathLabel, latencyLabel)
 	}
-	// What is switched off (mediactrl): our microphone and camera, the
-	// peer's sound.
-	localCaption = muteCaption(mediactrl.CaptureEnabled(), mediactrl.VideoEnabled()) + localCaption
-	remoteCaption = muteCaption(mediactrl.PlaybackEnabled(), mediactrl.PeerVideoShown()) + remoteCaption
 	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
 	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
 	if framed() {
@@ -2514,8 +2512,17 @@ func formatFancyNumber(n int) string {
 	return strconv.Itoa(n)
 }
 
-func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64) string {
-	label := fmt.Sprintf("A%s V%s", formatRate(audioKBps), formatRate(videoKBps))
+// buildRateLabel is a side's rates, the sound's (A) and the video's (V);
+// what is switched off says MUTE in place of its rate.
+func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64, audioOn, videoOn bool) string {
+	a, v := "A"+formatRate(audioKBps), "V"+formatRate(videoKBps)
+	if !audioOn {
+		a = "A MUTE"
+	}
+	if !videoOn {
+		v = "V MUTE"
+	}
+	label := a + " " + v
 	if prefix != "" {
 		return fmt.Sprintf("%s%c %s", prefix, direction, label)
 	}

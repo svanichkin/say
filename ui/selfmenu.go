@@ -17,7 +17,7 @@ import (
 // A click on the peer's view opens its menu: its sound and its video (not
 // shown: its pane loses the signal, the noise then the test card). A click on an item does it and closes the
 // menu; a click anywhere else only closes it. What is off shows under the
-// pane (A MUTE, V MUTE).
+// pane in place of its rate (A MUTE, V MUTE).
 
 const (
 	menuOn    = "✅"
@@ -240,20 +240,4 @@ func iconSGR(c [3]int) string {
 		return "\x1b[1;37m"
 	}
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", c[0], c[1], c[2])
-}
-
-// muteCaption is what is off on a side, before its caption: the sound (A),
-// our camera (V).
-func muteCaption(audioOn, videoOn bool) string {
-	var s []string
-	if !audioOn {
-		s = append(s, "A MUTE")
-	}
-	if !videoOn {
-		s = append(s, "V MUTE")
-	}
-	if len(s) == 0 {
-		return ""
-	}
-	return strings.Join(s, " ") + " "
 }
