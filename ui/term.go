@@ -2513,14 +2513,14 @@ func formatFancyNumber(n int) string {
 }
 
 // buildRateLabel is a side's rates, the sound's (A) and the video's (V);
-// what is switched off says MUTE in place of its rate.
+// what is switched off says MUTE in place of its rate (AMUTE, VMUTE).
 func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64, audioOn, videoOn bool) string {
 	a, v := "A"+formatRate(audioKBps), "V"+formatRate(videoKBps)
 	if !audioOn {
-		a = "A MUTE"
+		a = "AMUTE"
 	}
 	if !videoOn {
-		v = "V MUTE"
+		v = "VMUTE"
 	}
 	label := a + " " + v
 	if prefix != "" {

@@ -17,7 +17,7 @@ import (
 // A click on the peer's view opens its menu: its sound and its video (not
 // shown: its pane loses the signal, the noise then the test card). A click on an item does it and closes the
 // menu; a click anywhere else only closes it. What is off shows under the
-// pane in place of its rate (A MUTE, V MUTE).
+// pane in place of its rate (AMUTE, VMUTE).
 
 const (
 	menuOn    = "✅"
