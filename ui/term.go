@@ -1285,6 +1285,17 @@ func renderChatScreen(cols, rows int) string {
 	}
 	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
 	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
+	// The rates are switches: a click on A or V turns that side's sound or
+	// video off or on (as its menu's items).
+	{
+		var hits []menuHit
+		self, peer := selfMenuItems(), peerMenuItems()
+		la, lv := rateParts(txAudio, txVideo, mediactrl.CaptureEnabled(), mediactrl.VideoEnabled())
+		ra, rv := rateParts(rxAudio, rxVideo, mediactrl.PlaybackEnabled(), mediactrl.PeerVideoShown())
+		hits = captionHits(hits, videoCaptionRow, selfText, localCaption, la, lv, self[0].do, self[1].do)
+		hits = captionHits(hits, videoCaptionRow, peerText, remoteCaption, ra, rv, peer[0].do, peer[1].do)
+		setCaptionHits(hits)
+	}
 	if framed() {
 		// One bracketed line under both panes: a block at each outer end,
 		// the line running from caption to ping to caption.
@@ -2515,18 +2526,24 @@ func formatFancyNumber(n int) string {
 // buildRateLabel is a side's rates, the sound's (A) and the video's (V);
 // what is switched off says MUTE in place of its rate (AMUTE, VMUTE).
 func buildRateLabel(prefix string, direction rune, audioKBps, videoKBps float64, audioOn, videoOn bool) string {
-	a, v := "A"+formatRate(audioKBps), "V"+formatRate(videoKBps)
+	a, v := rateParts(audioKBps, videoKBps, audioOn, videoOn)
+	label := a + " " + v
+	if prefix != "" {
+		return fmt.Sprintf("%s%c %s", prefix, direction, label)
+	}
+	return fmt.Sprintf("%c %s", direction, label)
+}
+
+// rateParts are a caption's sound and video parts: their rates, or MUTE.
+func rateParts(audioKBps, videoKBps float64, audioOn, videoOn bool) (a, v string) {
+	a, v = "A"+formatRate(audioKBps), "V"+formatRate(videoKBps)
 	if !audioOn {
 		a = "AMUTE"
 	}
 	if !videoOn {
 		v = "VMUTE"
 	}
-	label := a + " " + v
-	if prefix != "" {
-		return fmt.Sprintf("%s%c %s", prefix, direction, label)
-	}
-	return fmt.Sprintf("%c %s", direction, label)
+	return a, v
 }
 
 // joinLabels joins the non-empty labels with a space.

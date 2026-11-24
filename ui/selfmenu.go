@@ -241,3 +241,50 @@ func iconSGR(c [3]int) string {
 	}
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", c[0], c[1], c[2])
 }
+
+// The captions' switches: where the last drawn captions' sound and video
+// parts are (captionHits), for clicks.
+var captionSwitches struct {
+	sync.Mutex
+	hits []menuHit
+}
+
+func setCaptionHits(hits []menuHit) {
+	captionSwitches.Lock()
+	captionSwitches.hits = hits
+	captionSwitches.Unlock()
+}
+
+// captionHits adds a caption's sound part a and video part v (as written in
+// caption at span, its columns on row) with what a click on each does.
+func captionHits(hits []menuHit, row int, span [2]int, caption, a, v string, doA, doV func()) []menuHit {
+	caption = sanitizeLine(caption)
+	off := strings.LastIndex(caption, a+" "+v)
+	if off < 0 || span[1] <= span[0] {
+		return hits
+	}
+	ac := span[0] + displayWidth(caption[:off])
+	vc := ac + displayWidth(a) + 1
+	if vc+displayWidth(v) > span[1] {
+		return hits // cut short: not all of it shown
+	}
+	return append(hits, menuHit{row: row, left: ac, cols: displayWidth(a), do: doA},
+		menuHit{row: row, left: vc, cols: displayWidth(v), do: doV})
+}
+
+// captionClick does the switch under a click on a caption (false: none).
+func captionClick(col, row int) bool {
+	captionSwitches.Lock()
+	var do func()
+	for _, h := range captionSwitches.hits {
+		if row == h.row && col >= h.left && col < h.left+h.cols {
+			do = h.do
+		}
+	}
+	captionSwitches.Unlock()
+	if do == nil {
+		return false
+	}
+	do()
+	return true
+}

@@ -211,6 +211,10 @@ func handleMouseEvent(evt mouseEvent) {
 	if statusClickHandlePoint(evt.col, evt.row) {
 		return
 	}
+	if ChatConnected() && captionClick(evt.col, evt.row) { // the captions are on the call's screen
+		RequestRedraw()
+		return
+	}
 
 	switch viewportForPoint(evt.col, evt.row) {
 	case viewportSelf:
