@@ -391,7 +391,6 @@ func run() (err error) {
 			// the log: a LAN peer means multicast found a direct link.
 			udptransport.ResetAudioSettings()
 			ui.SetAccentAddresses(localAddr, peerHost)
-			ui.ResetDetailBoost() // a new call earns the finer detail afresh
 			if transport.IsLocalPeer(peerHost) {
 				log.Printf("[p2p] peer %s is in the local network (direct link)", peerHost)
 			} else {

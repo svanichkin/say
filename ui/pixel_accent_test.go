@@ -91,7 +91,7 @@ func TestCursorBlinksBeforeTyping(t *testing.T) {
 	}
 }
 
-func TestDetailBoost(t *testing.T) {
+func TestDetailSteps(t *testing.T) {
 	was := pixelMode
 	pixelMode = true
 	selfSlotMu.Lock()
@@ -99,7 +99,6 @@ func TestDetailBoost(t *testing.T) {
 	selfViewport.peerSlot = slotSize{cols: 40, rows: 20}
 	selfSlotMu.Unlock()
 	defer func() {
-		ResetDetailBoost()
 		SetVideoDetail(0)
 		selfSlotMu.Lock()
 		selfViewport = oldViewport
@@ -107,39 +106,12 @@ func TestDetailBoost(t *testing.T) {
 		pixelMode = was
 	}()
 	SetVideoDetail(0)
-	ResetDetailBoost()
-	start := time.Now()
-	at := func(s float64) time.Time { return start.Add(time.Duration(s * float64(time.Second))) }
 	wantSize := func(cols, rows int) {
 		t.Helper()
 		if c, r := detailSize(40, 20); c != cols || r != rows {
 			t.Fatalf("detail size = %dx%d, want %dx%d", c, r, cols, rows)
 		}
 	}
-	for s := 0.0; s < 9; s++ {
-		noteVideoLoss(0, at(s))
-	}
-	wantSize(40, 20)
-	noteVideoLoss(0.005, at(10))
-	wantSize(42, 21)
-	noteVideoLoss(0, at(11))
-	wantSize(42, 21)
-	noteVideoLoss(0, at(12))
-	wantSize(44, 22)
-	noteVideoLoss(0.02, at(13)) // light loss holds the size
-	wantSize(44, 22)
-	noteVideoLoss(0.05, at(14))
-	wantSize(42, 21)
-	noteVideoLoss(0.05, at(15))
-	wantSize(40, 20)
-	for s := 16.0; s < 75; s++ { // clean, but still waiting to retry
-		noteVideoLoss(0, at(s))
-	}
-	wantSize(40, 20)
-	noteVideoLoss(0, at(75))
-	wantSize(42, 21)
-
-	StepVideoDetail(-1) // Cmd- also removes an automatically earned step
 	wantSize(40, 20)
 	StepVideoDetail(1)
 	wantSize(42, 21)
@@ -147,7 +119,10 @@ func TestDetailBoost(t *testing.T) {
 	wantSize(44, 22)
 	StepVideoDetail(-1)
 	wantSize(42, 21)
-	SetVideoDetail(100) // manual and automatic steps together reach 2x, then stop
+	StepVideoDetail(-1)
+	StepVideoDetail(-1) // not below the pane
+	wantSize(40, 20)
+	SetVideoDetail(100) // up to 2x, then stop
 	wantSize(80, 40)
 }
 

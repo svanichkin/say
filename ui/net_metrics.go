@@ -152,7 +152,6 @@ func UpdateRxVideoLoss(loss float64) {
 	netRateMu.Lock()
 	rxVideoLoss, rxVideoLossUpdatedAt = clampLoss(loss), now
 	netRateMu.Unlock()
-	noteVideoLoss(clampLoss(loss), now)
 }
 
 // RxVideoLossSnapshot returns the latest incoming video loss and its sample time.
