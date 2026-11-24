@@ -411,7 +411,8 @@ func (s *layerSender) troubled(now time.Duration, why string) {
 // (a path turned shorter after a longer one looks like a queue, but more
 // arrives).
 func (s *layerSender) queued() bool {
-	return videoSmooth && s.queue >= smoothQueueHigh && s.got > 0 && s.got < rateOverShare*s.went
+	afterSilent := s.lastReport-s.rc.silentAt < rateAfterSilent // a new path's delay is no queue
+	return videoSmooth && !afterSilent && s.queue >= smoothQueueHigh && s.got > 0 && s.got < rateOverShare*s.went
 }
 
 // effRate is the kbit/s to send at: the rate's, but while a queue stands at
@@ -598,6 +599,7 @@ type layerReceiver struct {
 	relU        int64 // arrival less sending, in media ticks, unwrapped (the clocks' offset in it)
 	newestU     int64 // the newest datagram's sending, in the receiver's ticks
 	floor       owdFloor
+	floorFrom   time.Duration // the floor taken from then on (after an outage)
 }
 
 func newLayerReceiver(send func([]byte)) *layerReceiver {
@@ -625,6 +627,11 @@ func (r *layerReceiver) arrive(at time.Time, seq byte, index uint16, payload []b
 	}
 	r.rGot++
 	r.rBytes += len(payload)
+	if r.lastArrival >= 0 && now-r.lastArrival >= rateSilent {
+		// After an outage: maybe another path, its own floor, taken anew
+		// once it settles (its delay may still be climbing for a moment).
+		r.floor, r.floorFrom = owdFloor{}, now+rateFloorSettle
+	}
 	r.lastArrival = now
 	// The trip, by the media clock: arrival less sending, the clocks'
 	// offset in it (it cancels against the shortest trip).
@@ -638,8 +645,11 @@ func (r *layerReceiver) arrive(at time.Time, seq byte, index uint16, payload []b
 		r.prevRel = rel
 	}
 	owd := time.Duration(r.relU) * mediaTickDuration
-	r.floor.note(now, owd)
-	q := owd - r.floor.get(now)
+	q := time.Duration(0)
+	if now >= r.floorFrom {
+		r.floor.note(now, owd)
+		q = owd - r.floor.get(now)
+	}
 	if r.rQueue < 0 || q < r.rQueue {
 		r.rQueue = q
 	}

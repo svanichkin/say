@@ -35,7 +35,7 @@ const (
 	// this often, the others are skipped.
 	videoHeartbeat   = 200 * time.Millisecond
 	videoReorderWait = 80 * time.Millisecond
-	videoAckWindow   = 3 * time.Second
+	videoAckWindow   = 10 * time.Second // 3 s: Babe's cmd/babecam -netsim, all together, frozen 2.7 -> 1.1% at 10 s, heavy 9.2 -> 3.9%
 	videoAckEvery    = 3
 )
 

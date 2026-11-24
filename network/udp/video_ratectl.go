@@ -29,9 +29,10 @@ type rateCtl struct {
 	cutFrom  float64 // the rate before the last cut
 	capacity float64 // kbit/s that arrived when the link was last over (0: not known; smooth video)
 	capAt    time.Duration
-	demand   float64  // kbit/s the whole picture would take at the full grid, as it is now (the sender's estimate)
-	why      string   // why the last cut, for the log
-	sentWin  []sentAt // what went in the last rateSentKeep
+	demand   float64       // kbit/s the whole picture would take at the full grid, as it is now (the sender's estimate)
+	why      string        // why the last cut, for the log
+	sentWin  []sentAt      // what went in the last rateSentKeep
+	silentAt time.Duration // the newest silent report (an outage: the path may be another)
 }
 
 type sentAt struct {
@@ -80,7 +81,19 @@ const (
 	rateCapPast = 1.05
 )
 
-func newRateCtl() rateCtl { return rateCtl{rate: rateStart, lastCut: -time.Hour, cutFrom: rateMax} }
+func newRateCtl() rateCtl {
+	return rateCtl{rate: rateStart, lastCut: -time.Hour, cutFrom: rateMax, silentAt: -time.Hour}
+}
+
+// rateAfterSilent: after an outage the path may be another, longer one
+// whose delay is no queue: no cut by the delay for this long (loss still
+// cuts), the receiver's delay floor started anew (10 s let the rate
+// overshoot the link; Babe's cmd/babecam -netsim).
+const rateAfterSilent = 3 * time.Second
+
+// rateFloorSettle: after an outage the receiver takes no delay floor (no
+// queue told) for this long: the new path's delay may still be climbing.
+const rateFloorSettle = time.Second
 
 // report takes a report. The link is over when a standing queue (one a
 // keyframe's burst does not make) comes with less arriving than went in the
@@ -95,15 +108,26 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 		return // nothing to tell
 	}
 	got := float64(r.bytes1s*8) / 1000 // kbit/s
+	if r.silent {
+		c.silentAt = now
+	}
+	afterSilent := now-c.silentAt < rateAfterSilent
 	over := false
 	if !r.none {
 		c.feedback = now - r.newestAt
 		went := c.sentBetween(r.newestAt-time.Second, r.newestAt)
-		over = r.queue >= rateOverQueue && got < rateOverShare*went
+		over = r.queue >= c.overQueue(now) && got < rateOverShare*went && !afterSilent
 	}
 	switch {
 	case r.silent || over || r.loss1s >= rateCutLoss:
-		if now-c.lastCut >= max(2*rateReportEvery, c.feedback) {
+		gap := max(2*rateReportEvery, c.feedback)
+		if !r.silent && !over {
+			// The loss is a second's: one cut a second, none in the second
+			// after a cut (its loss counted already: a queue that
+			// overflowed cut the rate again and again, to 20 kbit/s for 5 s).
+			gap = max(gap, time.Second)
+		}
+		if now-c.lastCut >= gap {
 			if !r.silent && now-c.lastCut >= rateSeries {
 				c.cutFrom = c.rate // where a series of cuts starts: what to come back to fast
 			}
@@ -123,13 +147,13 @@ func (c *rateCtl) report(now time.Duration, r rateReport) {
 			case over:
 				// To below what arrived, but at most half what went at once: a
 				// path that turned longer looks the same for a moment.
-				c.rate = max(rateMin, min(c.rate, max(got*rateCut, min(c.rate, c.sending(now))/2)))
+				c.rate = max(rateMin, min(c.rate, max(got*rateCut, min(c.rate, c.sending(now))/2, c.rate/2)))
 				c.capacity, c.capAt = got, now
 			default: // loss: frames of fewer fragments lose less, gently (as WebRTC's)
 				c.rate = max(rateMin, c.rate*(1-r.loss1s/2))
 			}
 		}
-	case r.queue >= rateHoldQ && got < c.sentBetween(r.newestAt-time.Second, r.newestAt) || r.loss1s >= rateHoldLoss:
+	case !afterSilent && r.queue >= rateHoldQ && got < c.sentBetween(r.newestAt-time.Second, r.newestAt) || r.loss1s >= rateHoldLoss:
 	default:
 		up := rateUpSlow
 		if c.rate < 0.9*c.cutFrom {
@@ -164,9 +188,28 @@ func (c *rateCtl) queueing(now time.Duration, got float64, q time.Duration) {
 		c.cutFrom = c.rate
 	}
 	c.lastCut = now
-	c.rate = max(rateMin, min(c.rate, got*rateCut))
+	// At most halved a cut: what arrived in a few hundred milliseconds is
+	// lumpy at a low rate (a datagram arrives whole when its last fragment
+	// does), and the next report cuts again if it was not enough.
+	c.rate = max(rateMin, min(c.rate, max(got*rateCut, c.rate/2)))
 	c.capacity, c.capAt = got, now
 	c.why = fmt.Sprintf("очередь растёт (%d мс), доходит %.0f кбит/с", q.Milliseconds(), got)
+}
+
+// overQueue is the standing queue that tells the link over: rateOverQueue,
+// or twice a datagram's time on a link at the rate (at a low rate a
+// datagram alone waits that long: no queue).
+func (c *rateCtl) overQueue(now time.Duration) time.Duration {
+	n, b := 0, 0
+	for _, s := range c.sentWin {
+		if now-s.at <= time.Second {
+			n, b = n+1, b+s.bytes
+		}
+	}
+	if n == 0 || c.rate <= 0 {
+		return rateOverQueue
+	}
+	return max(rateOverQueue, time.Duration(2*float64(b)/float64(n)*8/(c.rate*1000)*float64(time.Second)))
 }
 
 // sentBetween is what went from a to b, kbit/s over that time.
