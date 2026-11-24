@@ -77,3 +77,29 @@ func sharpenY(dst, src []byte, w, h, amount int) {
 		}
 	}
 }
+
+// sharpenAt is sharpenY's pixel (x, y) of src (w x h) at amount percent.
+func sharpenAt(src []byte, w, h, x, y, amount int) byte {
+	v := src[y*w+x]
+	if amount <= 0 || w < 3 || h < 3 || x < 1 || y < 1 || x > w-2 || y > h-2 {
+		return v
+	}
+	a, b, c := src[(y-1)*w:], src[y*w:], src[(y+1)*w:]
+	blur := (int(a[x-1]) + 2*int(a[x]) + int(a[x+1]) +
+		2*int(b[x-1]) + 4*int(b[x]) + 2*int(b[x+1]) +
+		int(c[x-1]) + 2*int(c[x]) + int(c[x+1]) + 8) >> 4
+	d := int(v) - blur
+	switch {
+	case d > sharpThreshold:
+		d -= sharpThreshold
+	case d < -sharpThreshold:
+		d += sharpThreshold
+	default:
+		return v
+	}
+	lo, hi := int(v), int(v)
+	for _, n := range [8]byte{a[x-1], a[x], a[x+1], b[x-1], b[x+1], c[x-1], c[x], c[x+1]} {
+		lo, hi = min(lo, int(n)), max(hi, int(n))
+	}
+	return byte(min(255, hi+sharpHalo, max(0, lo-sharpHalo, int(v)+d*amount/50)))
+}

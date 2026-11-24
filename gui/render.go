@@ -61,7 +61,8 @@ type paneImage struct {
 	img    *ebiten.Image
 	frame  uint64
 	pix    []byte
-	pixels bool // a picture in pixels at its own size (rasterizeSource)
+	pixels bool     // a picture in pixels at its own size (rasterizeSource)
+	gpu    *gpuPane // its GPU images (drawGPU; nil: the CPU draws)
 }
 
 func (g *game) Draw(dst *ebiten.Image) {

@@ -2376,10 +2376,58 @@ var videoGammaY = func() [256]byte {
 	return table
 }()
 
+// The chroma's terms of ycbcrToRGB by value (the same products: the same
+// colours), for FrameRGBRow.
+var crR, cbG, crG, cbB = func() (r, g1, g2, b [256]float64) {
+	for v := range 256 {
+		c := float64(v) - 128.0
+		r[v], g1[v], g2[v], b[v] = 1.402*c, 0.344136*c, 0.714136*c, 1.772*c
+	}
+	return
+}()
+
+// FrameRGBRow is FrameRGB over a row: y, cb, cr into dst's RGBA (alpha
+// 255), the colour filter read once.
+func FrameRGBRow(dst, y, cb, cr []byte) {
+	cf := activeColorFilter.Load()
+	cb, cr = cb[:len(y)], cr[:len(y)]
+	dst = dst[:4*len(y)]
+	for i, v := range y {
+		Y := float64(videoGammaY[v])
+		r, g, b := clampColor(Y+crR[cr[i]]), clampColor(Y-cbG[cb[i]]-crG[cr[i]]), clampColor(Y+cbB[cb[i]])
+		if cf != nil {
+			r, g, b = cf.apply(r, g, b)
+		}
+		o := dst[4*i : 4*i+4 : 4*i+4]
+		o[0], o[1], o[2], o[3] = byte(r), byte(g), byte(b), 255
+	}
+}
+
 func videoDisplayRGB(y, cb, cr byte) (int, int, int) {
 	r, g, b := ycbcrToRGB(videoGammaY[y], cb, cr)
 	return applyColorFilter(r, g, b)
 }
+
+// DisplayColorFilter is the colour filter FrameRGB applies (on: one is
+// set), for a renderer that does FrameRGB's work itself (the window's GPU
+// path): its contrast, strength and tint as colorFilterSpec.apply takes them.
+func DisplayColorFilter() (on bool, contrast, strength float64, tint [3]int) {
+	cf := activeColorFilter.Load()
+	if cf == nil {
+		return false, 1, 0.5, [3]int{}
+	}
+	contrast, strength = cf.contrast, cf.strength
+	if contrast <= 0 {
+		contrast = 1
+	}
+	if strength <= 0 {
+		strength = 0.5
+	}
+	return true, contrast, min(1, strength), cf.tint
+}
+
+// DisplayGamma is the display gamma FrameRGB and FrameY lift the luma by.
+const DisplayGamma = videoDisplayGamma
 
 func applyColorFilter(r, g, b int) (int, int, int) {
 	spec := activeColorFilter.Load()

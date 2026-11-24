@@ -528,7 +528,63 @@ func applyLight(pix []byte, w, h int) {
 			cells[i] /= float64(cnt[i])
 		}
 	}
-	// Smoothed: a 3x3 box, twice.
+	gains := exposeGains(&pix[0], cells, gw, gh)
+	// The gain at each pixel: the map between cell centres (bilinear), its
+	// two rows of cells across the picture (a, b) taken once a row of cells.
+	a, b := make([]float64, w), make([]float64, w)
+	prev := -1
+	var hist [256]int
+	for y := range h {
+		fy := (float64(y)+0.5)*float64(gh)/float64(h) - 0.5
+		y0 := min(gh-1, max(0, int(math.Floor(fy))))
+		y1, ty := min(gh-1, y0+1), min(1, max(0, fy-float64(y0)))
+		if y0 != prev {
+			prev = y0
+			for x := range w {
+				fx := (float64(x)+0.5)*float64(gw)/float64(w) - 0.5
+				x0 := min(gw-1, max(0, int(math.Floor(fx))))
+				x1, tx := min(gw-1, x0+1), min(1, max(0, fx-float64(x0)))
+				a[x] = gains[y0*G+x0]*(1-tx) + gains[y0*G+x1]*tx
+				b[x] = gains[y1*G+x0]*(1-tx) + gains[y1*G+x1]*tx
+			}
+		}
+		row := pix[4*w*y:]
+		for x := range w {
+			g := a[x]*(1-ty) + b[x]*ty
+			o := 4 * x
+			row[o], row[o+1], row[o+2] = clamp8(float64(row[o])*g), clamp8(float64(row[o+1])*g), clamp8(float64(row[o+2])*g)
+			hist[(77*int(row[o])+150*int(row[o+1])+29*int(row[o+2]))>>8]++
+		}
+	}
+	// The range stretched again (auto levels).
+	n := w * h
+	lo, k, ok := exposeLevels(&hist, n, &srcHist, samples)
+	if !ok {
+		return
+	}
+	var lut [256]uint8
+	for v := range lut {
+		lut[v] = clamp8(exposeLow + (float64(v)-lo)*k)
+	}
+	for i := 0; i+3 < 4*n; i += 4 {
+		pix[i], pix[i+1], pix[i+2] = lut[pix[i]], lut[pix[i+1]], lut[pix[i+2]]
+	}
+}
+
+// scanAlpha is how dark row y of a period of sc's scan lines is (0: not).
+func scanAlpha(sc effectScan, y int) float32 {
+	if y >= sc.dark {
+		return 0
+	}
+	return sc.alpha * (1 - 0.5*float32(y)/float32(max(1, sc.dark-1)))
+}
+
+// exposeGains is each cell's gain from a light map (each cell's mean luma,
+// gw x gh of the grid): the map smoothed, a 3x3 box twice, following key's
+// map before slowly (no flicker), then lifted where dark, toned down where
+// bright.
+func exposeGains(key any, cells [exposeGrid * exposeGrid]float64, gw, gh int) (gains [exposeGrid * exposeGrid]float64) {
+	const G = exposeGrid
 	for range 2 {
 		var t [G * G]float64
 		for cy := range gh {
@@ -548,7 +604,6 @@ func applyLight(pix []byte, w, h int) {
 		cells = t
 	}
 	// Following the picture slowly.
-	key := &pix[0]
 	if v, ok := exposeMaps.Load(key); ok {
 		prev := v.(*[G * G]float64)
 		for i := range cells {
@@ -557,8 +612,6 @@ func applyLight(pix []byte, w, h int) {
 	}
 	m := cells
 	exposeMaps.Store(key, &m)
-	// The gain at each pixel: the map between cell centres (bilinear).
-	var gains [G * G]float64
 	for i, l := range cells {
 		g := 1.0
 		switch {
@@ -569,28 +622,18 @@ func applyLight(pix []byte, w, h int) {
 		}
 		gains[i] = min(exposeGainMax, max(exposeGainMin, g))
 	}
-	var hist [256]int
-	for y := range h {
-		fy := (float64(y)+0.5)*float64(gh)/float64(h) - 0.5
-		y0 := min(gh-1, max(0, int(math.Floor(fy))))
-		y1, ty := min(gh-1, y0+1), min(1, max(0, fy-float64(y0)))
-		row := pix[4*w*y:]
-		for x := range w {
-			fx := (float64(x)+0.5)*float64(gw)/float64(w) - 0.5
-			x0 := min(gw-1, max(0, int(math.Floor(fx))))
-			x1, tx := min(gw-1, x0+1), min(1, max(0, fx-float64(x0)))
-			g := (gains[y0*G+x0]*(1-tx)+gains[y0*G+x1]*tx)*(1-ty) + (gains[y1*G+x0]*(1-tx)+gains[y1*G+x1]*tx)*ty
-			o := 4 * x
-			row[o], row[o+1], row[o+2] = clamp8(float64(row[o])*g), clamp8(float64(row[o+1])*g), clamp8(float64(row[o+2])*g)
-			hist[(77*int(row[o])+150*int(row[o+1])+29*int(row[o+2]))>>8]++
-		}
-	}
-	// The range stretched again (auto levels).
-	n := w * h
-	lo, hi, acc := 0, 255, 0
+	return gains
+}
+
+// exposeLevels is the auto levels' black point and gain: the darkest
+// exposeClip of hist (n pixels, the luma after the gains) to exposeLow, the
+// brightest exposeClip of srcHist (samples, before them) to exposeHigh;
+// false when the range is too narrow to stretch.
+func exposeLevels(hist *[256]int, n int, srcHist *[256]int, samples int) (lo, k float64, ok bool) {
+	l, hi, acc := 0, 255, 0
 	for v := range 256 {
 		if acc += hist[v]; float64(acc) >= exposeClip*float64(n) {
-			lo = v
+			l = v
 			break
 		}
 	}
@@ -604,23 +647,8 @@ func applyLight(pix []byte, w, h int) {
 			break
 		}
 	}
-	if hi-lo < 16 {
-		return
+	if hi-l < 16 {
+		return 0, 0, false
 	}
-	k := min(exposeStretch, (exposeHigh-exposeLow)/float64(hi-lo))
-	var lut [256]uint8
-	for v := range lut {
-		lut[v] = clamp8(exposeLow + (float64(v)-float64(lo))*k)
-	}
-	for i := 0; i+3 < 4*n; i += 4 {
-		pix[i], pix[i+1], pix[i+2] = lut[pix[i]], lut[pix[i+1]], lut[pix[i+2]]
-	}
-}
-
-// scanAlpha is how dark row y of a period of sc's scan lines is (0: not).
-func scanAlpha(sc effectScan, y int) float32 {
-	if y >= sc.dark {
-		return 0
-	}
-	return sc.alpha * (1 - 0.5*float32(y)/float32(max(1, sc.dark-1)))
+	return float64(l), min(exposeStretch, (exposeHigh-exposeLow)/float64(hi-l)), true
 }

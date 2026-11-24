@@ -18,7 +18,10 @@ type Input struct {
 
 	Frame    func(id uint64) *codec.TextFrame    // the frame a pane mark names
 	FrameRGB func(y, cb, cr byte) (r, g, b byte) // a frame colour as shown
-	FrameY   func(y byte) byte                   // display gamma for monochrome video
+	// FrameRGBRow is FrameRGB over a row of pixels into RGBA (nil: by
+	// FrameRGB, a pixel a call).
+	FrameRGBRow func(dst, y, cb, cr []byte)
+	FrameY      func(y byte) byte // display gamma for monochrome video
 
 	Accents func() (self, peer [3]int)       // the accent colours: ours, the peer's
 	Chat    func() [3]int                    // the chat frame's colour

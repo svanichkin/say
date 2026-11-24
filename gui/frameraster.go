@@ -96,11 +96,24 @@ func rasterizePixels(in Input, p *codec.Pixels, pix []byte, w, h int, tint color
 	// Sharpened at the picture's own size (-video-sharp), a copy.
 	py, done := sharpened(p.Y, p.W, p.H)
 	defer done()
+	// In colour a row's planes first, then its colours at once (FrameRGBRow).
+	byRow := in.FrameRGBRow != nil && (in.Mono == nil || !in.Mono())
+	var ly, lcb, lcr []byte
+	if byRow {
+		ly, lcb, lcr = make([]byte, w), make([]byte, w), make([]byte, w)
+	}
 	for y := range h {
 		v := max(0, ((2*y+1)*p.H*256/(2*h))-128)
 		j0 := min(p.H-1, v>>8)
 		r0, r1, ty := j0*p.W, min(p.H-1, j0+1)*p.W, v&255
 		row := pix[y*w*4:]
+		if byRow {
+			for x, xi := range xs {
+				ly[x], lcb[x], lcr[x] = lerp(py, r0, r1, ty, xi), lerp(p.Cb, r0, r1, ty, xi), lerp(p.Cr, r0, r1, ty, xi)
+			}
+			in.FrameRGBRow(row, ly, lcb, lcr)
+			continue
+		}
 		for x := range w {
 			xi := xs[x]
 			r, g, b := rgbOf(lerp(py, r0, r1, ty, xi), lerp(p.Cb, r0, r1, ty, xi), lerp(p.Cr, r0, r1, ty, xi))
@@ -139,25 +152,18 @@ func monochrome(f *codec.TextFrame, total int) bool {
 // bilinear, as rasterizePixels): the CPU's work some a quarter of drawing
 // it at the pane's size first.
 func rasterizeSource(in Input, p *codec.Pixels, pix []byte, tint color.RGBA) {
-	rgbOf := in.FrameRGB
-	if in.Mono != nil && in.Mono() {
-		rgbOf = func(y, _, _ byte) (byte, byte, byte) {
-			if in.FrameY != nil {
-				y = in.FrameY(y)
-			}
-			return byte(int(y) * int(tint.R) / 255), byte(int(y) * int(tint.G) / 255), byte(int(y) * int(tint.B) / 255)
-		}
-	}
-	if rgbOf == nil {
-		rgbOf = func(y, cb, cr byte) (byte, byte, byte) { return color.YCbCrToRGB(y, cb, cr) }
-	}
+	rgbOf := rgbFunc(in, tint)
 	n := p.W * p.H
 	py, done := sharpened(p.Y, p.W, p.H)
 	defer done()
 	ys, cbs, crs, out := py[:n], p.Cb[:n], p.Cr[:n], pix[:4*n]
-	for i, y := range ys {
-		r, g, b := rgbOf(y, cbs[i], crs[i])
-		out[4*i], out[4*i+1], out[4*i+2], out[4*i+3] = r, g, b, 255
+	if in.FrameRGBRow != nil && (in.Mono == nil || !in.Mono()) {
+		in.FrameRGBRow(out, ys, cbs, crs) // the colours a row at a time (no call a pixel)
+	} else {
+		for i, y := range ys {
+			r, g, b := rgbOf(y, cbs[i], crs[i])
+			out[4*i], out[4*i+1], out[4*i+2], out[4*i+3] = r, g, b, 255
+		}
 	}
 	applyLight(pix, p.W, p.H)
 	applyEffect(pix, p.W, p.H, tint)
@@ -167,4 +173,21 @@ func rasterizeSource(in Input, p *codec.Pixels, pix []byte, tint color.RGBA) {
 func hasPixels(f *codec.TextFrame) bool {
 	p := f.Pixels
 	return p != nil && p.W > 0 && p.H > 0 && len(p.Y) >= p.W*p.H && len(p.Cb) >= p.W*p.H && len(p.Cr) >= p.W*p.H
+}
+
+// rgbFunc is a picture's pixel colour in the window: the display's
+// (FrameRGB: its gamma, the colour filter), or with -bw its luma in tint.
+func rgbFunc(in Input, tint color.RGBA) func(y, cb, cr byte) (byte, byte, byte) {
+	if in.Mono != nil && in.Mono() {
+		return func(y, _, _ byte) (byte, byte, byte) {
+			if in.FrameY != nil {
+				y = in.FrameY(y)
+			}
+			return byte(int(y) * int(tint.R) / 255), byte(int(y) * int(tint.G) / 255), byte(int(y) * int(tint.B) / 255)
+		}
+	}
+	if in.FrameRGB != nil {
+		return in.FrameRGB
+	}
+	return func(y, cb, cr byte) (byte, byte, byte) { return color.YCbCrToRGB(y, cb, cr) }
 }

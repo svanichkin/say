@@ -415,6 +415,9 @@ func (g *game) frameImage(p Pane, tint color.RGBA) (img *ebiten.Image, vw, vh fl
 	if pi == nil || pi.pixels != pixels || pi.img.Bounds().Dx() != w || pi.img.Bounds().Dy() != h {
 		if pi != nil {
 			pi.img.Deallocate()
+			if pi.gpu != nil {
+				pi.gpu.dispose()
+			}
 		}
 		// Its own texture: drawn larger with the bilinear filter, the
 		// edges sample no other image's.
@@ -423,12 +426,16 @@ func (g *game) frameImage(p Pane, tint color.RGBA) (img *ebiten.Image, vw, vh fl
 		r.paneImgs[key] = pi
 	}
 	if pi.frame != p.Frame {
-		if pixels {
+		switch {
+		case pixels && drawGPU(g.in, pi, f.Pixels, tint):
+			// The GPU drew it (gpuvideo.go).
+		case pixels:
 			rasterizeSource(g.in, f.Pixels, pi.pix, tint)
-		} else {
+			pi.img.WritePixels(pi.pix)
+		default:
 			g.rasterize(f, pi.pix, w, tint)
+			pi.img.WritePixels(pi.pix)
 		}
-		pi.img.WritePixels(pi.pix)
 		pi.frame = p.Frame
 	}
 	return pi.img, vw, vh, pixels
