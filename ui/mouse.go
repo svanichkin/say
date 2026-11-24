@@ -283,7 +283,7 @@ func viewportForPoint(col, row int) viewportID {
 	if row >= canvasTop+slots.selfSlot.rows {
 		return viewportNone
 	}
-	groupCols := slots.selfSlot.cols + termGap + slots.peerSlot.cols
+	groupCols := slots.selfSlot.cols + slots.gap + slots.peerSlot.cols
 	videoLeft := termSide + 1 + max(0, (ts.Cols-2*termSide-groupCols)/2)
 	if slots.selfSlot.cols <= 0 || slots.peerSlot.cols <= 0 {
 		return viewportNone
@@ -291,7 +291,7 @@ func viewportForPoint(col, row int) viewportID {
 	if col >= videoLeft && col < videoLeft+slots.selfSlot.cols {
 		return viewportSelf
 	}
-	peerLeft := videoLeft + slots.selfSlot.cols + termGap
+	peerLeft := videoLeft + slots.selfSlot.cols + slots.gap
 	if col >= peerLeft && col < peerLeft+slots.peerSlot.cols {
 		return viewportPeer
 	}

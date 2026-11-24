@@ -7,18 +7,15 @@ import (
 	"strings"
 )
 
-// The window's frames in a terminal, drawn with block characters: the
-// layout of the window (wider margins, a frame round each video pane and
-// round the chat, the captions on one bracketed line with the ping between
-// them, hazard bars on the window's sides) where the window draws them
-// itself from marks. Everything is drawn with what terminals draw
-// themselves, filling the cell, whatever the font: blocks and quarter
-// blocks (the slants of cut corners, plates and hazard stripes are steps
-// of quarters) and the box-drawing diagonals ╱╲ of the side bars. Glyphs
-// that come from the font, such as the triangles ◢◣◤◥, are a font's size,
-// smaller than a cell, and break up. The whole screen is black, as the
-// window is. Only with 24-bit colour: the accents are the window's.
-
+// The window's frames in a terminal, drawn with lines: the layout of the
+// window (wider margins, a frame round each video pane and round the chat,
+// the captions on one bracketed line with the ping between them, a border
+// round the screen), each frame a rounded box of box-drawing lines
+// (╭─╮│╰╯) in the window's colours. The window's own shapes (cut corners,
+// plates, hazard stripes) in blocks and quarter blocks broke up into steps
+// in a terminal's font; they stay the window's and the HUD image's
+// (graphics.go). The whole screen is black, as the window is. Only with
+// 24-bit colour: the accents are the window's.
 var termHUD bool
 
 // framed reports whether the interface has the window's frames: in the
@@ -36,7 +33,7 @@ func setTermHUD(on bool) {
 		// A row less under the captions than the window has: the terminal
 		// shows no glow there, and two blank rows read as a gap.
 		termBorder, termSeparator = 2, 2
-		termSide, termGap = 4, 6
+		termSide, termGap = 4, 4 // the frames' lines a column out of the panes: two blank between
 	} else {
 		termBorder, termSeparator = 1, 1
 		termSide, termGap = 1, 1
@@ -213,55 +210,31 @@ func flipQuarters(r rune, across bool) rune {
 	return quarters[f]
 }
 
-// hudWindowBorder draws the window's own border: down each side a bar
-// two columns wide, orange crossed by black diagonals (╱ on the left, ╲ on
-// the right: the window's hazard bars), its outer corners cut and its inner
-// edge stepping back over the middle (30% to 70%) of the height; along the
-// top and the bottom a thin orange line between the bars with a few plates
-// on it.
+// hudWindowBorder draws the screen's border: a rounded box of lines round
+// the whole screen in orange (╭─╮│╰╯).
 func hudWindowBorder(h *hudCanvas, cols, rows int) {
 	if cols < 12 || rows < 6 {
 		return
 	}
-	s1, s2 := 1+(rows-1)*3/10, 1+(rows-1)*7/10
-	bar := func(r, c int) rune { // the left bar's cell (c 0 outer, 1 inner)
-		switch {
-		case c == 0 && (r == 1 || r == rows):
-			return ' '
-		case c == 1 && r > s1 && r < s2:
-			return ' '
-		}
-		return '╱'
+	hudLines(h, 1, 1, cols, rows, hudOrange)
+}
+
+// hudLines draws a rounded box of lines (╭─╮│╰╯) as the rect of cells top,
+// left, cols x rows: its outermost cells, in colour c.
+func hudLines(h *hudCanvas, top, left, cols, rows int, c [3]int) {
+	right, bottom := left+cols-1, top+rows-1
+	for col := left + 1; col < right; col++ {
+		h.set(top, col, '─', c)
+		h.set(bottom, col, '─', c)
 	}
-	for r := 1; r <= rows; r++ {
-		for c := range 2 {
-			ch := bar(r, c)
-			if ch == ' ' { // cut away: the window's black
-				h.set(r, 1+c, ch, hudOrange)
-				h.set(r, cols-c, ch, hudOrange)
-				continue
-			}
-			h.setOn(r, 1+c, ch, [3]int{}, hudOrange)
-			h.setOn(r, cols-c, mirrored(ch), [3]int{}, hudOrange)
-		}
+	for r := top + 1; r < bottom; r++ {
+		h.set(r, left, '│', c)
+		h.set(r, right, '│', c)
 	}
-	seed, _, _ := FrameSeeds()
-	rng := rand.New(rand.NewPCG(seed, 0xb0d3))
-	inner := cols - 4
-	for k, row := range []int{1, rows} {
-		thin, plate := '▔', '▀'
-		if k == 1 {
-			thin, plate = '▁', '▄'
-		}
-		for i := range inner {
-			h.set(row, 3+i, thin, hudOrange)
-		}
-		for _, p := range hudPlates(rng, inner, 3) {
-			for i := p.from; i < p.to; i++ {
-				h.set(row, 3+i, plate, hudOrange)
-			}
-		}
-	}
+	h.set(top, left, '╭', c)
+	h.set(top, right, '╮', c)
+	h.set(bottom, left, '╰', c)
+	h.set(bottom, right, '╯', c)
 }
 
 // hudPlate is a stretch of an edge drawn thick, as the window's armour
@@ -316,93 +289,16 @@ func hudCuts(rng *rand.Rand, chat bool) [4]int {
 }
 
 // hudBox frames the rect of cells top, left, cols x rows (its outermost
-// cells are the frame) in colour c: a line of half blocks hugging what is
-// inside, the corners cut on a slant into it (a step of quarter blocks a
-// row), and plates along the line, their ends slanted too, some
-// hazard-striped. Where the corners are cut
-// and the plates go follows from seed; mirror flips it all left to right
-// (the peer's pane, as the window mirrors its frame).
+// cells are the frame) in colour c: a rounded box of lines (hudLines). The
+// window's frames (their cut corners, plates and hazard stripes from seed,
+// mirrored on the peer's pane) are the window's and the HUD image's only:
+// in characters they were blocks that a terminal's font breaks up into
+// steps, lines read as frames.
 func hudBox(h *hudCanvas, top, left, cols, rows int, c [3]int, seed uint64, mirror, chat bool) {
 	if cols < 6 || rows < 4 {
 		return
 	}
-	rng := rand.New(rand.NewPCG(seed, seed^0x5bd1e995))
-	k := hudCuts(rng, chat)
-	for i := range k {
-		k[i] = max(1, min(k[i], (rows-1)/3, (cols-1)/4))
-	}
-	right, bottom := left+cols-1, top+rows-1
-	set := func(r, col int, ch rune) {
-		if mirror {
-			col, ch = left+right-col, mirrored(ch)
-		}
-		h.set(r, col, ch, c)
-	}
-	// The corners, drawn as the top left one and flipped: a slant from the
-	// end of one edge to the end of the other, as thick as they are (two
-	// quarters a quarter row, a quarter further on each), and nothing
-	// outside it (the video there is cut away). Cut a cell deep, the corner
-	// is a quarter joining the two edges.
-	corner := func(depth int, across, down bool) {
-		put := func(i, j int, ch rune) {
-			r, col := top+i, left+j
-			if down {
-				r, ch = bottom-i, flipped(ch)
-			}
-			if across {
-				col, ch = right-j, mirrored(ch)
-			}
-			set(r, col, ch)
-		}
-		if depth == 1 {
-			put(0, 0, '▗')
-			return
-		}
-		for j := range depth - 1 {
-			put(0, j, ' ')
-		}
-		put(0, depth-1, '▄')
-		for i := 1; i < depth; i++ {
-			for j := 0; j < depth-1-i; j++ {
-				put(i, j, ' ')
-			}
-			put(i, depth-1-i, '▟')
-			put(i, depth-i, '▘')
-		}
-	}
-	corner(k[0], false, false)
-	corner(k[1], true, false)
-	corner(k[2], true, true)
-	corner(k[3], false, true)
-
-	// edge draws a straight edge of n cells, cell i at pos(i): the thin
-	// line, and plates on it with slanted ends.
-	edge := func(n int, thin, start, end rune, pos func(i int) (int, int), most int) {
-		plates := hudPlates(rng, n, most)
-		for i := range n {
-			r, col := pos(i)
-			ch := thin
-			for _, p := range plates {
-				switch {
-				case i < p.from || i >= p.to:
-					continue
-				case i == p.from:
-					ch = start
-				case i == p.to-1:
-					ch = end
-				case p.striped:
-					ch = hazardCell(r, col)
-				default:
-					ch = '█'
-				}
-			}
-			set(r, col, ch)
-		}
-	}
-	edge(cols-k[0]-k[1], '▄', '▟', '▙', func(i int) (int, int) { return top, left + k[0] + i }, 2)
-	edge(cols-k[3]-k[2], '▀', '▜', '▛', func(i int) (int, int) { return bottom, left + k[3] + i }, 2)
-	edge(rows-k[0]-k[3], '▐', '▟', '▜', func(i int) (int, int) { return top + k[0] + i, left }, 1)
-	edge(rows-k[1]-k[2], '▌', '▙', '▛', func(i int) (int, int) { return top + k[1] + i, right }, 1)
+	hudLines(h, top, left, cols, rows, c)
 }
 
 // hudBracket draws a bracketed row in orange, as the window draws its
@@ -425,7 +321,7 @@ func hudBracket(b *strings.Builder, row, left, width int, spans ...[2]int) {
 			line[i] = false
 		}
 	}
-	end, mid := "▐", "─"
+	end, mid := "├", "─"
 	if gfxHUD { // drawn in the image: the cells stay blank
 		gfxBracket(row, left, width, spans...)
 		end, mid = " ", " "
@@ -445,8 +341,8 @@ func hudBracket(b *strings.Builder, row, left, width int, spans ...[2]int) {
 		i = j - 1
 	}
 	writeCursorTo(b, row, left+width-1)
-	if end == "▐" {
-		end = "▌"
+	if end == "├" {
+		end = "┤"
 	}
 	b.WriteString(end + "\x1b[0m")
 }

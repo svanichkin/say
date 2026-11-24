@@ -35,32 +35,28 @@ func TestTermHUDDrawsTheWindowsFrames(t *testing.T) {
 		v.apply(out)
 		at := func(row, col int) rune { return v.cells[(row-1)*cols+col-1].r }
 		canvasLeft, canvasTop := termSide+1, termBorder+1
-		groupCols := vs.selfSlot.cols + termGap + vs.peerSlot.cols
+		groupCols := vs.selfSlot.cols + vs.gap + vs.peerSlot.cols
 		videoLeft := canvasLeft + max(0, (cols-2*termSide-groupCols)/2)
-		peerLeft := videoLeft + vs.selfSlot.cols + termGap
+		peerLeft := videoLeft + vs.selfSlot.cols + vs.gap
 		for _, left := range []int{videoLeft, peerLeft} {
 			top, bottom := canvasTop-1, canvasTop+vs.selfSlot.rows
 			right := left + vs.selfSlot.cols
-			// The corners are cut: a quarter joining the edges, or a
-			// slant from further in.
-			if !strings.ContainsRune("▗ ", at(top, left-1)) || !strings.ContainsRune("▖ ", at(top, right)) ||
-				!strings.ContainsRune("▝ ", at(bottom, left-1)) || !strings.ContainsRune("▘ ", at(bottom, right)) {
-				t.Fatalf("%dx%d: no cut corners on the pane at column %d", cols, rows, left)
+			// A rounded box of lines.
+			if at(top, left-1) != '╭' || at(top, right) != '╮' || at(bottom, left-1) != '╰' || at(bottom, right) != '╯' {
+				t.Fatalf("%dx%d: no rounded corners on the pane at column %d", cols, rows, left)
 			}
 			mid := left + vs.selfSlot.cols/2
 			if at(top, mid) == 0 || at(bottom, mid) == 0 || at(canvasTop+vs.selfSlot.rows/2, left-1) == 0 {
 				t.Fatalf("%dx%d: no frame round the pane at column %d", cols, rows, left)
 			}
 		}
-		// The chat's frame under the panes' frames; the captions' row as
-		// wide as the input line in it.
-		canvasCols := cols - 2*termSide
-		frameLeft := max(canvasLeft, videoLeft-1)
-		frameRight := min(canvasLeft+canvasCols, videoLeft+groupCols+1)
-		chatLeft, chatCols := frameLeft+2, frameRight-frameLeft-4
+		// The chat's frame under the panes' frames; the captions' row's
+		// ends under their lines (frameRight: the column after them).
+		frameLeft := videoLeft - 1
+		frameRight := videoLeft + groupCols + 1
 		captionRow := canvasTop + vs.selfSlot.rows + 1
-		if at(captionRow, chatLeft) != '▐' || at(captionRow, chatLeft+chatCols-1) != '▌' || at(captionRow, chatLeft+1) != '─' {
-			t.Fatalf("%dx%d: the captions' row is not bracketed across the input's width", cols, rows)
+		if at(captionRow, frameLeft) != '├' || at(captionRow, frameRight-1) != '┤' || at(captionRow, frameLeft+1) != '─' {
+			t.Fatalf("%dx%d: the captions' row is not bracketed under the frames' lines", cols, rows)
 		}
 		chatTop := captionRow + 1 + termSeparator
 		if at(chatTop-1, frameLeft) == 0 || at(chatTop-1, frameLeft-1) != 0 && frameLeft > canvasLeft {

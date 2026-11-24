@@ -1138,7 +1138,7 @@ func renderChatScreen(cols, rows int) string {
 	}
 	canvasLeft, canvasTop := termSide+1, termBorder+1
 	canvasCols := cols - 2*termSide
-	videoGroupCols := vs.selfSlot.cols + termGap + vs.peerSlot.cols
+	videoGroupCols := vs.selfSlot.cols + vs.gap + vs.peerSlot.cols
 	videoLeft := canvasLeft + max(0, (canvasCols-videoGroupCols)/2)
 	videoCaptionRow := canvasTop + vs.selfSlot.rows
 	if framed() {
@@ -1160,11 +1160,15 @@ func renderChatScreen(cols, rows int) string {
 	// under the panes' frames, its edges below theirs.
 	frameLeft, frameCols := canvasLeft, canvasCols
 	if termHUD && !pixelMode {
-		frameLeft = max(canvasLeft, videoLeft-1)
-		frameCols = min(canvasLeft+canvasCols, videoLeft+videoGroupCols+1) - frameLeft
+		// As wide as the panes' frames together (theirs go a column out of
+		// the panes, past the canvas when the panes fill it).
+		frameLeft, frameCols = videoLeft-1, videoGroupCols+2
 	}
 	chatLeft, chatCols := canvasLeft, canvasCols
-	if framed() {
+	switch {
+	case termHUD && !pixelMode:
+		chatLeft, chatCols = frameLeft+1, frameCols-2 // the text as wide as the panes inside their frames
+	case framed():
 		chatLeft, chatCols = frameLeft+2, frameCols-4
 	}
 	if chatRows < 1 {
@@ -1208,9 +1212,9 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	sepCol := videoLeft + vs.selfSlot.cols
-	peerLeft := sepCol + termGap
+	peerLeft := sepCol + vs.gap
 	for r := canvasTop; r <= canvasTop+vs.selfSlot.rows; r++ {
-		lineAt(r, sepCol).WriteString(strings.Repeat(" ", termGap))
+		lineAt(r, sepCol).WriteString(strings.Repeat(" ", vs.gap))
 	}
 	canvasBlank := strings.Repeat(" ", canvasCols)
 	for i := 0; i < termSeparator; i++ {
@@ -1278,23 +1282,24 @@ func renderChatScreen(cols, rows int) string {
 		// the line running from caption to ping to caption.
 		// The ping may spread past the gap, up to a column short of each
 		// caption; when the route's name does not fit, the ping goes alone.
-		spread := max(0, min(sepCol-selfText[1]-1, peerText[0]-1-(sepCol+termGap)))
+		spread := max(0, min(sepCol-selfText[1]-1, peerText[0]-1-(sepCol+vs.gap)))
 		if selfText[1] == 0 || peerText[0] == 0 {
 			spread = 0
 		}
 		ping := latencyLabel
 		if latencyLabel != "" && pathLabel != "" {
-			if full := joinLabels(pathLabel, latencyLabel); displayWidth(full) <= termGap+2*spread {
+			if full := joinLabels(pathLabel, latencyLabel); displayWidth(full) <= vs.gap+2*spread {
 				ping = full
 			}
 		}
-		extra := min(spread, max(0, (displayWidth(ping)-termGap+1)/2))
-		pingText := writeGapPing(lines.at(videoCaptionRow), videoCaptionRow, sepCol-extra, termGap+2*extra, ping)
+		extra := min(spread, max(0, (displayWidth(ping)-vs.gap+1)/2))
+		pingText := writeGapPing(lines.at(videoCaptionRow), videoCaptionRow, sepCol-extra, vs.gap+2*extra, ping)
 		// The bracketed line spans the panes in the window; in a terminal the
-		// chat's input line below it.
+		// frames' lines (the panes' above it, the chat's below), its ends
+		// under them.
 		bracketLeft, bracketCols := videoLeft, videoGroupCols
 		if termHUD && !pixelMode {
-			bracketLeft, bracketCols = chatLeft, chatCols
+			bracketLeft, bracketCols = frameLeft, frameCols
 		}
 		rel := func(sp [2]int) [2]int { return [2]int{sp[0] - bracketLeft, sp[1] - bracketLeft} }
 		writePixelBracket(lines.at(videoCaptionRow), videoCaptionRow, bracketLeft, bracketCols, rel(selfText), rel(pingText), rel(peerText))
@@ -2626,6 +2631,7 @@ type viewportSlots struct {
 	selfSlot slotSize // наш слот (верхний или левый)
 	peerSlot slotSize // слот собеседника (нижний или правый)
 	orient   byte     // 'V' или 'H'
+	gap      int      // columns between the panes: termGap, a column more when the rest would leave the right margin wider
 }
 
 // calcViewportSlotSize replicates the layout math from the renderer and returns
@@ -2668,6 +2674,9 @@ func calcViewportSlots(cols, rows int) (vs viewportSlots, ok bool) {
 	}
 	vs.selfSlot = slotSize{cols: paneCols, rows: paneRows, orient: vs.orient}
 	vs.peerSlot = slotSize{cols: paneCols, rows: paneRows, orient: vs.orient}
+	// The panes are centred: an odd column left over goes between them,
+	// not to the right margin (which was a column wider than the left).
+	vs.gap = termGap + (width-termGap-2*paneCols)&1
 
 	if vs.selfSlot.cols <= 0 || vs.selfSlot.rows <= 0 ||
 		vs.peerSlot.cols <= 0 || vs.peerSlot.rows <= 0 {

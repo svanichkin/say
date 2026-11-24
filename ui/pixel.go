@@ -36,7 +36,7 @@ func SetPixelMode() {
 	pixelMode = true
 	colorMode.Store(int32(ColorTrue))
 	termBorder, termSeparator = 2, 3
-	termSide, termGap = 4, 6
+	termSide, termGap = 4, 5 // the panes' frames reach some 1.5 cells out: two cells between them
 	SetAccentAddresses("", "")
 }
 
