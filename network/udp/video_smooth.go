@@ -29,7 +29,9 @@ import (
 // rate allows, and by the frames the budget has no room for.
 //
 // A band's frame: videoSmoothMark, the cells' columns and rows the sender
-// asks for, then the smooth frame.
+// asks for, then the smooth frame; with none (the three bytes alone) a
+// heartbeat: the picture is as it was (protocol 14; a still picture's
+// heartbeat was a whole coded frame, some 50 B twice a second).
 
 // videoSmoothQ is the quality a path with trouble gets at most (loss, a
 // queue, a cut of the rate: big frames break into IP fragments and queue);
@@ -41,6 +43,11 @@ var (
 	videoSmoothQ    = 40
 	videoSmoothQMax = 50
 )
+
+// videoSmoothQTerm is the quality at most while the peer shows our video in
+// its terminal (not in pixels: each 4x8 pixels become a glyph and two
+// colours, the coder's finer detail lost in them).
+const videoSmoothQTerm = 20
 
 const (
 	smoothCleanFor  = 3 * time.Second
@@ -167,8 +174,8 @@ const (
 
 // isKeyframe says whether a band's frame is a keyframe.
 func isKeyframe(b []byte) bool {
-	if len(b) > 3 && b[0] == videoSmoothMark {
-		return b[3] == 'K'
+	if videoSmooth && len(b) >= 3 && b[0] == videoSmoothMark {
+		return len(b) > 3 && b[3] == 'K' // three bytes: a heartbeat
 	}
 	return codec.IsKeyframe(b) // Say's
 }
@@ -189,11 +196,14 @@ type smoothBand struct {
 	now      time.Duration
 	last     time.Duration
 	frame    *image.YCbCr
+	skip     bool // SetSkipEmpty's: nothing at all for a still picture, else a heartbeat
 }
 
 func newSmoothBand(rate, qCap func() float64, share float64) *smoothBand {
 	e, d := newSmoothCoders()
-	return &smoothBand{enc: babe.NewSplitVideoEncoder(e, d), rate: rate, qCap: qCap, share: share, q: float64(videoSmoothQ)}
+	enc := babe.NewSplitVideoEncoder(e, d)
+	enc.SkipUnchanged = true // a frame the camera hardly changed: not coded
+	return &smoothBand{enc: enc, rate: rate, qCap: qCap, share: share, q: float64(videoSmoothQ)}
 }
 
 func (b *smoothBand) ForceKeyframe()            { b.enc.ForceKeyframe() }
@@ -201,9 +211,9 @@ func (b *smoothBand) RecoverFrom(ids ...uint16) { b.enc.RecoverFrom(ids...) }
 func (b *smoothBand) CodeAgainst(ids ...uint16) { b.enc.CodeAgainst(ids...) }
 
 // SetSkipEmpty: a frame the camera hardly changed from the one its
-// reference stands for is not sent (babe's SkipUnchanged; the heartbeat
-// still sends one).
-func (b *smoothBand) SetSkipEmpty(on bool) { b.enc.SkipUnchanged = on }
+// reference stands for (babe's SkipUnchanged) is not sent; off (the
+// heartbeat's due), a heartbeat goes in its place: the three bytes alone.
+func (b *smoothBand) SetSkipEmpty(on bool) { b.skip = on }
 
 // setNow is the sender's time of the frame Encode codes next.
 func (b *smoothBand) setNow(now time.Duration) { b.now = now }
@@ -230,8 +240,14 @@ func (b *smoothBand) Encode(f codec.Frame, cols, rows int) ([]byte, error) {
 	}
 	b.q = min(b.qCap(), b.q)
 	data, _, _, _, err := b.enc.Encode(b.frame, int(math.Round(b.q)))
-	if err != nil || len(data) == 0 {
-		return nil, err // nothing changed (SetSkipEmpty)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 { // nothing changed
+		if b.skip {
+			return nil, nil
+		}
+		return []byte{videoSmoothMark, byte(min(255, cols)), byte(min(255, rows))}, nil // the heartbeat
 	}
 	if !b.enc.LastKey() {
 		b.steer(len(data))
@@ -372,7 +388,10 @@ type smoothRx struct {
 	dec   *babe.SplitVideoDecoder
 	cells *codec.Encoder
 	data  []byte
-	pix   [3][]byte // the picture's planes when it came as RGBA
+	pix   [3][]byte     // the picture's planes when it came as RGBA
+	last  *codec.Pixels // the picture shown last (its own planes: a heartbeat shows it again)
+	tf    *codec.TextFrame
+	tfC   [3]int // tf's columns, rows and whether in pixels
 }
 
 func newSmoothRx() *smoothRx {
@@ -384,10 +403,17 @@ func (r *smoothRx) LastGood() (uint16, bool) { return r.dec.LastGood() }
 func (r *smoothRx) LastMark() (uint16, bool) { return r.dec.LastMark() }
 
 func (r *smoothRx) Decode(data []byte) (*codec.TextFrame, error) {
-	if len(data) < 4 || data[0] != videoSmoothMark || data[1] == 0 || data[2] == 0 {
+	if len(data) < 3 || data[0] != videoSmoothMark || data[1] == 0 || data[2] == 0 {
 		return nil, errSmoothFrame
 	}
 	cols, rows := int(data[1]), int(data[2])
+	if len(data) == 3 {
+		// A heartbeat: the picture as it was, in the grid it names.
+		if r.last == nil {
+			return nil, errSmoothFrame // none yet: one was lost
+		}
+		return r.render(cols, rows)
+	}
 	w, h, y, cb, cr, err := r.dec.Decode(data[3:])
 	if err != nil {
 		return nil, err
@@ -396,17 +422,51 @@ func (r *smoothRx) Decode(data []byte) (*codec.TextFrame, error) {
 	if y, cb, cr, err = r.shown(w, h, y, cb, cr); err != nil {
 		return nil, err
 	}
-	if ui.PixelMode() {
-		return pixelFrame(cols, rows, &codec.Pixels{W: w, H: h, Y: y, Cb: cb, Cr: cr}), nil
+	// The frame's own planes: the decoder's are its own until its next
+	// Decode, and the frame waits for its sound (av/sync: some 6 frames
+	// queued). Shared, a frame waiting showed a later one's picture: on a
+	// long fast motion the picture jumped ahead and back.
+	n := w * h
+	buf := make([]byte, 3*n)
+	copy(buf, y[:n])
+	copy(buf[n:], cb[:n])
+	copy(buf[2*n:], cr[:n])
+	r.last, r.tf = &codec.Pixels{W: w, H: h, Y: buf[:n:n], Cb: buf[n : 2*n : 2*n], Cr: buf[2*n:]}, nil
+	return r.render(cols, rows)
+}
+
+// render is the picture shown last in a grid of cols x rows: in the
+// window its pixels, in the terminal its cells (the same frame again while
+// the grid and the mode are).
+func (r *smoothRx) render(cols, rows int) (*codec.TextFrame, error) {
+	px := ui.PixelMode()
+	key := [3]int{cols, rows, 0}
+	if px {
+		key[2] = 1
 	}
-	if cap(r.data) < 3*w*h {
-		r.data = make([]byte, 3*w*h)
+	if r.tf != nil && r.tfC == key {
+		return r.tf, nil
 	}
-	r.data = r.data[:3*w*h]
-	for i := 0; i < w*h; i++ {
-		r.data[3*i], r.data[3*i+1], r.data[3*i+2] = y[i], cb[i], cr[i]
+	p := r.last
+	var tf *codec.TextFrame
+	if px {
+		tf = pixelFrame(cols, rows, p)
+	} else {
+		n := p.W * p.H
+		if cap(r.data) < 3*n {
+			r.data = make([]byte, 3*n)
+		}
+		r.data = r.data[:3*n]
+		for i := range n {
+			r.data[3*i], r.data[3*i+1], r.data[3*i+2] = p.Y[i], p.Cb[i], p.Cr[i]
+		}
+		var err error
+		if tf, err = r.cells.SelfView(codec.Frame{Data: r.data, Width: p.W, Height: p.H}, cols, rows); err != nil {
+			return nil, err
+		}
 	}
-	return r.cells.SelfView(codec.Frame{Data: r.data, Width: w, Height: h}, cols, rows)
+	r.tf, r.tfC = tf, key
+	return tf, nil
 }
 
 // shown is the planes of the picture the frame just decoded shows

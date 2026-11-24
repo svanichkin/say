@@ -225,10 +225,12 @@ func (s *layerSender) setPane(now time.Duration, cols, rows int) {
 	first := s.paneRows == 0
 	s.paneCols, s.paneRows = cols, rows
 	switch {
-	case first || s.hiRows > rows:
+	case first || s.hiRows > rows || videoSmooth:
+		// The smooth video's grid is the pane's (adaptGrid leaves it: its
+		// quality meets the rate): a pane grown grew nothing before.
 		s.setHi(now, rows)
 	default:
-		s.setHi(now, s.hiRows) // the pane's aspect changed
+		s.setHi(now, s.hiRows) // the pane's aspect changed (adaptGrid grows it)
 	}
 }
 
@@ -375,6 +377,14 @@ func (s *layerSender) smoothReport(now time.Duration, r rateReport, ext []byte) 
 // trouble, up to videoSmoothQMax a point every smoothQRise once the path
 // has been clean for smoothCleanFor.
 func (s *layerSender) smoothQCap() float64 {
+	if !peerPixels.Load() {
+		return min(s.pathQCap(), videoSmoothQTerm) // the peer's terminal
+	}
+	return s.pathQCap()
+}
+
+// pathQCap is the quality the path allows (smoothQCap).
+func (s *layerSender) pathQCap() float64 {
 	now := s.capNow
 	if s.qCap == 0 || now-s.trouble < smoothCleanFor {
 		s.qCap, s.qCapAt = float64(videoSmoothQ), now

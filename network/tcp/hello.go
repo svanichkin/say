@@ -48,12 +48,14 @@ import (
 //	   pkg/babe; the old classic coder is gone), a still band's frame may
 //	   be skipped; Say's key and full frames carry the "as the left cell"
 //	   flag (codec/frames.go)
+//	14 a still band's heartbeat is the smooth frame's three bytes alone
+//	   (network/udp/video_smooth.go), not a coded frame
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 13
-	MinProtocolVersion = 13
+	ProtocolVersion    = 14
+	MinProtocolVersion = 14
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.
