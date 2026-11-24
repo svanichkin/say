@@ -114,8 +114,12 @@ type rcFrame struct {
 	palBits [18][17]uint16
 	eqLeft  [3][4]uint16 // per field; context: left == above, previous field matched
 	eqAbove [3][2]uint16 // per field; context: previous field matched
-	glyph   [64]uint16
-	pred    [2][3][256]uint16 // fg, bg
+	// cellLeft: the whole cell as the one to its left; context: the cell
+	// above as its left one, the cell above as the left one, the cell
+	// before as its left one.
+	cellLeft [8]uint16
+	glyph    [64]uint16
+	pred     [2][3][256]uint16 // fg, bg
 }
 
 func (m *rcFrame) restart() {
@@ -129,6 +133,7 @@ func (m *rcFrame) restart() {
 		halve(m.eqLeft[f][:])
 		halve(m.eqAbove[f][:])
 	}
+	halve(m.cellLeft[:])
 	halve(m.glyph[:])
 	for f := range m.pred {
 		for k := range m.pred[f] {
@@ -180,11 +185,51 @@ func (m *rcFrame) palette(c rcCoder, codes []uint16) []uint16 {
 // decodeCells are this one model, the coder's state in registers; they
 // must stay mirror images.
 
+// sameCell: cells i and j show the same (the foreground only under a
+// glyph: the empty glyph takes the background).
+func sameCell(glyphs, fg, bg []byte, i, j int) bool {
+	return glyphs[i] == glyphs[j] && bg[i] == bg[j] && (glyphs[i] == 0 || fg[i] == fg[j])
+}
+
+// cellLeftCtx is the context of cell i's "as the left one" (it has a left
+// one); prevLeft: the cell before was coded as its left one.
+func cellLeftCtx(glyphs, fg, bg []byte, i, cols int, prevLeft bool) int {
+	ctx := 0
+	if i >= cols {
+		if sameCell(glyphs, fg, bg, i-cols, i-cols-1) {
+			ctx |= 1
+		}
+		if sameCell(glyphs, fg, bg, i-cols, i-1) {
+			ctx |= 2
+		}
+	}
+	if prevLeft {
+		ctx |= 4
+	}
+	return ctx
+}
+
 // encodeCells codes the cells.
 func (m *rcFrame) encodeCells(e *rcEncoder, glyphs, fg, bg []byte, cols int) {
 	planes := [3][]byte{glyphs, bg, fg}
 	rng, low := e.rng, e.low
+	prevLeft := false
 	for i := range glyphs {
+		if i%cols > 0 {
+			eq := sameCell(glyphs, fg, bg, i, i-1)
+			p := &m.cellLeft[cellLeftCtx(glyphs, fg, bg, i, cols, prevLeft)]
+			if rng, low = encStep(rng, low, p, b2i(eq)); rng < rcTop {
+				e.rng, e.low = rng, low
+				e.normalize()
+				rng, low = e.rng, e.low
+			}
+			prevLeft = eq
+			if eq {
+				continue
+			}
+		} else {
+			prevLeft = false
+		}
 		matched := false // the previous field of this cell repeated a neighbour
 		for f, plane := range planes {
 			if f == 2 && glyphs[i] == 0 {
@@ -240,7 +285,24 @@ func (m *rcFrame) encodeCells(e *rcEncoder, glyphs, fg, bg []byte, cols int) {
 func (m *rcFrame) decodeCells(d *rcDecoder, glyphs, fg, bg []byte, cols int) {
 	planes := [3][]byte{glyphs, bg, fg}
 	rng, code := d.rng, d.code
+	prevLeft := false
 	for i := range glyphs {
+		if i%cols > 0 {
+			var b int
+			p := &m.cellLeft[cellLeftCtx(glyphs, fg, bg, i, cols, prevLeft)]
+			if rng, code, b = decStep(rng, code, p); rng < rcTop {
+				d.rng, d.code = rng, code
+				d.normalize()
+				rng, code = d.rng, d.code
+			}
+			prevLeft = b == 1
+			if prevLeft {
+				glyphs[i], bg[i], fg[i] = glyphs[i-1], bg[i-1], fg[i-1]
+				continue
+			}
+		} else {
+			prevLeft = false
+		}
 		matched := false
 		for f, plane := range planes {
 			if f == 2 && glyphs[i] == 0 {

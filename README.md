@@ -87,7 +87,7 @@ external Yggdrasil daemon or web stack.
 - **Change-only video frames.** After a full frame, only the cells that
   changed are sent; together with `-video-hold` a still picture costs a few
   hundred bytes per frame instead of several kilobytes. Both peers need this
-  version (protocol 12).
+  version (protocol 13).
 - **Small fixed buffers.** Every call plays with a 10 ms x 2 speaker buffer
   (like the macOS system voice unit's ~10.7 ms IO buffer) and a 40 ms jitter
   buffer, in the LAN and over the internet alike. Steady clock drift between
@@ -417,7 +417,7 @@ codec on both sides). Relevant CLI switches:
 - `-fps` – optional cap on the video frame rate. Without it every camera frame is coded, and the rate control sends what the path allows.
 - `-video-hold=N` – stops a still picture from shimmering: a cell keeps its previous glyph and colours while its new look differs by at most N (mean colour difference per pixel, default `13`, `0` disables; higher is calmer, but low-contrast details start to lag; a cell held 8 frames is kept only while it differs by less than N/2, so slow changes come through in the end). N holds up to 88x36 cells, the camera's own pixels; a larger frame holds harder, up to 2N at 160x65: finer cells mostly carry the camera's noise there (160x65 at 2N takes about 40% fewer bytes than at N and looks the same).
 - `-video-hold-debug` – tint the cells kept by `-video-hold` lilac, to see how many there are.
-- `-video-codec=say` – (both peers) Say's video of cells as before (as protocol 8 sent it). By default the video goes in pixels by Babe's smooth coder: blocks that copy the frame before (moved or not) or are drawn anew; the window shows the pixels, the terminal turns them into its cells; the rate is met by the quality (down to q10) and by frames left out. `-video-q=N` – its quality on a path with loss, a queue or a cut of the rate (default 40); `-video-qmax=N` – how high it rises on a path clean for 3 s, a point every 0.5 s (default 50).
+- `-video-codec=say` – (both peers) Say's video of cells as before (as protocol 8 sent it). By default the video goes in pixels by Babe's split coder (as Babe's BabeCam codes video): blocks of an error-split tree that copy the frame before (moved or not) or are drawn anew, a frame the camera hardly changed not sent; the window shows the pixels, the terminal turns them into its cells; the rate is met by the quality (down to q10) and by frames left out. `-video-q=N` – its quality on a path with loss, a queue or a cut of the rate (default 40); `-video-qmax=N` – how high it rises on a path clean for 3 s, a point every 0.5 s (default 50).
 - `-video-fx=NAME` – (the window) the effect over both video panes, `hologram` by default (`none`: off): `hologram`, `neon`, `thermal`, `duotone`, `bladerunner`, `poster`, `aberration`, `crt`, `glitch`.
 - `-video-light` – (the window) the exposure as a photo editor's shadows and highlights with auto levels, both panes: each place lifted or toned by its own light (a dark face before a bright window lifted, the window not burnt), then the range stretched to full; slowly following the picture (the hologram has it anyway); the stream is not touched.
 - `-video-sharp=N` – (the window) the video's sharpness, percent, 100 by default (`0`: off): an unsharp mask over the luma at the picture's own size before it is drawn larger, the coder's faint noise left alone and no rings round edges; the stream is not touched.

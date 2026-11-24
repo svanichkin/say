@@ -4,20 +4,21 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"log"
 	"math"
 	"sync/atomic"
 	"time"
 
-	"github.com/svanichkin/Babe/classic"
+	"github.com/svanichkin/Babe/pkg/babe"
 	"github.com/svanichkin/say/codec"
 	"github.com/svanichkin/say/ui"
 )
 
-// Video with Babe's smooth coder (the default; Say's cells with -video-codec
-// say, both peers): each band a stream of pixels (classic.VideoEncoder: blocks of an
-// error-split tree that copy the frame before, moved or not, or are drawn
-// anew) in place of Say's cells; the receiver turns the pixels into its
+// Video with Babe's split coder (the default; Say's cells with -video-codec
+// say, both peers): each band a stream of pixels (babe.SplitVideoEncoder:
+// blocks of an error-split tree that copy the frame before, moved or not,
+// or are drawn anew) in place of Say's cells; the receiver turns the pixels into its
 // cells itself (codec.Encoder.SelfView), so the panes, the noise of a band
 // that hung, the recovery and the acknowledgements stay as they are (the
 // frames' numbers are uint16 as Say's). In the window (ui.PixelMode) no
@@ -98,16 +99,16 @@ func SetVideoCodec(name string, q, qmax int) error {
 	return nil
 }
 
-// newSmoothCoders are Babe's -smooth encoder and decoder (as Babe's
-// cmd/babecam: no text network).
-func newSmoothCoders() (*classic.Encoder, *classic.Decoder) {
-	e := classic.NewEncoder()
-	d := classic.NewDecoder()
-	e.SparseCorners, e.LargeGradients, e.LumaSplit, e.ChromaSplit, e.JointSplit = true, true, true, true, true
-	e.CornerMinSize = 5
-	e.GlyphDownscaleAuto, e.PatternLines = true, true
+// newSmoothCoders are Babe's split encoder and decoder as Babe's
+// cmd/babecam codes video (newSplitCoders): no screen layer of text cells
+// on a camera (it took long stretches of a call, nothing copied under it).
+func newSmoothCoders() (*babe.Encoder, *babe.Decoder) {
+	e := babe.NewEncoder()
+	d := babe.NewDecoder()
+	e.Mode = babe.ModeSplit
+	e.LumaSplit, e.ChromaSplit, e.JointSplit = true, true, true
 	e.BTCLeaves, e.BTCFine, e.Fast, e.Blend = true, true, true, true
-	d.Smooth = true
+	e.NoScreen = true
 	// One thread: a frame this small is coded in some 13 ms (352x288, q40)
 	// at about 30% less CPU than its parallel workers spend (Babe's
 	// cpucheck: 18 ms of CPU for 4 ms by the clock).
@@ -175,7 +176,7 @@ func isKeyframe(b []byte) bool {
 // smoothBand is a band's smooth encoder: its quality steered to the bytes a
 // frame its share of the rate allows.
 type smoothBand struct {
-	enc      *classic.VideoEncoder
+	enc      *babe.SplitVideoEncoder
 	rate     func() float64 // kbit/s the sender may send at
 	qCap     func() float64 // the quality the path allows now
 	logAt    time.Duration
@@ -192,13 +193,17 @@ type smoothBand struct {
 
 func newSmoothBand(rate, qCap func() float64, share float64) *smoothBand {
 	e, d := newSmoothCoders()
-	return &smoothBand{enc: classic.NewVideoEncoder(e, d), rate: rate, qCap: qCap, share: share, q: float64(videoSmoothQ)}
+	return &smoothBand{enc: babe.NewSplitVideoEncoder(e, d), rate: rate, qCap: qCap, share: share, q: float64(videoSmoothQ)}
 }
 
 func (b *smoothBand) ForceKeyframe()            { b.enc.ForceKeyframe() }
 func (b *smoothBand) RecoverFrom(ids ...uint16) { b.enc.RecoverFrom(ids...) }
 func (b *smoothBand) CodeAgainst(ids ...uint16) { b.enc.CodeAgainst(ids...) }
-func (b *smoothBand) SetSkipEmpty(bool)         {} // a still picture's frame is a few copies: it always goes
+
+// SetSkipEmpty: a frame the camera hardly changed from the one its
+// reference stands for is not sent (babe's SkipUnchanged; the heartbeat
+// still sends one).
+func (b *smoothBand) SetSkipEmpty(on bool) { b.enc.SkipUnchanged = on }
 
 // setNow is the sender's time of the frame Encode codes next.
 func (b *smoothBand) setNow(now time.Duration) { b.now = now }
@@ -225,8 +230,8 @@ func (b *smoothBand) Encode(f codec.Frame, cols, rows int) ([]byte, error) {
 	}
 	b.q = min(b.qCap(), b.q)
 	data, _, _, _, err := b.enc.Encode(b.frame, int(math.Round(b.q)))
-	if err != nil {
-		return nil, err
+	if err != nil || len(data) == 0 {
+		return nil, err // nothing changed (SetSkipEmpty)
 	}
 	if !b.enc.LastKey() {
 		b.steer(len(data))
@@ -360,18 +365,19 @@ func pixelSelfView(f codec.Frame, cols, rows int) *codec.TextFrame {
 	return pixelFrame(cols, rows, p)
 }
 
-// smoothRx is a band's smooth decoder: in the window the pixels as they
-// are, in the terminal into cells (codec.Encoder.SelfView, the receiver's
-// own, no compression).
+// smoothRx is a band's smooth decoder: in the window the picture as Babe
+// shows it (PictureNative: the RGB stages' blend), in the terminal into
+// cells (codec.Encoder.SelfView, the receiver's own, no compression).
 type smoothRx struct {
-	dec   *classic.VideoDecoder
+	dec   *babe.SplitVideoDecoder
 	cells *codec.Encoder
 	data  []byte
+	pix   [3][]byte // the picture's planes when it came as RGBA
 }
 
 func newSmoothRx() *smoothRx {
 	_, d := newSmoothCoders()
-	return &smoothRx{dec: classic.NewVideoDecoder(d), cells: codec.NewEncoder(false, 0, maxVideoFPS, false)}
+	return &smoothRx{dec: babe.NewSplitVideoDecoder(d), cells: codec.NewEncoder(false, 0, maxVideoFPS, false)}
 }
 
 func (r *smoothRx) LastGood() (uint16, bool) { return r.dec.LastGood() }
@@ -386,6 +392,10 @@ func (r *smoothRx) Decode(data []byte) (*codec.TextFrame, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The picture shown (as Babe's BabeCam shows it), not the reference.
+	if y, cb, cr, err = r.shown(w, h, y, cb, cr); err != nil {
+		return nil, err
+	}
 	if ui.PixelMode() {
 		return pixelFrame(cols, rows, &codec.Pixels{W: w, H: h, Y: y, Cb: cb, Cr: cr}), nil
 	}
@@ -397,4 +407,40 @@ func (r *smoothRx) Decode(data []byte) (*codec.TextFrame, error) {
 		r.data[3*i], r.data[3*i+1], r.data[3*i+2] = y[i], cb[i], cr[i]
 	}
 	return r.cells.SelfView(codec.Frame{Data: r.data, Width: w, Height: h}, cols, rows)
+}
+
+// shown is the planes of the picture the frame just decoded shows
+// (babe.SplitVideoDecoder.PictureNative: 4:4:4 planes, or an RGBA turned
+// into them by JFIF's formula); the decoded planes when neither.
+func (r *smoothRx) shown(w, h int, y, cb, cr []byte) ([]byte, []byte, []byte, error) {
+	im, err := r.dec.PictureNative()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	switch p := im.(type) {
+	case *image.YCbCr:
+		if p.SubsampleRatio == image.YCbCrSubsampleRatio444 && p.Rect.Dx() == w && p.Rect.Dy() == h && p.YStride == w && p.CStride == w {
+			return p.Y[:w*h], p.Cb[:w*h], p.Cr[:w*h], nil
+		}
+	case *image.RGBA:
+		if p.Rect.Dx() == w && p.Rect.Dy() == h {
+			for c := range r.pix {
+				if cap(r.pix[c]) < w*h {
+					r.pix[c] = make([]byte, w*h)
+				}
+				r.pix[c] = r.pix[c][:w*h]
+			}
+			for py := range h {
+				row := p.Pix[py*p.Stride:]
+				for px := range w {
+					o := 4 * px
+					yy, u, v := color.RGBToYCbCr(row[o], row[o+1], row[o+2])
+					i := py*w + px
+					r.pix[0][i], r.pix[1][i], r.pix[2][i] = yy, u, v
+				}
+			}
+			return r.pix[0], r.pix[1], r.pix[2], nil
+		}
+	}
+	return y, cb, cr, nil
 }

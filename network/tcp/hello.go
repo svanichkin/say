@@ -44,12 +44,16 @@ import (
 //	   1-4 bytes where TEXT took 9-13)
 //	12 Babe's cell colour layer may start its bands from the trained
 //	   models (flag 128 of the layer)
+//	13 the smooth video is Babe's final split coder (babe.SplitVideoEncoder,
+//	   pkg/babe; the old classic coder is gone), a still band's frame may
+//	   be skipped; Say's key and full frames carry the "as the left cell"
+//	   flag (codec/frames.go)
 //
 // Only peers of the current protocol are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 12
-	MinProtocolVersion = 12
+	ProtocolVersion    = 13
+	MinProtocolVersion = 13
 )
 
 // incompatibleReply answers a HELLO from a peer this build cannot talk to.
