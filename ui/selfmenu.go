@@ -14,8 +14,10 @@ import (
 // A click on the self view opens a menu in its place: the microphone and the
 // camera, each on (a green tick) or off (a red cross), and, where the system
 // has them, its own microphone settings (an arrow: it opens something else).
-// A click on an item does it and closes the menu; a click anywhere else only
-// closes it. What is off shows under the pane (A MUTE, V MUTE).
+// A click on the peer's view opens its menu: its sound and its video (not
+// shown: its pane loses the signal, the noise then the test card). A click on an item does it and closes the
+// menu; a click anywhere else only closes it. What is off shows under the
+// pane (A MUTE, V MUTE).
 
 const (
 	menuOn    = "✅"
@@ -26,6 +28,7 @@ const (
 var selfMenu struct {
 	sync.Mutex
 	open  bool
+	peer  bool      // the peer view's menu, not ours
 	items []menuHit // where the last drawn menu's items are
 }
 
@@ -41,15 +44,34 @@ type menuItem struct {
 	do          func()
 }
 
-func selfMenuOpen() bool {
+// menuOpen reports whether a menu is open (ours or the peer view's).
+func menuOpen() bool {
 	selfMenu.Lock()
 	defer selfMenu.Unlock()
 	return selfMenu.open
 }
 
-func setSelfMenu(open bool) {
+func selfMenuOpen() bool {
 	selfMenu.Lock()
-	selfMenu.open = open
+	defer selfMenu.Unlock()
+	return selfMenu.open && !selfMenu.peer
+}
+
+func peerMenuOpen() bool {
+	selfMenu.Lock()
+	defer selfMenu.Unlock()
+	return selfMenu.open && selfMenu.peer
+}
+
+// setSelfMenu opens our view's menu, or closes whichever is open.
+func setSelfMenu(open bool) { setMenu(open, false) }
+
+// setPeerMenu opens the peer view's menu, or closes whichever is open.
+func setPeerMenu(open bool) { setMenu(open, true) }
+
+func setMenu(open, peer bool) {
+	selfMenu.Lock()
+	selfMenu.open, selfMenu.peer = open, peer && open
 	if !open {
 		selfMenu.items = nil
 	}
@@ -110,23 +132,63 @@ func selfMenuItems() []menuItem {
 	return items
 }
 
-// writeSelfMenu draws the menu over the self pane (1-based top, left), in
+// peerMenuItems are the peer view's: its sound (played or not) and its
+// video (shown or not).
+func peerMenuItems() []menuItem {
+	state := func(on bool) (string, [3]int) {
+		if on {
+			return menuOn, [3]int{40, 200, 70}
+		}
+		return menuOff, [3]int{230, 40, 40}
+	}
+	soundIcon, soundColour := state(mediactrl.PlaybackEnabled())
+	videoIcon, videoColour := state(mediactrl.PeerVideoShown())
+	return []menuItem{
+		{soundIcon, lang.T(lang.MenuPeerSound), soundColour, func() {
+			if mediactrl.TogglePlayback() {
+				logs.LogV("[ui] remote playback resumed (menu)")
+			} else {
+				logs.LogV("[ui] remote playback paused (menu)")
+			}
+		}},
+		{videoIcon, lang.T(lang.MenuPeerVideo), videoColour, func() {
+			if mediactrl.TogglePeerVideo() {
+				logs.LogV("[ui] remote video shown (menu)")
+			} else {
+				logs.LogV("[ui] remote video hidden (menu)")
+			}
+		}},
+	}
+}
+
+// writeSelfMenu draws our menu over the self pane (1-based top, left), in
 // place of its video, and keeps where its items are for clicks.
 func writeSelfMenu(out *strings.Builder, top, left int, slot slotSize) {
+	self, _ := Accents()
+	writeMenu(out, top, left, slot, selfMenuItems(), self, false)
+}
+
+// writePeerMenu draws the peer view's menu over its pane.
+func writePeerMenu(out *strings.Builder, top, left int, slot slotSize) {
+	_, peer := Accents()
+	writeMenu(out, top, left, slot, peerMenuItems(), peer, true)
+}
+
+// writeMenu draws items over a pane in place of its video, its labels in accent (the window's colours), the peer's pane
+// mirrored in the window as its frame is.
+func writeMenu(out *strings.Builder, top, left int, slot slotSize, items []menuItem, accent [3]int, peer bool) {
 	if slot.cols <= 0 || slot.rows <= 0 {
 		return
 	}
 	if pixelMode {
 		// The window keeps the pane (its frame) with no video under it.
-		writePixelPane(out, nil, top, left, slot.cols, slot.rows, false)
+		writePixelPane(out, nil, top, left, slot.cols, slot.rows, peer)
 	}
 	paneCache.invalidate(top, left, slot.cols, slot.rows)
-	items := selfMenuItems()
 	bg := panelColors()
 	text := bg
 	if framed() {
-		self, _ := Accents()
-		text += accentSGR(self)
+		text += accentSGR(accent)
 	}
 	// An item: its icon (two cells), a space, the label. Each is placed
 	// on its own, as terminals disagree on how wide an emoji is.

@@ -71,6 +71,8 @@ const (
 	Stopped
 	MenuMic
 	MenuCam
+	MenuPeerSound
+	MenuPeerVideo
 	MicMode
 	MicPrivacy
 
@@ -134,6 +136,8 @@ var en = map[Key]string{
 	Stopped:       "Say stopped: %v\n\nDetails, if it crashed: %s",
 	MenuMic:       "Microphone",
 	MenuCam:       "Camera",
+	MenuPeerSound: "Their sound",
+	MenuPeerVideo: "Their video",
 	MicMode:       "Microphone mode",
 	MicPrivacy:    "Microphone privacy",
 }

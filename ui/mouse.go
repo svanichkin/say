@@ -12,7 +12,6 @@ import (
 
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/logs"
-	"github.com/svanichkin/say/mediactrl"
 	"golang.org/x/term"
 )
 
@@ -202,7 +201,7 @@ func handleMouseEvent(evt mouseEvent) {
 		return
 	}
 
-	if selfMenuOpen() {
+	if menuOpen() {
 		// Any click closes the menu; one on an item does it first.
 		selfMenuClick(evt.col, evt.row)
 		RequestRedraw()
@@ -216,13 +215,8 @@ func handleMouseEvent(evt mouseEvent) {
 	switch viewportForPoint(evt.col, evt.row) {
 	case viewportSelf:
 		setSelfMenu(true)
-	case viewportPeer: // the peer's sound, at once
-		enabled := mediactrl.TogglePlayback()
-		if enabled {
-			logs.LogV("[ui] remote playback resumed via click")
-		} else {
-			logs.LogV("[ui] remote playback paused via click")
-		}
+	case viewportPeer: // its sound and its video
+		setPeerMenu(true)
 	default:
 		return
 	}

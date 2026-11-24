@@ -1258,7 +1258,16 @@ func renderChatScreen(cols, rows int) string {
 	} else {
 		localIdle = writeChatPane(&out, local, localAt, localFrameType, noSignalLabel()+" CAM", now, canvasTop, videoLeft, vs.selfSlot)
 	}
-	remoteIdle := writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel()+" NET", now, canvasTop, peerLeft, vs.peerSlot)
+	remoteIdle := false
+	switch {
+	case peerMenuOpen():
+		writePeerMenu(&out, canvasTop, peerLeft, vs.peerSlot)
+	case !mediactrl.PeerVideoShown():
+		// Not shown: as a signal lost, the noise, then the test card.
+		remoteIdle = writeChatPane(&out, nil, time.Time{}, remoteFrameType, noSignalLabel()+" MUTE", now, canvasTop, peerLeft, vs.peerSlot)
+	default:
+		remoteIdle = writeChatPane(&out, remote, remoteAt, remoteFrameType, noSignalLabel()+" NET", now, canvasTop, peerLeft, vs.peerSlot)
+	}
 	hudVideoMask = nil
 	// Animate the noise while a pane has no signal.
 	updateNoiseAnimation(localIdle || remoteIdle)
@@ -1274,7 +1283,7 @@ func renderChatScreen(cols, rows int) string {
 	// What is switched off (mediactrl): our microphone and camera, the
 	// peer's sound.
 	localCaption = muteCaption(mediactrl.CaptureEnabled(), mediactrl.VideoEnabled()) + localCaption
-	remoteCaption = muteCaption(mediactrl.PlaybackEnabled(), true) + remoteCaption
+	remoteCaption = muteCaption(mediactrl.PlaybackEnabled(), mediactrl.PeerVideoShown()) + remoteCaption
 	selfText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, videoLeft, vs.selfSlot.cols, localCaption, false)
 	peerText := writeVideoCaption(lines.at(videoCaptionRow), videoCaptionRow, peerLeft, vs.peerSlot.cols, remoteCaption, true)
 	if framed() {

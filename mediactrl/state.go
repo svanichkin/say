@@ -16,12 +16,33 @@ var (
 	captureEnabled  atomic.Bool
 	playbackEnabled atomic.Bool
 	videoEnabled    atomic.Bool
+	peerVideoShown  atomic.Bool
 )
 
 func init() {
 	captureEnabled.Store(true)
 	playbackEnabled.Store(true)
 	videoEnabled.Store(true)
+	peerVideoShown.Store(true)
+}
+
+// PeerVideoShown reports whether the peer's video is shown. Off, its pane
+// shows no signal (its frames still come and are decoded: shown again at
+// once).
+func PeerVideoShown() bool {
+	return peerVideoShown.Load()
+}
+
+// TogglePeerVideo flips whether the peer's video is shown and returns the
+// new value.
+func TogglePeerVideo() bool {
+	for {
+		current := peerVideoShown.Load()
+		if peerVideoShown.CompareAndSwap(current, !current) {
+			notifyListeners()
+			return !current
+		}
+	}
 }
 
 // CaptureEnabled reports whether the local microphone is on.
@@ -29,8 +50,8 @@ func CaptureEnabled() bool {
 	return captureEnabled.Load()
 }
 
-// PlaybackEnabled reports whether the peer's sound is played. Its video is
-// not affected: a click on the peer view silences the sound only.
+// PlaybackEnabled reports whether the peer's sound is played (the peer
+// view's menu). Its video is not affected (PeerVideoShown).
 func PlaybackEnabled() bool {
 	return playbackEnabled.Load()
 }
