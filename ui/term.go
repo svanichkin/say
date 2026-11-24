@@ -134,12 +134,9 @@ var (
 		orient byte
 	}
 
-	glyphCodepoints        = codec.GlyphCodepoints()
-	noiseGlyphSet          []byte
-	glyphIndexLookup       map[int]int
-	patternGlyphBlank      byte
-	patternGlyphHorizontal byte
-	patternGlyphVertical   byte
+	glyphCodepoints  = codec.GlyphCodepoints()
+	noiseGlyphSet    []byte
+	glyphIndexLookup map[int]int
 
 	fpsMu       sync.Mutex
 	fpsCounters = map[string]*fpsCounter{
@@ -175,37 +172,6 @@ var statusClickState struct {
 
 var (
 	noiseRandSeed uint64
-
-	testCardTopBars = [][3]byte{
-		rgbToYCbCr(255, 255, 255), // white
-		rgbToYCbCr(255, 255, 0),   // yellow
-		rgbToYCbCr(0, 255, 255),   // cyan
-		rgbToYCbCr(0, 255, 0),     // green
-		rgbToYCbCr(255, 0, 255),   // magenta
-		rgbToYCbCr(255, 0, 0),     // red
-		rgbToYCbCr(0, 0, 255),     // blue
-	}
-	testCardMiddleBars = [][3]byte{
-		rgbToYCbCr(64, 64, 64),   // dark gray
-		rgbToYCbCr(235, 235, 16), // yellow highlight
-		rgbToYCbCr(32, 32, 32),   // near black
-		rgbToYCbCr(16, 16, 16),   // black
-		rgbToYCbCr(235, 16, 16),  // red
-		rgbToYCbCr(16, 235, 16),  // green
-		rgbToYCbCr(16, 16, 235),  // blue
-	}
-	testCardBottomBars = [][3]byte{
-		rgbToYCbCr(16, 16, 16),
-		rgbToYCbCr(64, 64, 64),
-		rgbToYCbCr(96, 96, 96),
-		rgbToYCbCr(128, 128, 128),
-		rgbToYCbCr(160, 160, 160),
-		rgbToYCbCr(192, 192, 192),
-		rgbToYCbCr(224, 224, 224),
-	}
-	testCardSeparator  = rgbToYCbCr(8, 8, 8)
-	testCardAccent     = rgbToYCbCr(235, 235, 235)
-	testCardBackground = rgbToYCbCr(12, 12, 12)
 )
 
 type noiseSlotState struct {
@@ -244,9 +210,6 @@ func init() {
 	for i, cp := range glyphCodepoints {
 		glyphIndexLookup[cp] = i
 	}
-	patternGlyphBlank = glyphIndexForRune('\u00a0')
-	patternGlyphHorizontal = glyphIndexForRune('\u2501')
-	patternGlyphVertical = glyphIndexForRune('\u2503')
 }
 
 type fpsCounter struct {
@@ -1489,8 +1452,11 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 	idle := frame == nil || (!updatedAt.IsZero() && now.Sub(updatedAt) > frameFreezeThreshold)
 	if idle {
 		cols, rows := detailSize(slot.cols, slot.rows)
+		card := updateIdlePatternSlot(frameType, true, now)
 		switch {
-		case updateIdlePatternSlot(frameType, true, now):
+		case card && pixelMode:
+			frame = testCardPixelFrame(cols, rows) // the window: drawn, not glyphs
+		case card:
 			frame = testCardTextFrame(cols, rows)
 		case pixelMode:
 			frame = staticPixelFrame(cols, rows, now) // the window: a TV's snow
@@ -1596,175 +1562,36 @@ func noiseTextFrame(cols, rows int) *codec.TextFrame {
 	}
 }
 
+// testCardTextFrame is the TV test card in the terminal's cells: the
+// window's picture (testCardPixels) at the cells' pixels, made cells as
+// video is (codec.Encoder.SelfView), so that both show the same card.
+// Built once for the pane's size, again only when the size changes.
 func testCardTextFrame(cols, rows int) *codec.TextFrame {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
-
-	total := cols * rows
-	glyphs := make([]byte, total)
-	fg := make([]byte, total*3)
-	bg := make([]byte, total*3)
-
-	for i := 0; i < total; i++ {
-		glyphs[i] = patternGlyphBlank
-		setCellColor(bg, i, testCardBackground)
-		setCellColor(fg, i, testCardBackground)
+	testCardCells.Lock()
+	defer testCardCells.Unlock()
+	if f := testCardCells.frame; f != nil && f.Cols == cols && f.Rows == rows {
+		return f
 	}
-
-	clampRect := func(x0, y0, w, h int) (int, int, int, int, bool) {
-		if w <= 0 || h <= 0 || x0 >= cols || y0 >= rows {
-			return 0, 0, 0, 0, false
-		}
-		x1 := x0 + w
-		y1 := y0 + h
-		if x1 > cols {
-			x1 = cols
-		}
-		if y1 > rows {
-			y1 = rows
-		}
-		if x0 < 0 {
-			x0 = 0
-		}
-		if y0 < 0 {
-			y0 = 0
-		}
-		if x0 >= x1 || y0 >= y1 {
-			return 0, 0, 0, 0, false
-		}
-		return x0, y0, x1, y1, true
+	p := testCardPixels(cols*4, rows*8, 4, 8) // its edges on the cells'
+	data := make([]byte, 3*p.W*p.H)
+	for i := range p.W * p.H {
+		data[3*i], data[3*i+1], data[3*i+2] = p.Y[i], p.Cb[i], p.Cr[i]
 	}
-
-	fillRect := func(x0, y0, w, h int, color [3]byte) {
-		left, top, right, bottom, ok := clampRect(x0, y0, w, h)
-		if !ok {
-			return
-		}
-		for r := top; r < bottom; r++ {
-			rowBase := r * cols
-			for c := left; c < right; c++ {
-				idx := rowBase + c
-				glyphs[idx] = patternGlyphBlank
-				setCellColor(bg, idx, color)
-				setCellColor(fg, idx, color)
-			}
-		}
+	f, err := codec.NewEncoder(false, 0, 30, false).SelfView(codec.Frame{Data: data, Width: p.W, Height: p.H}, cols, rows)
+	if err != nil {
+		return nil
 	}
+	testCardCells.frame = f
+	return f
+}
 
-	drawHorizontalLine := func(y int, color [3]byte) {
-		if y < 0 || y >= rows {
-			return
-		}
-		for c := 0; c < cols; c++ {
-			idx := y*cols + c
-			glyphs[idx] = patternGlyphHorizontal
-			setCellColor(bg, idx, testCardBackground)
-			setCellColor(fg, idx, color)
-		}
-	}
-
-	fillBars := func(y0, h int, palette [][3]byte) {
-		if len(palette) == 0 || h <= 0 {
-			return
-		}
-		barWidth := max(1, cols/len(palette))
-		x := 0
-		for i, color := range palette {
-			width := barWidth
-			if i == len(palette)-1 {
-				width = cols - x
-			}
-			fillRect(x, y0, width, h, color)
-			x += width
-			if x >= cols {
-				break
-			}
-		}
-	}
-
-	topHeight := max(1, (rows*2)/3)
-	midHeight := max(1, rows/6)
-	if topHeight+midHeight >= rows {
-		topHeight = max(1, rows-2)
-		midHeight = 1
-	}
-	bottomHeight := rows - topHeight - midHeight
-	if bottomHeight < 1 {
-		bottomHeight = 1
-		if topHeight > midHeight {
-			topHeight--
-		} else if midHeight > 1 {
-			midHeight--
-		}
-	}
-
-	fillBars(0, topHeight, testCardTopBars)
-
-	midStart := topHeight
-	fillBars(midStart, midHeight, testCardMiddleBars)
-
-	bottomStart := midStart + midHeight
-	fillBars(bottomStart, bottomHeight, testCardBottomBars)
-
-	drawHorizontalLine(midStart, testCardSeparator)
-	drawHorizontalLine(bottomStart, testCardSeparator)
-
-	centerBoxWidth := max(2, cols/6)
-	centerBoxHeight := max(1, midHeight/2)
-	centerX := (cols - centerBoxWidth) / 2
-	centerY := midStart + (midHeight-centerBoxHeight)/2
-	fillRect(centerX, centerY, centerBoxWidth, centerBoxHeight, adjustLuma(testCardAccent, -10))
-
-	innerBoxWidth := max(1, centerBoxWidth/2)
-	innerBoxHeight := max(1, centerBoxHeight/2)
-	fillRect(centerX+(centerBoxWidth-innerBoxWidth)/2, centerY+(centerBoxHeight-innerBoxHeight)/2, innerBoxWidth, innerBoxHeight, testCardAccent)
-
-	// Color burst stripes inside middle band.
-	burstPalette := [][3]byte{
-		rgbToYCbCr(255, 188, 0),
-		rgbToYCbCr(0, 160, 255),
-		rgbToYCbCr(255, 0, 140),
-		rgbToYCbCr(0, 255, 188),
-	}
-	burstHeight := max(1, midHeight/3)
-	fillBars(midStart+midHeight-burstHeight, burstHeight, burstPalette)
-
-	// PLUGE bars at the bottom left to mimic calibration levels.
-	plugeWidth := max(1, cols/24)
-	plugeHeight := max(1, bottomHeight/2)
-	plugeColors := [][3]byte{
-		rgbToYCbCr(0, 0, 0),
-		rgbToYCbCr(35, 35, 35),
-		rgbToYCbCr(70, 70, 70),
-	}
-	for i, color := range plugeColors {
-		fillRect(i*plugeWidth, rows-plugeHeight, plugeWidth, plugeHeight, color)
-	}
-
-	// Add right-side reference blocks.
-	refWidth := max(1, cols/16)
-	refColors := [][3]byte{
-		rgbToYCbCr(255, 255, 255),
-		rgbToYCbCr(0, 0, 0),
-		rgbToYCbCr(255, 0, 0),
-		rgbToYCbCr(0, 255, 0),
-		rgbToYCbCr(0, 0, 255),
-	}
-	for i, color := range refColors {
-		refX := cols - (i+1)*refWidth
-		fillRect(refX, rows-bottomHeight, refWidth, bottomHeight, color)
-	}
-
-	return &codec.TextFrame{
-		Cols:    cols,
-		Rows:    rows,
-		Width:   cols * 4,
-		Height:  rows * 8,
-		Glyphs:  glyphs,
-		FgYCbCr: fg,
-		BgYCbCr: bg,
-	}
+// testCardCells is the terminal's test card for the size it was built for.
+var testCardCells struct {
+	sync.Mutex
+	frame *codec.TextFrame
 }
 
 func clampByte(v int) byte {
@@ -1781,43 +1608,6 @@ func nextNoiseSeed() int64 {
 	now := uint64(time.Now().UnixNano())
 	seed := atomic.AddUint64(&noiseRandSeed, now+1)
 	return int64(seed ^ now)
-}
-
-func setCellColor(buf []byte, idx int, color [3]byte) {
-	if buf == nil {
-		return
-	}
-	base := idx * 3
-	if base+2 >= len(buf) {
-		return
-	}
-	buf[base] = color[0]
-	buf[base+1] = color[1]
-	buf[base+2] = color[2]
-}
-
-func glyphIndexForRune(r rune) byte {
-	if glyphIndexLookup == nil {
-		glyphIndexLookup = make(map[int]int, len(glyphCodepoints))
-		for i, cp := range glyphCodepoints {
-			glyphIndexLookup[cp] = i
-		}
-	}
-	if idx, ok := glyphIndexLookup[int(r)]; ok && idx >= 0 {
-		return byte(idx)
-	}
-	return 0
-}
-
-func adjustLuma(color [3]byte, delta int) [3]byte {
-	y := int(color[0]) + delta
-	if y < 0 {
-		y = 0
-	}
-	if y > 255 {
-		y = 255
-	}
-	return [3]byte{byte(y), color[1], color[2]}
 }
 
 func bitIsSet(bits []byte, bit int) bool {
@@ -2496,20 +2286,6 @@ func clampColor(v float64) int {
 		return 255
 	}
 	return int(v + 0.5)
-}
-
-func rgbToYCbCr(r, g, b byte) [3]byte {
-	R := float64(r)
-	G := float64(g)
-	B := float64(b)
-	y := 0.299*R + 0.587*G + 0.114*B
-	cb := 128 - 0.168736*R - 0.331264*G + 0.5*B
-	cr := 128 + 0.5*R - 0.418688*G - 0.081312*B
-	return [3]byte{
-		byte(clampColor(y)),
-		byte(clampColor(cb)),
-		byte(clampColor(cr)),
-	}
 }
 
 func max(a, b int) int {

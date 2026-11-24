@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"hash/fnv"
+	"image/color"
 	"math"
 	"math/rand/v2"
 	"net"
@@ -471,4 +472,82 @@ func StaticPixels(w, h int, now time.Time) *codec.Pixels {
 		}
 	}
 	return &codec.Pixels{W: w, H: h, Y: y, Cb: chroma[:w*h], Cr: chroma[w*h:]}
+}
+
+// testCardPixelFrame is the TV test card for the window, drawn in pixels
+// (SMPTE colour bars, testCardPixels), not in the cells' glyphs: a frame
+// of cols x rows cells holding only the picture, at twice the cells'
+// pixels across and down (its edges stay sharp drawn larger). Built once
+// for the pane's size, again only when the size changes.
+func testCardPixelFrame(cols, rows int) *codec.TextFrame {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	testCard.Lock()
+	defer testCard.Unlock()
+	if f := testCard.frame; f != nil && f.Cols == cols && f.Rows == rows {
+		return f
+	}
+	n := cols * rows
+	cells := make([]byte, 7*n)
+	testCard.frame = &codec.TextFrame{Cols: cols, Rows: rows, Width: cols * 4, Height: rows * 8,
+		Glyphs: cells[:n:n], FgYCbCr: cells[n : 4*n : 4*n], BgYCbCr: cells[4*n:],
+		Pixels: testCardPixels(cols*8, rows*16, 1, 1)}
+	return testCard.frame
+}
+
+// testCard is the window's test card for the size it was built for.
+var testCard struct {
+	sync.Mutex
+	frame *codec.TextFrame
+}
+
+// testCardPixels is the TV test card at w x h pixels, the window's and
+// (made cells) the terminal's: seven bars of full colour (white, yellow,
+// cyan, green, magenta, red, blue), each as wide, over four fifths of the
+// height; a strip under them (blue, black, magenta, black, cyan, black,
+// white); a strip of grey, a ramp from white to black over its left half
+// and ten steps from white to black over its right; at the bottom dark
+// grey, black, grey, then black. Its edges fall on multiples of sx across
+// and sy down (the terminal's cells, 4 x 8: a cell of two colours became a
+// glyph's jagged edge; the window's 1), the ramp a step each sx.
+func testCardPixels(w, h, sx, sy int) *codec.Pixels {
+	type rgb [3]uint8
+	p := &codec.Pixels{W: w, H: h, Y: make([]byte, w*h), Cb: make([]byte, w*h), Cr: make([]byte, w*h)}
+	snap := func(v, s int) int { return (v + s/2) / s * s }
+	set := func(x0, y0, x1, y1 int, c rgb) {
+		x0, x1, y0, y1 = snap(x0, sx), snap(x1, sx), snap(y0, sy), snap(y1, sy)
+		x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+		yy, u, v := color.RGBToYCbCr(c[0], c[1], c[2])
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				i := y*w + x
+				p.Y[i], p.Cb[i], p.Cr[i] = yy, u, v
+			}
+		}
+	}
+	bars := func(y0, y1 int, colours []rgb) {
+		for k, c := range colours {
+			set(k*w/len(colours), y0, (k+1)*w/len(colours), y1, c) // each as wide
+		}
+	}
+	// The bands' edges, in steps of sy, each band at least a step high.
+	n := h / sy
+	b1 := max(1, min(n-3, (n*795+500)/1000))
+	b2 := max(b1+1, min(n-2, (n*852+500)/1000))
+	b3 := max(b2+1, min(n-1, (n*911+500)/1000))
+	y1, y2, y3 := b1*sy, b2*sy, b3*sy
+	bars(0, y1, []rgb{{255, 255, 255}, {255, 230, 0}, {0, 255, 255}, {40, 255, 0}, {255, 60, 255}, {255, 40, 40}, {0, 0, 230}})
+	bars(y1, y2, []rgb{{0, 0, 230}, {0, 0, 0}, {255, 60, 255}, {0, 0, 0}, {90, 255, 255}, {0, 0, 0}, {255, 255, 255}})
+	half := snap(w/2, sx)
+	for x := 0; x < half; x += sx {
+		v := uint8(255 - 255*x/max(1, half-sx)) // the ramp, a step each sx
+		set(x, y2, x+sx, y3, rgb{v, v, v})
+	}
+	for k := range 10 {
+		v := uint8(255 - 255*k/9) // the steps
+		set(half+k*(w-half)/10, y2, half+(k+1)*(w-half)/10, y3, rgb{v, v, v})
+	}
+	bars(y3, h, []rgb{{60, 60, 60}, {0, 0, 0}, {85, 85, 85}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}})
+	return p
 }
