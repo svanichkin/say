@@ -1432,7 +1432,9 @@ func writeVideoCaption(out *strings.Builder, row, left, width int, caption strin
 	}
 	out.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, left) + colors)
 	out.WriteString(strings.Repeat(" ", leftPad))
-	out.WriteString(caption)
+	// What is switched off (AMUTE, VMUTE) inverted: the caption's colour
+	// its background, the background its letters.
+	out.WriteString(strings.NewReplacer("AMUTE", "\x1b[7mAMUTE\x1b[27m", "VMUTE", "\x1b[7mVMUTE\x1b[27m").Replace(caption))
 	out.WriteString(strings.Repeat(" ", pad-leftPad))
 	out.WriteString("\x1b[0m")
 	return [2]int{left + leftPad, left + leftPad + displayWidth(caption)}
