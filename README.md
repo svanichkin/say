@@ -110,8 +110,8 @@ external Yggdrasil daemon or web stack.
 - **Chat and file transfer** during a call (see below).
 - One call at a time: other callers get a "busy" answer; a peer that
   reconnects after a drop replaces its stale call.
-- Friend list bootstrap via the same `config.json` that holds the Yggdrasil
-  settings.
+- **Home screen and contacts**: waiting for a call, Say shows its contacts,
+  a folder of vCard files (see below), and calls them from there.
 
 ## Audio diagnostics
 
@@ -331,41 +331,132 @@ typically `$XDG_CONFIG_HOME/say/config.json` (or `~/.config/say/config.json` if
 `~/Library/Application Support/say/config.json`. You can point to a different
 path with `-config /path/to/config.json`.
 
-The configuration file is a regular Yggdrasil node config plus an optional
-`contacts_dir` key understood by Say:
+The configuration file is a regular Yggdrasil node config. Pass the same
+config file to Say – the embedded node uses it to bootstrap.
 
-```json
-{
-  "peers": [
-    "tls://example.yggnode.net:443",
-    "quic://203.0.113.10:8443"
-  ],
-  "contacts_dir": "/Users/me/Contacts"
-}
+## Home screen and contacts
+
+Waiting for a call, Say shows its home screen: a menu in columns, as SSHS
+draws its list. The column being chosen in stands in the middle, its chosen
+line always on the middle row: the arrows move the list under it. → or Enter
+opens the chosen item (its column comes to the middle, the one before stands
+to its left, only its chosen line bright), ← or Esc goes back, `<` goes back
+one column and `x` to the first one (in the first one, `x` quits Say). The
+chosen line is in the colour of its address, the one its frame has in a call.
+A click on a line does what Enter does; letters typed jump to a name; an
+address pasted is called at once.
+
+- The contacts are where you chose in the settings, else by default: on
+  macOS the **OS address book** (Contacts; the system asks for access the
+  first time the contacts are opened; refused, the folder below), elsewhere
+  the folder where the system keeps contacts or they usually are, made when
+  a card is first written: Windows `%USERPROFILE%\Contacts` (the Contacts
+  folder every user has), Linux and the BSDs `~/.local/share/contacts`
+  (`$XDG_DATA_HOME/contacts`; vdirsyncer and khard keep a folder of cards
+  there), Plan 9 `$home/lib/contacts`, macOS without access
+  `~/Library/Application Support/say/contacts`. The default is not written
+  to the settings: only a choice is. In the settings: the **OS address
+  book** (macOS only; entering it chooses it and opens **my card**) or a
+  **contacts folder**, the one in use ticked.
+- **Contacts folder** → **choose a folder** (folder by folder from the top,
+  `<` going back up; entering a folder chooses it, ticked) while there is none;
+  once there is, its path (entering it opens the folders from the top down
+  to the ones it is among, it ticked in the middle, so `<` goes up a level at
+  a time) and **my card**.
+- **Your card** is, in a folder, the one whose file is marked `me`: an
+  extended attribute any program can read and set (`user.me` on Linux, an
+  alternate data stream `file.vcf:me` on Windows), its value the card's UID
+  (a file may hold several cards); renaming the file keeps it, and Say keeps
+  it when it rewrites the file. In the address book it is the card Contacts
+  has as yours, unless you choose another in Say. **My card** lists the
+  cards, yours ticked: choosing another moves the mark (or the choice) to
+  it; in a folder `+` makes a card (first name, last name, middle name,
+  nickname). This Say's address is put on your card, labelled with the
+  device's kind, and taken off any other. A folder with no file marked `me`
+  (another program rewrote yours and lost the mark) gets it back on the one
+  card with this Say's address.
+- With a card of yours chosen, **this device's label** stands under it:
+  one field with the label this device has on your card, typed in at once;
+  erased, it is the device's kind again (**laptop** when it has a battery of
+  its own, else **computer**).
+- **Show contacts as** (under the folder and the address book): the
+  nickname, first and last name, last and first name, or initials and last
+  name (S.S.Vanichkin), each shown as your own name looks in it, the one
+  chosen ticked; a card without what the choice takes shows its name.
+- Then the first column is **contacts**, **call an address** (a field: type
+  an address, Enter calls it; not an address, it blinks), **my address**
+  (this Say's, `[address]:port` with the port only when it is not 7777, and
+  **copy**), **settings** and `x`. The contacts
+  are your own card (first, in your colour; "me" until there is one), the people, and `+` to add one.
+  A person opens to **call <label>** for each of their devices (your own
+  card: your other devices, not this one) and **edit contact**: the names,
+  the devices, each opening to its label and address (`[address]:port`, the
+  port only when it is not 7777; this device's address is its own, not
+  edited; an address erased removes the device), and `+`, which adds a
+  device and opens it, written once its address is in. A field is written
+  as it is left.
+- `+` in the contacts makes a person the same way (names, devices, `+`),
+  but nothing is written while its form is open: leaving it makes the card,
+  with a name and an address (the first try to leave without them makes
+  the empty ones blink).
+- **Cards in a call.** Right after the handshake each side sends its own
+  card (protocol 15, frame 0x12): the names, the nickname, the devices with
+  their labels and addresses, nothing else of the card; the chat is left to
+  what people write. A
+  card from an address already in the book is that person's for sure (a mesh
+  address comes from its key): what it adds, a second device, a nickname, is
+  written to their card, nothing written over. A card from an address the
+  book does not have waits, Say's own (`config-contacts-pending/`), under
+  **unconfirmed N** in the contacts: **confirm** (a new contact), **add to
+  <name>** (a contact of the same name), or **delete**. Peers of protocol 14
+  are still talked to: they ignore the card.
+- While a call is dialled, its screen has **x** under a line (on the chosen
+  block, as a menu's): Enter, a click on it or Esc cancels the dial and
+  Say is back on the home screen.
+- A call made from the home screen tries three times, then the call goes on
+  until either side hangs up (the self view's menu has **x**, in red as the active menu's x) and Say
+  is back on the home screen.
+- **Who is online.** Every 30 seconds, while no call is on, Say asks each
+  device in the contacts (but this one) whether Say runs there: PING in place
+  of the handshake (protocol 16), answered PONG, no call begun and the line
+  not taken; a device that has not answered in 5 seconds is not there. A
+  person with a device that answered has a green ● before their name, and
+  so has that device's **call on** line. A Say of protocol 14 or 15 answers
+  PING as a peer too old: it counts as online all the same, and is still
+  called. A mesh peer cannot say it came up, so asking is the only way.
+
+The folder holds vCard files (`.vcf`, versions 2.1, 3.0 and 4.0 read, 3.0
+written, as macOS Contacts writes them), so it can be kept in step with a
+CardDAV server by vdirsyncer, or synced by iCloud Drive, Dropbox or
+Syncthing. A file may hold several cards. A person's devices are their Say
+addresses, each a link with a label (Contacts shows a link under its label;
+an instant messaging address it shows under the service's name, so Say's
+of before, `IMPP;X-SERVICE-TYPE=Say`, are read and rewritten as links):
+
+```
+BEGIN:VCARD
+VERSION:3.0
+FN:Alice Ivanova
+N:Ivanova;Alice;;;
+item1.URL:say:[200:abcd::1]
+item1.X-ABLabel:home
+item2.URL:say:[201:1::2]:7001
+item2.X-ABLabel:phone
+UID:6F1E…
+END:VCARD
 ```
 
-Pass the same config file to Say – the embedded node uses it to bootstrap. When
-`contacts_dir` is supplied (or overridden via `-contacts`), Say recursively
-scans that directory. Each friend is represented as a folder that contains a
-`say` subdirectory with text files holding IPv6 addresses:
-
-```
-~/Contacts/
-  Alice G/
-      say
-  Bob D/
-    say/
-      phone
-      console
-```
-
-- If the `say` directory holds a single file, its address is added as `Alice G`.
-- If there are multiple files, each becomes a separate contact such as
-  `Bob D/phone` or `Bob D/console`, where the suffix comes from the filename.
-
-When selecting a friend inside the CLI, use those exact labels (`"Bob D/phone"`).
-If you start `say` with `-contacts /path/to/contacts`, that path is persisted
-into the active config so future runs can omit the flag.
+The port is written only when it is not 7777. A card Say changes keeps every
+line it does not know (photos, phones, notes). Say reads the cards once and
+reads them again only after its own writes and when the system tells of a
+change by another program (FSEvents or kqueue on macOS, inotify on Linux,
+ReadDirectoryChangesW on Windows, Contacts' own notice for the address book;
+on Plan 9, which tells nothing, only after its own writes). Say's own
+settings, the source, the folder, how names show, who was called last, and
+your card in the address book when you chose another than Contacts' own,
+are kept in `config-contacts.json` beside `config.json` (the node rewrites
+`config.json` itself). The old contacts
+format (a folder per friend with a `say` file) is no longer read.
 
 The utility automatically updates the list of peers each time it starts.
 
@@ -402,8 +493,8 @@ the plain transport explicitly:
 
 Select alternative configs explicitly via `-config work` (which maps to
 `$XDG_CONFIG_HOME/say/work.json`). Positional arguments are interpreted as
-either a dial target (`"200:abcd:..."`) or a friend name from contacts
-(`"Alice G"`, `"Bob D/phone"`). To run the server with another profile, always
+either a dial target (`"200:abcd:..."`) or a name from the contacts
+(`"Alice Ivanova"`: the device last called, else the first). To run the server with another profile, always
 pass `-config`; bare tokens are no longer treated as profile names.
 
 Audio and video are always enabled when hardware is present; no extra flags are
@@ -446,7 +537,7 @@ codec on both sides). Relevant CLI switches:
   - All three take well under 1 % of one CPU core. The peer decodes whatever you send, so each side may choose its own codec; only with Say v1.0.0 and older (no codec in the handshake) both sides must use the same one.
 - `-config` – config profile or path; `-config work` maps to `$XDG_CONFIG_HOME/say/work.json`.
 - `-log` – write `<config-name>.log` next to the running executable. `-log debug` also enables verbose debug logging.
-- `-contacts` – override the contacts directory defined in the config.
+- `-contacts` – the contacts folder (kept for next time, as the home screen's settings set it).
 - `-v` – verbose logging.
 - `-version` – print version and exit.
 - `-donate` – print donation information and exit.

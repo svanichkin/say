@@ -28,7 +28,11 @@ func styleOf(seed uint64, chat bool) frameStyle  { return hud.StyleOf(seed, chat
 
 // frameOf lays out pane p's frame in device pixels.
 func (g *game) frameOf(p Pane, caption string, st frameStyle) paneFrame {
-	return hud.FrameOf(g.grid(), hud.Rect{Row: p.Row, Col: p.Col, Cols: p.Cols, Rows: p.Rows}, p.Remote, caption, st)
+	r := hud.Rect{Row: p.Row, Col: p.Col, Cols: p.Cols, Rows: p.Rows}
+	if p.Content { // half a row of room round what is in it
+		return hud.ContentFrameOf(g.grid(), r, p.Remote, caption, st)
+	}
+	return hud.FrameOf(g.grid(), r, p.Remote, caption, st)
 }
 
 // grid is the window's cell grid.
@@ -52,6 +56,8 @@ func (g *game) paneSeed(p Pane) uint64 {
 		self, peer, chat = g.in.Seeds()
 	}
 	switch {
+	case p.Menu:
+		return p.Seed
 	case p.Chat:
 		return chat
 	case p.Remote:
@@ -61,6 +67,9 @@ func (g *game) paneSeed(p Pane) uint64 {
 }
 
 func (g *game) paneColour(p Pane) color.RGBA {
+	if p.Menu {
+		return p.Colour
+	}
 	if p.Chat {
 		return g.r.chatAccent
 	}
@@ -75,7 +84,9 @@ type frameLayoutKey struct {
 	cw, ch, ox, oy       int
 	caption              string
 	seed                 uint64
-	remote, chat         bool
+	remote, chat, menu   bool
+	content              bool
+	divider              int
 }
 
 type cachedPaneFrame struct {
@@ -85,6 +96,17 @@ type cachedPaneFrame struct {
 
 func (g *game) paneFrame(p Pane) paneFrame {
 	key := g.paneFrameKey(p)
+	if p.Menu { // the home screen's columns, several: by their layout
+		if fr, ok := g.r.menuFrames[key]; ok {
+			return fr
+		}
+		if g.r.menuFrames == nil || len(g.r.menuFrames) > 64 {
+			g.r.menuFrames = map[frameLayoutKey]paneFrame{}
+		}
+		fr := g.frameOf(p, "", styleOf(key.seed, false))
+		g.r.menuFrames[key] = fr
+		return fr
+	}
 	index := 0
 	if p.Remote {
 		index = 1
@@ -107,7 +129,7 @@ func (g *game) drawPanes(dst *ebiten.Image, panes []Pane) {
 		g.r.paneImgs = map[[2]int]*paneImage{}
 	}
 	for _, p := range panes {
-		if p.Chat {
+		if p.Chat || p.Menu {
 			continue
 		}
 		f, iw, ih, pixels := g.frameImage(p, g.paneColour(p))
@@ -143,6 +165,25 @@ func (g *game) drawPanes(dst *ebiten.Image, panes []Pane) {
 				FillRule: ebiten.FillRuleNonZero, Address: ebiten.AddressRepeat})
 		}
 	}
+}
+
+// clipPanes cuts what is inside each frame to its inner line, as the video
+// is: what of the cells is past it (a menu's chosen line's block, text at a
+// cut corner) is the background's.
+func (g *game) clipPanes(dst *ebiten.Image, panes []Pane) {
+	var bg shapeBatch
+	for _, p := range panes {
+		in := g.paneFrame(p).Inner // chamfered: two points a corner, from the top left's lower one
+		if len(in) != 8 {
+			continue
+		}
+		x0, y0, x1, y1 := in[0][0], in[1][1], in[3][0], in[5][1]
+		bg.add([]pt{{x0, y0}, in[1], in[0]}, 1)
+		bg.add([]pt{{x1, y0}, in[3], in[2]}, 1)
+		bg.add([]pt{{x1, y1}, in[5], in[4]}, 1)
+		bg.add([]pt{{x0, y1}, in[7], in[6]}, 1)
+	}
+	bg.draw(dst, defaultBg, g.r.white)
 }
 
 // scanImage is a column of the scan lines' pattern: its first rows dark.
@@ -211,6 +252,12 @@ func (g *game) frameShapes(p Pane) {
 	inner, outer, trace := hud.Widths(u)
 	dim.loop(fr.Inner, inner, 1)
 	dimGlow.loop(fr.Inner, inner*2, glowScale)
+	if p.Divider > 0 { // a menu's line above + and < and x (hanging up), as the inner line
+		if a, b, ok := hud.Divider(g.grid(), hud.Rect{Row: p.Row, Col: p.Col, Cols: p.Cols, Rows: p.Rows}, p.Divider-1, fr.Inner); ok {
+			dim.line(a, b, inner, 1)
+			dimGlow.line(a, b, inner*2, glowScale)
+		}
+	}
 	bright.loop(fr.Outer, outer, 1)
 	glow.loop(fr.Outer, outer*2, glowScale)
 	for _, path := range fr.Traces {
@@ -372,7 +419,7 @@ func (b *shapeBatch) draw(img *ebiten.Image, c color.RGBA, white *ebiten.Image) 
 
 // paneFrameKey is what a pane's frame geometry follows from.
 func (g *game) paneFrameKey(p Pane) frameLayoutKey {
-	return frameLayoutKey{p.Row, p.Col, p.Cols, p.Rows, g.cw, g.ch, g.ox, g.oy, p.Caption, g.paneSeed(p), p.Remote, p.Chat}
+	return frameLayoutKey{p.Row, p.Col, p.Cols, p.Rows, g.cw, g.ch, g.ox, g.oy, p.Caption, g.paneSeed(p), p.Remote, p.Chat, p.Menu, p.Content, p.Divider}
 }
 
 // drawCaptions writes the captions on their plates: with glow, in their

@@ -72,10 +72,18 @@ func StartSignalClientTCP(localName string, peerAddr string, port int, termSync 
 	// Wrap the TCP connection in a framedConn for safe framed writes.
 	fc := &framedConn{Conn: conn}
 
+	// One call at a time: a call that came in meanwhile keeps the line.
+	release, ok := calls.acquire(strings.Trim(peerAddr, "[]"), fc)
+	if !ok {
+		_ = hangup(fc)
+		return nil, nil, ErrInCall
+	}
+
 	// Start client-side session handler in its own goroutine.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer release()
 		clientHandleIncoming(fc, br, peerAddr, port, peer, termSync, mediaFactory)
 	}()
 
@@ -105,6 +113,7 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
 	notePeer(peer)
+	sendCard(conn)
 	askPeerLog(conn) // DEBUG-TEMP
 
 	tcpKA, stopKeepalive := startTCPKeepalive(sessionCtx, conn, keepaliveInterval, keepaliveTimeout, true, pacer.active)
@@ -123,13 +132,9 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 		if err != nil {
 			log.Printf("[media] invalid remote address %q: %v", host, err)
 		} else {
-			if sess, err := mediaFactory(strings.Trim(host, "[]"), raddr, peer); err != nil {
-				log.Printf("[media] failed to start: %v", err)
-			} else if sess != nil {
-				defer sess.Stop()
-				defer hangupWhenMediaEnds(sess, conn)()
-				log.Printf("[media] started (outgoing) → %s", raddr.String())
-			}
+			defer startMediaAside(conn, "outgoing → "+raddr.String(), func() (MediaSession, error) {
+				return mediaFactory(strings.Trim(host, "[]"), raddr, peer)
+			})()
 		}
 	}
 
@@ -140,5 +145,6 @@ func clientHandleIncoming(conn net.Conn, br *bufio.Reader, host string, port int
 		pacer:     pacer,
 		incoming:  &incoming,
 		peerLabel: prettyAddr(host, port),
+		peerHost:  strings.Trim(host, "[]"),
 	})
 }

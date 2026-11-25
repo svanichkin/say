@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"github.com/svanichkin/say/keys"
 	"github.com/svanichkin/say/lang"
 	"net/url"
 	"os"
@@ -130,6 +131,20 @@ func inputCursorVisible(now time.Time) bool {
 }
 
 func chatKey(r rune) {
+	if HomeShown() {
+		homeKey(r)
+		return
+	}
+	if (r == keys.Esc || (r == '\r' || r == '\n') && dialCancel.get() != nil) && !ChatConnected() {
+		cancelDial() // Esc, or Enter on its x, while a call is dialled: back home
+		return
+	}
+	if ChatConnected() && callKey(r) {
+		return // the windows and their menus (callkeys.go)
+	}
+	if keys.Special(r) {
+		return // not text
+	}
 	chatState.Lock()
 	chatState.typedAt = time.Now()
 	if chatState.onText == nil {
@@ -181,6 +196,10 @@ func chatKey(r rune) {
 func chatPaste(s string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
+		return
+	}
+	if HomeShown() {
+		homePaste(s)
 		return
 	}
 	chatState.RLock()

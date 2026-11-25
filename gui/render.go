@@ -30,14 +30,16 @@ import (
 // glints move); otherwise only when the screen changed.
 
 type renderer struct {
-	frames   [3]cachedPaneFrame // geometry changes only with layout, seed or caption
-	bgImg    *ebiten.Image      // a pixel per cell: the backgrounds
-	bgPix    []byte
-	shapes   map[uint32]*ebiten.Image
-	paneImgs map[[2]int]*paneImage
-	scan     *ebiten.Image // the effect's scan lines (scanImage)
-	scanOf   effectScan
-	white    *ebiten.Image
+	frames [3]cachedPaneFrame // geometry changes only with layout, seed or caption
+	// menuFrames are the home screen's columns' frames, by their layout.
+	menuFrames map[frameLayoutKey]paneFrame
+	bgImg      *ebiten.Image // a pixel per cell: the backgrounds
+	bgPix      []byte
+	shapes     map[uint32]*ebiten.Image
+	paneImgs   map[[2]int]*paneImage
+	scan       *ebiten.Image // the effect's scan lines (scanImage)
+	scanOf     effectScan
+	white      *ebiten.Image
 
 	static     *ebiten.Image // the cells and the text, redrawn when they change
 	staticGlow *ebiten.Image // their glow
@@ -112,6 +114,7 @@ func (g *game) Draw(dst *ebiten.Image) {
 		dst.DrawImage(g.r.static, nil)
 		op := &ebiten.DrawImageOptions{}
 		g.r.glow.DrawImage(g.r.staticGlow, op)
+		g.clipPanes(dst, panes)
 		g.drawFrames(dst, panes)
 		g.drawBricks(dst, panes)
 		g.drawBrackets(dst)
@@ -384,9 +387,12 @@ func randDuration(lo, hi time.Duration) time.Duration {
 	return lo + time.Duration(rand.Int64N(int64(hi-lo)+1))
 }
 
-// paneIndex tells the panes apart: ours, the peer's, the chat's.
+// paneIndex tells the panes apart: ours, the peer's, the chat's, the
+// home screen's columns.
 func paneIndex(p Pane) int {
 	switch {
+	case p.Menu: // the home screen's columns, by where they are
+		return 3 + p.Col
 	case p.Chat:
 		return 2
 	case p.Remote:

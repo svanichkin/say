@@ -74,6 +74,21 @@ func buildCells() {
 		}
 		m[r] = p
 	}
+	// Double lines: two light ones a pixel apart either side of a light
+	// line's place, a light line meeting them (╟ ╢); a heavy line dashed,
+	// for a plate with hazard stripes (╍ ╏).
+	m['═'] = row(2, 0xf) | row(4, 0xf)
+	m['║'] = rows(0, 8, 0xa)
+	m['╟'] = m['║'] | row(3, 0x1)
+	m['╢'] = m['║']
+	m['╍'] = row(3, 0xc) | row(4, 0xc)
+	m['╏'] = rows(0, 4, 0x6)
+	// Rounded corners as the window's frames have them: cut, a diagonal
+	// from the one line to the other (square ones are ┌ ┐ └ ┘).
+	m['╭'] = row(3, 0x1) | row(4, 0x2) | rows(5, 8, 0x4)
+	m['╮'] = row(3, 0x8) | rows(4, 8, 0x4)
+	m['╰'] = rows(0, 2, 0x4) | row(2, 0x2) | row(3, 0x1)
+	m['╯'] = rows(0, 3, 0x4) | row(3, 0x8)
 	// The codec's glyphs last: their shapes win.
 	for _, cp := range codec.GlyphCodepoints() {
 		if p, ok := codec.GlyphPattern(cp); ok {
@@ -131,7 +146,7 @@ var boxArms = map[rune]string{
 	'┣': "hh.h", '┫': "hhh.", '┳': ".hhh", '┻': "h.hh", '╋': "hhhh",
 	'╴': "..l.", '╵': "l...", '╶': "...l", '╷': ".l..",
 	'╸': "..h.", '╹': "h...", '╺': "...h", '╻': ".h..",
-	'╭': ".l.l", '╮': ".ll.", '╯': "l.l.", '╰': "l..l",
+	'┠': "hh.l", '┨': "hhl.",
 }
 
 // cellPattern returns the cell shape of r if r is drawn on the cell grid.

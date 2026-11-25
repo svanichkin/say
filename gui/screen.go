@@ -57,6 +57,13 @@ type Pane struct {
 	Remote               bool
 	Caption              string // the frame rate, the traffic, the ping
 	Chat                 bool   // not video: the chat, framed in its own style
+	// Menu: not video, a column of the home screen framed as the panes are,
+	// from its own seed, in its colour.
+	Menu    bool
+	Content bool // its rect is content's (a menu, the status, the chat): the frame half a row round it
+	Seed    uint64
+	Colour  color.RGBA
+	Divider int // a line across it along the top of its row Divider-1 (0: none)
 }
 
 // Screen is the model of the window's contents, written as a terminal.
@@ -313,8 +320,9 @@ func (s *Screen) csi(final byte) (acks int) {
 }
 
 // oscDone handles an OSC: 5577 marks a video pane (1-based top, left, then
-// cols, rows, frame id and L or R, ours or the peer's); the others (titles,
-// clipboard) draw nothing.
+// cols, rows, frame id and L or R, ours or the peer's, and for a menu in it
+// the row a line goes across the top of); the others (titles, clipboard)
+// draw nothing.
 func (s *Screen) oscDone() {
 	if strings.HasPrefix(string(s.osc), "5578;") {
 		s.caption()
@@ -328,11 +336,19 @@ func (s *Screen) oscDone() {
 		s.bracketMark()
 		return
 	}
-	f := strings.Split(string(s.osc), ";")
-	if len(f) < 6 || len(f) > 7 || f[0] != "5577" {
+	if strings.HasPrefix(string(s.osc), "5581;") {
+		s.menuMark()
 		return
 	}
-	remote := len(f) == 7 && f[6] == "R"
+	f := strings.Split(string(s.osc), ";")
+	if len(f) < 6 || len(f) > 8 || f[0] != "5577" {
+		return
+	}
+	remote := len(f) >= 7 && f[6] == "R"
+	divider := 0 // a menu in it: the line across the top of that row
+	if len(f) == 8 {
+		divider, _ = strconv.Atoi(f[7])
+	}
 	f = f[:6]
 	var v [5]int
 	for i := range v {
@@ -342,7 +358,7 @@ func (s *Screen) oscDone() {
 		}
 		v[i] = int(n)
 	}
-	p := Pane{Row: v[0] - 1, Col: v[1] - 1, Cols: v[2], Rows: v[3], Frame: uint64(v[4]), Remote: remote}
+	p := Pane{Row: v[0] - 1, Col: v[1] - 1, Cols: v[2], Rows: v[3], Frame: uint64(v[4]), Remote: remote, Divider: divider}
 	p.Caption = s.captions[[2]int{p.Row, p.Col}]
 	// A pane replaces the panes it overlaps.
 	kept := s.panes[:0]
@@ -362,10 +378,52 @@ func (s *Screen) oscDone() {
 }
 
 // chatMark handles OSC 5579: the chat's rect (1-based top, left, then
-// cols, rows), to be framed. Its cells stay as they are.
+// cols, rows), to be framed; c after them: the rect is the content's, the
+// frame half a row round it; then the row (1-based) a line goes across the
+// top of (the status's x below it). Its cells stay as they are.
 func (s *Screen) chatMark() {
 	f := strings.Split(string(s.osc), ";")
-	if len(f) != 5 {
+	if len(f) < 5 || len(f) > 7 {
+		return
+	}
+	divider := 0
+	if len(f) == 7 {
+		divider, _ = strconv.Atoi(f[6])
+	}
+	var v [4]int
+	for i := range v {
+		n, err := strconv.Atoi(f[i+1])
+		if err != nil {
+			return
+		}
+		v[i] = n
+	}
+	p := Pane{Row: v[0] - 1, Col: v[1] - 1, Cols: v[2], Rows: v[3], Chat: true, Content: len(f) >= 6 && f[5] == "c", Divider: divider}
+	for i, q := range s.panes {
+		if q.Chat {
+			if q == p {
+				return
+			}
+			s.panes[i] = p
+			s.version++
+			return
+		}
+	}
+	s.panes = append(s.panes, p)
+	s.version++
+}
+
+// menuMark handles OSC 5581: a column of the home screen to frame (1-based
+// top, left, then cols, rows, the frame's seed, its colour, and the row a
+// line goes across the top of: 1-based in the rect, 0 none). Its cells
+// stay as they are.
+func (s *Screen) menuMark() {
+	f := strings.Split(string(s.osc), ";")
+	if len(f) != 10 {
+		return
+	}
+	divider, err := strconv.Atoi(f[9])
+	if err != nil {
 		return
 	}
 	var v [4]int
@@ -376,14 +434,21 @@ func (s *Screen) chatMark() {
 		}
 		v[i] = n
 	}
-	p := Pane{Row: v[0] - 1, Col: v[1] - 1, Cols: v[2], Rows: v[3], Chat: true}
-	for i, q := range s.panes {
-		if q.Chat {
-			if q == p {
-				return
-			}
-			s.panes[i] = p
-			s.version++
+	seed, err := strconv.ParseUint(f[5], 10, 64)
+	if err != nil {
+		return
+	}
+	var c [3]uint8
+	for i := range c {
+		n, err := strconv.ParseUint(f[6+i], 10, 8)
+		if err != nil {
+			return
+		}
+		c[i] = uint8(n)
+	}
+	p := Pane{Row: v[0] - 1, Col: v[1] - 1, Cols: v[2], Rows: v[3], Menu: true, Content: true, Seed: seed, Colour: color.RGBA{c[0], c[1], c[2], 255}, Divider: divider}
+	for _, q := range s.panes {
+		if q == p {
 			return
 		}
 	}

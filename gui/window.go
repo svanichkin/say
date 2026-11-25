@@ -4,6 +4,7 @@ package gui
 
 import (
 	"errors"
+	"github.com/svanichkin/say/keys"
 	"log"
 	"math"
 	"runtime"
@@ -204,7 +205,21 @@ func (g *game) keys() {
 	if repeated(ebiten.KeyBackspace) {
 		g.in.Key(0x7f)
 	}
+	for _, k := range arrowKeys {
+		if repeated(k.key) {
+			g.in.Key(k.r)
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		g.in.Key(keys.Esc)
+	}
 }
+
+// arrowKeys are the arrows as the interface's keys.
+var arrowKeys = []struct {
+	key ebiten.Key
+	r   rune
+}{{ebiten.KeyArrowUp, keys.Up}, {ebiten.KeyArrowDown, keys.Down}, {ebiten.KeyArrowLeft, keys.Left}, {ebiten.KeyArrowRight, keys.Right}}
 
 // repeated reports a key press and its auto-repeat while held.
 func repeated(k ebiten.Key) bool {

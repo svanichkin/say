@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/svanichkin/say/keys"
 	"os"
 	"strings"
 	"sync"
@@ -58,6 +59,9 @@ func startMouseTracker(ctx context.Context) {
 	})
 }
 
+// arrowKeys are the arrows' final bytes (ESC [ A, ESC O A).
+var arrowKeys = map[byte]rune{'A': keys.Up, 'B': keys.Down, 'C': keys.Right, 'D': keys.Left}
+
 func mouseEventLoop() {
 	// The loop ends only when the terminal can no longer be read: it is
 	// gone. Where closing it sends no hangup (Plan 9: vt exits), Say would
@@ -91,13 +95,32 @@ func mouseEventLoop() {
 			}
 			continue
 		}
+		if reader.Buffered() == 0 {
+			chatKey(keys.Esc) // Esc alone: a sequence comes in one read
+			continue
+		}
 		a, err := reader.ReadByte()
-		if err != nil || a != '[' {
+		if err != nil {
+			continue
+		}
+		if a == 'O' { // SS3: the arrows in application cursor mode
+			if c, e := reader.ReadByte(); e == nil {
+				if k, ok := arrowKeys[c]; ok {
+					chatKey(k)
+				}
+			}
+			continue
+		}
+		if a != '[' {
 			continue
 		}
 		kind, err := reader.ReadByte()
 		if err != nil {
 			return
+		}
+		if k, ok := arrowKeys[kind]; ok {
+			chatKey(k)
+			continue
 		}
 		switch kind {
 		case '0': // ESC[0n, the answer to the status query after a frame
@@ -201,6 +224,11 @@ func handleMouseEvent(evt mouseEvent) {
 		return
 	}
 
+	if HomeShown() {
+		homeClick(evt.col, evt.row)
+		return
+	}
+
 	if menuOpen() {
 		// Any click closes the menu; one on an item does it first.
 		selfMenuClick(evt.col, evt.row)
@@ -208,6 +236,10 @@ func handleMouseEvent(evt mouseEvent) {
 		return
 	}
 
+	if !ChatConnected() && !HomeShown() && statusCancelHit(evt.col, evt.row) {
+		cancelDial() // the dial's x
+		return
+	}
 	if statusClickHandlePoint(evt.col, evt.row) {
 		return
 	}

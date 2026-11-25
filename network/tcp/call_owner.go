@@ -71,6 +71,22 @@ func (o *callOwner) acquire(host string, conn net.Conn) (release func(), ok bool
 	}
 }
 
+// calls admits one call at a time, incoming or outgoing.
+var calls = &callOwner{}
+
+// HangUp ends the call there is, telling the peer.
+func HangUp() { calls.hangupActive() }
+
+// InCall reports whether a call is on (from its handshake to its end).
+func InCall() bool {
+	calls.mu.Lock()
+	defer calls.mu.Unlock()
+	return calls.active != nil
+}
+
+// ErrInCall is returned by the client when a call came in meanwhile.
+var ErrInCall = errors.New("already in a call")
+
 // hangupActive ends the active call, if any, telling the peer.
 func (o *callOwner) hangupActive() {
 	o.mu.Lock()

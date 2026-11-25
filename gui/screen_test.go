@@ -62,3 +62,22 @@ func TestBracketMark(t *testing.T) {
 		t.Fatalf("brackets kept after a clear: %v", s.brackets)
 	}
 }
+
+// A home screen's column marked (OSC 5581) is a pane framed in its colour
+// from its seed, with no video; a full clear takes it away.
+func TestScreenMenuMark(t *testing.T) {
+	s := NewScreen(40, 12)
+	_, _ = s.Write([]byte("\x1b]5581;0;5;10;6;12345;215;215;215;4\x07"))
+	var got []Pane
+	s.View(func(_, _ int, _ []Cell, panes []Pane, _ uint64) { got = append(got, panes...) })
+	if len(got) != 1 || !got[0].Menu || got[0].Row != -1 || got[0].Col != 4 || got[0].Cols != 10 ||
+		got[0].Rows != 6 || got[0].Seed != 12345 || got[0].Colour.R != 215 || got[0].Divider != 4 {
+		t.Fatalf("panes %+v", got)
+	}
+	_, _ = s.Write([]byte("\x1b[2J"))
+	got = nil
+	s.View(func(_, _ int, _ []Cell, panes []Pane, _ uint64) { got = append(got, panes...) })
+	if len(got) != 0 {
+		t.Fatalf("after a clear: %+v", got)
+	}
+}

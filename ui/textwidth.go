@@ -115,3 +115,6 @@ func wrapWidth(s string, limit int) []string {
 	}
 	return lines
 }
+
+// TextWidth is how many cells s takes.
+func TextWidth(s string) int { return displayWidth(s) }

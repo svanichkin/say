@@ -5,24 +5,23 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/lang"
 	"github.com/svanichkin/say/logs"
 	"github.com/svanichkin/say/mediactrl"
 )
 
 // A click on the self view opens a menu in its place: the microphone and the
-// camera, each on (a green tick) or off (a red cross), and, where the system
-// has them, its own microphone settings (an arrow: it opens something else).
+// camera, each on (a green tick) or off (a red cross), and hanging up (x, as
+// every menu's x closes it). The marks are the home
+// screen's characters, a cell each, never emoji.
 // A click on the peer's view opens its menu: its sound and its video (not
 // shown: its pane loses the signal, the noise then the test card). A click on an item does it and closes the
 // menu; a click anywhere else only closes it. What is off shows under the
 // pane in place of its rate (AMUTE, VMUTE).
 
 const (
-	menuOn    = "✅"
-	menuOff   = "❌"
-	menuOpens = "➡️"
+	menuOn  = "✓"
+	menuOff = "x"
 )
 
 var selfMenu struct {
@@ -42,6 +41,7 @@ type menuItem struct {
 	icon, label string
 	iconColour  [3]int
 	do          func()
+	close       bool // x: hanging up, under the line as every menu's x
 }
 
 // menuOpen reports whether a menu is open (ours or the peer view's).
@@ -76,6 +76,26 @@ func setMenu(open, peer bool) {
 		selfMenu.items = nil
 	}
 	selfMenu.Unlock()
+	if open { // its first item chosen
+		callNav.Lock()
+		callNav.sel = 0
+		callNav.Unlock()
+	}
+}
+
+// menuDo does the open menu's item i (Enter), as a click on it: the menu
+// closes either way.
+func menuDo(i int) {
+	selfMenu.Lock()
+	var do func()
+	if i >= 0 && i < len(selfMenu.items) {
+		do = selfMenu.items[i].do
+	}
+	selfMenu.open, selfMenu.items = false, nil
+	selfMenu.Unlock()
+	if do != nil {
+		do()
+	}
 }
 
 // selfMenuClick handles a click while the menu is open: the item under it
@@ -111,7 +131,7 @@ func selfMenuItems() []menuItem {
 			} else {
 				logs.LogV("[ui] microphone off (menu)")
 			}
-		}},
+		}, false},
 		{camIcon, lang.T(lang.MenuCam), camColour, func() {
 			if mediactrl.ToggleVideo() {
 				logs.LogV("[ui] camera on (menu)")
@@ -119,15 +139,13 @@ func selfMenuItems() []menuItem {
 				logs.LogV("[ui] camera off (menu)")
 				ClearLocalFrame() // the self view loses the signal now
 			}
-		}},
+		}, false},
 	}
-	settings := map[device.MicSettingsKind]lang.Key{device.MicSettingsMode: lang.MicMode, device.MicSettingsPrivacy: lang.MicPrivacy}
-	if key, ok := settings[device.MicSettings()]; ok {
-		items = append(items, menuItem{menuOpens, lang.T(key), [3]int{255, 255, 255}, func() {
-			if err := device.OpenMicSettings(); err != nil {
-				logs.LogV("[ui] microphone settings: %v", err)
-			}
-		}})
+	if hang := hangupFunc.get(); hang != nil {
+		items = append(items, menuItem{"", "", [3]int{}, func() {
+			logs.LogV("[ui] hang up (menu)")
+			go hang()
+		}, true})
 	}
 	return items
 }
@@ -150,14 +168,14 @@ func peerMenuItems() []menuItem {
 			} else {
 				logs.LogV("[ui] remote playback paused (menu)")
 			}
-		}},
+		}, false},
 		{videoIcon, lang.T(lang.MenuPeerVideo), videoColour, func() {
 			if mediactrl.TogglePeerVideo() {
 				logs.LogV("[ui] remote video shown (menu)")
 			} else {
 				logs.LogV("[ui] remote video hidden (menu)")
 			}
-		}},
+		}, false},
 	}
 }
 
@@ -174,50 +192,69 @@ func writePeerMenu(out *strings.Builder, top, left int, slot slotSize) {
 	writeMenu(out, top, left, slot, peerMenuItems(), peer, true)
 }
 
-// writeMenu draws items over a pane in place of its video, its labels in accent (the window's colours), the peer's pane
-// mirrored in the window as its frame is.
+// writeMenu draws items over a pane in place of its video, by the menus'
+// rules (CLAUDE.md, «Интерфейс»): the pane's own frame is the menu's (no
+// frame in a frame); the items centred across it, a cell of padding at
+// least each side, a row above and below, the rows centred when it is
+// taller; the chosen item (the arrows move it) on a block of the view's
+// colour from side to side; each item's mark before it; hanging up (x, in
+// red, as every menu's) under a line across, joined to the frame's sides. It keeps where the items are
+// for clicks.
 func writeMenu(out *strings.Builder, top, left int, slot slotSize, items []menuItem, accent [3]int, peer bool) {
-	if slot.cols <= 0 || slot.rows <= 0 {
+	if slot.cols <= 0 || slot.rows <= 0 || len(items) == 0 {
 		return
 	}
+	col := make([]HomeItem, len(items))
+	for i, it := range items {
+		col[i] = HomeItem{Key: it.label, Text: it.label, Mark: it.icon, MarkColour: it.iconColour, Close: it.close}
+	}
+	cur := min(max(0, menuChosen()), len(col)-1)
+	right, bottom := left+slot.cols-1, top+slot.rows-1
+	n := homeSlot(col, len(col)-1) + 1 // rows, the line's among them in a terminal
+	first := top + max(min(homePadRows(), max(0, slot.rows-n)), (slot.rows-n)/2)
+	sepRow := 0
+	if sep := navFrom(col); sep >= 0 {
+		sepRow = first + homeSlot(col, sep)
+		if !pixelMode {
+			sepRow-- // the line's own row, above
+		}
+	}
 	if pixelMode {
-		// The window keeps the pane (its frame) with no video under it.
-		writePixelPane(out, nil, top, left, slot.cols, slot.rows, peer)
+		// The window keeps the pane (its frame) with no video under it,
+		// and draws the line across it, along the top of hanging up.
+		divider := 0
+		if sepRow > 0 {
+			divider = sepRow - top + 1
+		}
+		writePixelPane(out, nil, top, left, slot.cols, slot.rows, peer, divider)
 	}
 	paneCache.invalidate(top, left, slot.cols, slot.rows)
-	bg := panelColors()
-	text := bg
-	if framed() {
-		text += accentSGR(accent)
-	}
-	// An item: its icon (two cells), a space, the label. Each is placed
-	// on its own, as terminals disagree on how wide an emoji is.
-	width := 0
-	for _, it := range items {
-		width = max(width, 3+displayWidth(it.label))
-	}
-	width = min(width, slot.cols)
-	step := 1
-	if slot.rows >= 2*len(items)-1 {
-		step = 2 // a blank row between items
-	}
-	first := top + max(0, (slot.rows-(len(items)-1)*step-1)/2)
-	col := left + max(0, (slot.cols-width)/2)
 	blank := strings.Repeat(" ", slot.cols)
 	for r := 0; r < slot.rows; r++ {
-		fmt.Fprintf(out, "\x1b[%d;%dH%s%s", top+r, left, bg, blank)
+		fmt.Fprintf(out, "\x1b[%d;%dH\x1b[0m%s", top+r, left, blank)
+	}
+	if sepRow > 0 && !pixelMode && sepRow <= bottom {
+		homePut(out, sepRow, left, right, strings.Repeat("─", slot.cols), homeFg(accent))
+		if hudVideoMask != nil { // joined to the frame's sides (├ ┤ by their weight)
+			hudVideoMask.tee(sepRow, left-1, true, accent)
+			hudVideoMask.tee(sepRow, right+1, false, accent)
+		}
 	}
 	var hits []menuHit
-	for i, it := range items {
-		row := first + i*step
-		if row >= top+slot.rows {
+	for i, it := range col {
+		row := first + homeSlot(col, i)
+		if row > bottom {
 			break
 		}
-		fmt.Fprintf(out, "\x1b[%d;%dH%s%s%s", row, col, bg, iconSGR(it.iconColour), it.icon)
-		if label := truncateWidth(it.label, width-3); label != "" {
-			fmt.Fprintf(out, "\x1b[%d;%dH%s%s", row, col+3, text, label)
+		text, style := homeLine(it, i == cur, true, accent)
+		text = truncateWidth(text, max(1, slot.cols-2*homePadCols()))
+		x := left + (slot.cols-displayWidth(text))/2
+		if i == cur {
+			homePut(out, row, left, right, blank, homeChosen(accent))
 		}
-		hits = append(hits, menuHit{row: row, left: left, cols: slot.cols, do: it.do})
+		homePut(out, row, x, right, text, style)
+		putTick(out, it, text, row, x, right, style, i == cur)
+		hits = append(hits, menuHit{row: row, left: left, cols: slot.cols, do: items[i].do})
 	}
 	out.WriteString("\x1b[0m")
 	selfMenu.Lock()
@@ -227,8 +264,7 @@ func writeMenu(out *strings.Builder, top, left int, slot slotSize, items []menuI
 	selfMenu.Unlock()
 }
 
-// iconSGR colours an icon where the terminal draws emoji as text (the window,
-// a terminal without colour emoji): green, red, white.
+// iconSGR colours a mark: green, red, white.
 func iconSGR(c [3]int) string {
 	if ansiColors() {
 		switch {

@@ -37,6 +37,41 @@ func hangupWhenMediaEnds(sess MediaSession, conn net.Conn) (stop func()) {
 	return func() { once.Do(func() { close(quit) }) }
 }
 
+// startMediaAside starts the call's sound and video beside its control
+// stream, not before it: opening the microphone, the speaker and the camera
+// can take seconds, and pings left unanswered that long end the call. The
+// returned stop waits for the start to finish, then ends the session.
+func startMediaAside(conn net.Conn, what string, start func() (MediaSession, error)) (stop func()) {
+	type started struct {
+		sess      MediaSession
+		stopWatch func()
+	}
+	ready := make(chan started, 1)
+	go func() {
+		sess, err := start()
+		if err != nil {
+			log.Printf("[media] %s failed to start: %v", what, err)
+			ready <- started{}
+			return
+		}
+		if sess == nil {
+			ready <- started{}
+			return
+		}
+		log.Printf("[media] started (%s)", what)
+		ready <- started{sess, hangupWhenMediaEnds(sess, conn)}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if s := <-ready; s.sess != nil {
+				s.stopWatch()
+				_ = s.sess.Stop()
+			}
+		})
+	}
+}
+
 // MediaSessionFactory starts an optional media session for a given peer.
 // When remote is nil, the session should learn the peer from incoming traffic.
 // peer is what the peer announced in the handshake (its voice codec).

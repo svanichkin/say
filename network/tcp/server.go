@@ -19,9 +19,10 @@ import (
 // For each new connection it performs a simple text handshake and then hands the
 // connection off to handleIncoming in its own goroutine. The returned function
 // shuts down the listener and stops accepting new connections.
-func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) (func() error, error) {
+// nameOf names a caller by its address ("": the name it gives).
+func StartSignalServerTCP(ln net.Listener, nameOf func(host string) string, listenPort int, termSync *TermSizeSync, mediaFactory MediaSessionFactory) (func() error, error) {
 	stop := make(chan struct{})
-	owner := &callOwner{}
+	owner := calls
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -46,7 +47,7 @@ func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, 
 			} else {
 				logs.LogV("[p2p] accepted; waiting first packet to learn peer")
 			}
-			go serverHandleIncoming(conn, owner, known, termSync, mediaFactory)
+			go serverHandleIncoming(conn, owner, nameOf, termSync, mediaFactory)
 		}
 	}()
 
@@ -61,7 +62,7 @@ func StartSignalServerTCP(ln net.Listener, known []conf.Friend, listenPort int, 
 // serverHandleIncoming processes a single accepted P2P control connection.
 // It performs the HELLO/OK handshake, starts optional video and UDP voice sessions,
 // wires up keepalive and terminal size exchange, and then enters the frame receive loop.
-func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
+func serverHandleIncoming(conn net.Conn, owner *callOwner, nameOf func(host string) string, termSync *TermSizeSync, mediaFactory MediaSessionFactory) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -84,6 +85,9 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	if ra := conn.RemoteAddr(); ra != nil {
 		rem = ra.String()
 	}
+	if err == nil && answerPing(conn, line) {
+		return // whether we are here (presence.go): no call
+	}
 	logs.LogV("[p2p] incoming from %s", rem)
 	if err != nil {
 		log.Printf("[p2p] handshake read err from %s: %v", rem, err)
@@ -96,16 +100,15 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	}
 	peerName := peer.Name
 	logs.LogV("[p2p] handshake: HELLO from=%q raw=%q", peerName, strings.TrimSpace(line))
-	// Identify friend by address (host part) if possible
+	// The caller's name in our contacts, if it is there.
 	hostOnly := rem
 	if h, _, err := net.SplitHostPort(rem); err == nil {
 		hostOnly = h
 	}
 	friendLabel := peerName
-	for _, f := range known {
-		if strings.EqualFold(f.Address, strings.Trim(hostOnly, "[]")) {
-			friendLabel = f.Name
-			break
+	if nameOf != nil {
+		if n := nameOf(strings.Trim(hostOnly, "[]")); n != "" {
+			friendLabel = n
 		}
 	}
 	logs.LogV("[p2p] call from %s (%s)", friendLabel, hostOnly)
@@ -136,16 +139,13 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 	var incoming *incomingFile
 	defer abortIncoming(&incoming)
 	notePeer(peer)
+	sendCard(conn)
 
 	// Start media session (audio/video) on incoming side, learning peer address from first packet.
 	if mediaFactory != nil {
-		if sess, err := mediaFactory(strings.Trim(hostOnly, "[]"), nil, peer); err != nil {
-			log.Printf("[media] start incoming failed: %v", err)
-		} else if sess != nil {
-			defer sess.Stop()
-			defer hangupWhenMediaEnds(sess, conn)()
-			log.Printf("[media] started (incoming, learning peer)")
-		}
+		defer startMediaAside(conn, "incoming, learning peer", func() (MediaSession, error) {
+			return mediaFactory(strings.Trim(hostOnly, "[]"), nil, peer)
+		})()
 	} else {
 		log.Printf("[media] transport is disabled")
 	}
@@ -168,5 +168,6 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, known []conf.Friend, 
 		pacer:     pacer,
 		incoming:  &incoming,
 		peerLabel: friendLabel,
+		peerHost:  strings.Trim(hostOnly, "[]"),
 	})
 }

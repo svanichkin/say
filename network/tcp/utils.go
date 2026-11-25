@@ -30,6 +30,7 @@ const (
 	frameFileResult byte = 0x0a // receiver → sender: file saved or failed
 	frameBye        byte = 0x0b // the peer is hanging up: end the call now
 	frameVideoCtl   byte = 0x11 // receiver → sender: a video control message (network/udp/video_layers.go)
+	frameCard       byte = 0x12 // each side's own card, once after the handshake (card.go)
 )
 
 // framedConn wraps a net.Conn and serializes writes so that higher-level framed messages
@@ -71,6 +72,8 @@ func frameName(t byte) string {
 		return "bye"
 	case frameVideoCtl:
 		return "videoctl"
+	case frameCard:
+		return "card"
 	case frameTermSize:
 		return "termsize"
 	case frameLogWant, frameLog:
@@ -147,6 +150,7 @@ type controlSession struct {
 	pacer     *adaptiveFilePacer
 	incoming  **incomingFile
 	peerLabel string
+	peerHost  string // the peer's address (its card is told where it came from)
 }
 
 // serveControlFrames parses the control stream until the connection closes.
@@ -162,6 +166,7 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 		log.Printf("[debug] control stream with %s ended after %v: %s; last frame %v before; frames %v",
 			s.peerLabel, time.Since(started).Round(time.Millisecond), why, time.Since(last).Round(time.Millisecond), counts)
 	}
+	cardTaken := false
 	var handling time.Time // DEBUG-TEMP: a slow handler holds up the pongs behind it
 	var handlingType byte
 	for {
@@ -198,6 +203,11 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			handleChatFrame(s.conn, t, payload, s.incoming)
 		case frameVideoCtl:
 			ui.NotePeerVideoCtl(payload)
+		case frameCard:
+			if !cardTaken { // one card a call
+				cardTaken = true
+				receiveCard(s.peerHost, payload)
+			}
 		case frameTermSize:
 			if cols, rows, ok := decodeTermSizeFrame(payload); ok && s.termSync != nil {
 				s.termSync.notifyPeer(cols, rows)

@@ -73,8 +73,37 @@ const (
 	MenuCam
 	MenuPeerSound
 	MenuPeerVideo
-	MicMode
-	MicPrivacy
+	HomeContacts
+	HomeDial
+	HomeMyAddress
+	HomeCopy
+	HomeCopied
+	HomeMe
+	HomeCallOn
+	HomeEditContact
+	HomePending
+	HomeConfirm
+	HomeAddTo
+	HomeDelete
+	HomeSettings
+	HomeFolder
+	HomeGiven
+	HomeFamily
+	HomeMiddle
+	HomeLabel
+	HomeAddress
+	HomeOSBook
+	HomeChooseFolder
+	HomeMyCard
+	HomeThisLabel
+	HomeLaptop
+	HomeComputer
+	HomeNick
+	HomeDisplay
+	HomeShowGivenFamily
+	HomeShowFamilyGiven
+	HomeShowShort
+	HomeNoAccess
 
 	numKeys
 )
@@ -82,64 +111,93 @@ const (
 // The status screens take a heading (in capitals, where the script has
 // them) on the first line and the details below it.
 var en = map[Key]string{
-	BootServer:    "BOOTING\nServer node",
-	BootClient:    "BOOTING\nClient node",
-	Failure:       "SYSTEM FAILURE",
-	JackIn:        "JACKING IN",
-	YggMesh:       "Yggdrasil mesh",
-	RawLink:       "Raw TCP/UDP link",
-	NodeOnline:    "NODE ONLINE",
-	HandOver:      "Hand this line to whoever calls in",
-	Listening:     "Listening on port %d",
-	Dialing:       "DIALING",
-	Punching:      "Punching through the mesh",
-	Redial:        "REDIAL",
-	Attempt:       "Attempt #%d",
-	Uplink:        "UPLINK ESTABLISHED",
-	Handshake:     "Handshake complete",
-	SignalLost:    "SIGNAL LOST",
-	Rerouting:     "Rerouting",
-	LineBusy:      "LINE BUSY",
-	BusyRetry:     "On another call · retry in %d s",
-	NoCarrier:     "NO CARRIER",
-	Retry:         "Retry in %d s",
-	Standby:       "STANDBY",
-	AwaitSignal:   "Awaiting signal",
-	LinkActive:    "LINK ACTIVE",
-	TooSmall:      "Viewport too small to render the feed",
-	Mismatch:      "PROTOCOL MISMATCH",
-	PeerRuns:      "Peer runs Say %s (protocol %d)",
-	YouRun:        "You run Say %s (protocol %d)",
-	PatchBoth:     "Patch both sides to the same version",
-	OlderVersion:  "an older version",
-	ThisVersion:   "this version",
-	NoSignal:      "NO SIGNAL",
-	Copy:          "Copy",
-	Copied:        "Copied",
-	LegacyPeer:    "The peer runs an older Say version. Voice works only if both sides use the same -audio-codec; update both sides to the same version.",
-	UnknownCodec:  "The peer sends voice as %s, which this Say version cannot decode. Update both sides to the same version.",
-	Codecs:        "Voice: you send %s, the peer sends %s.",
-	MsgFailed:     "Message send failed: %s",
-	NotConnected:  "Not connected",
-	WaitFile:      "Wait until the current file is sent: %s",
-	Sending:       "Sending",
-	Receiving:     "Receiving",
-	Sent:          "Sent %s (%s)",
-	Unconfirmed:   "%s, but the peer did not confirm saving it",
-	Received:      "Received %s (%s), saved to Downloads",
-	RxFailed:      "File receive failed: %s: %s",
-	RxInterrupted: "File receive interrupted: %s",
-	TxFailed:      "File send failed: %s: %s",
-	NotRegular:    "only regular files can be sent",
-	PeerSaid:      "peer: %s",
-	AwaitConfirm:  "Awaiting confirmation: %s",
-	Stopped:       "Say stopped: %v\n\nDetails, if it crashed: %s",
-	MenuMic:       "Microphone",
-	MenuCam:       "Camera",
-	MenuPeerSound: "Their sound",
-	MenuPeerVideo: "Their video",
-	MicMode:       "Microphone mode",
-	MicPrivacy:    "Microphone privacy",
+	BootServer:          "BOOTING\nServer node",
+	BootClient:          "BOOTING\nClient node",
+	Failure:             "SYSTEM FAILURE",
+	JackIn:              "JACKING IN",
+	YggMesh:             "Yggdrasil mesh",
+	RawLink:             "Raw TCP/UDP link",
+	NodeOnline:          "NODE ONLINE",
+	HandOver:            "Hand this line to whoever calls in",
+	Listening:           "Listening on port %d",
+	Dialing:             "DIALING",
+	Punching:            "Punching through the mesh",
+	Redial:              "REDIAL",
+	Attempt:             "Attempt #%d",
+	Uplink:              "UPLINK ESTABLISHED",
+	Handshake:           "Handshake complete",
+	SignalLost:          "SIGNAL LOST",
+	Rerouting:           "Rerouting",
+	LineBusy:            "LINE BUSY",
+	BusyRetry:           "On another call · retry in %d s",
+	NoCarrier:           "NO CARRIER",
+	Retry:               "Retry in %d s",
+	Standby:             "STANDBY",
+	AwaitSignal:         "Awaiting signal",
+	LinkActive:          "LINK ACTIVE",
+	TooSmall:            "Viewport too small to render the feed",
+	Mismatch:            "PROTOCOL MISMATCH",
+	PeerRuns:            "Peer runs Say %s (protocol %d)",
+	YouRun:              "You run Say %s (protocol %d)",
+	PatchBoth:           "Patch both sides to the same version",
+	OlderVersion:        "an older version",
+	ThisVersion:         "this version",
+	NoSignal:            "NO SIGNAL",
+	Copy:                "Copy",
+	Copied:              "Copied",
+	LegacyPeer:          "The peer runs an older Say version. Voice works only if both sides use the same -audio-codec; update both sides to the same version.",
+	UnknownCodec:        "The peer sends voice as %s, which this Say version cannot decode. Update both sides to the same version.",
+	Codecs:              "Voice: you send %s, the peer sends %s.",
+	MsgFailed:           "Message send failed: %s",
+	NotConnected:        "Not connected",
+	WaitFile:            "Wait until the current file is sent: %s",
+	Sending:             "Sending",
+	Receiving:           "Receiving",
+	Sent:                "Sent %s (%s)",
+	Unconfirmed:         "%s, but the peer did not confirm saving it",
+	Received:            "Received %s (%s), saved to Downloads",
+	RxFailed:            "File receive failed: %s: %s",
+	RxInterrupted:       "File receive interrupted: %s",
+	TxFailed:            "File send failed: %s: %s",
+	NotRegular:          "only regular files can be sent",
+	PeerSaid:            "peer: %s",
+	AwaitConfirm:        "Awaiting confirmation: %s",
+	Stopped:             "Say stopped: %v\n\nDetails, if it crashed: %s",
+	MenuMic:             "Microphone",
+	MenuCam:             "Camera",
+	MenuPeerSound:       "Their sound",
+	MenuPeerVideo:       "Their video",
+	HomeContacts:        "contacts",
+	HomeDial:            "call an address",
+	HomeMyAddress:       "my address",
+	HomeCopy:            "copy",
+	HomeCopied:          "copied",
+	HomeMe:              "me",
+	HomeCallOn:          "call %s",
+	HomeEditContact:     "edit contact",
+	HomePending:         "unconfirmed",
+	HomeConfirm:         "confirm",
+	HomeAddTo:           "add to %s",
+	HomeDelete:          "delete",
+	HomeSettings:        "settings",
+	HomeFolder:          "contacts folder",
+	HomeGiven:           "first name",
+	HomeFamily:          "last name",
+	HomeMiddle:          "middle name",
+	HomeLabel:           "device label",
+	HomeAddress:         "address",
+	HomeOSBook:          "OS address book",
+	HomeChooseFolder:    "choose a folder",
+	HomeMyCard:          "my card",
+	HomeThisLabel:       "this device's label",
+	HomeLaptop:          "laptop",
+	HomeComputer:        "computer",
+	HomeNick:            "nickname",
+	HomeDisplay:         "show contacts as",
+	HomeShowGivenFamily: "first last",
+	HomeShowFamilyGiven: "last first",
+	HomeShowShort:       "initials and last name",
+	HomeNoAccess:        "no access: System Settings → Privacy → Contacts",
 }
 
 func init() { tables["en"] = en }

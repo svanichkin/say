@@ -59,6 +59,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 	<string>Say shows your camera to the person you call.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Say sends your voice to the person you call.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Say lists the people you call and keeps their Say addresses on their cards.</string>
 </dict>
 </plist>
 EOF
@@ -66,10 +68,12 @@ EOF
 cat > "$app/Contents/Resources/en.lproj/InfoPlist.strings" <<'EOF'
 "NSCameraUsageDescription" = "Say shows your camera to the person you call.";
 "NSMicrophoneUsageDescription" = "Say sends your voice to the person you call.";
+"NSContactsUsageDescription" = "Say lists the people you call and keeps their Say addresses on their cards.";
 EOF
 cat > "$app/Contents/Resources/ru.lproj/InfoPlist.strings" <<'EOF'
 "NSCameraUsageDescription" = "Say показывает вашу камеру тому, с кем вы говорите.";
 "NSMicrophoneUsageDescription" = "Say передаёт ваш голос тому, с кем вы говорите.";
+"NSContactsUsageDescription" = "Say показывает, кому можно позвонить, и хранит их адреса Say в их карточках.";
 EOF
 
 codesign --force --sign - --identifier io.github.svanichkin.say "$app"

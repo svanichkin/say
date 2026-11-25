@@ -25,3 +25,22 @@ func TestFrameGeneratorStableAndVaried(t *testing.T) {
 		}
 	}
 }
+
+// A divider goes across the inside from the inner line's left side to its
+// right one, a cut corner kept out; a row past the inside has none.
+func TestDivider(t *testing.T) {
+	gr := Grid{CW: 10, CH: 20}
+	p := Rect{Row: 1, Col: 2, Cols: 10, Rows: 5}
+	inner := chamfered(20, 20, 120, 120, [4]float64{0, 0, 30, 30})
+	a, b, ok := Divider(gr, p, 1, inner) // y 40, the top of row 1: clear of the cuts
+	if !ok || a != (Pt{20, 40}) || b != (Pt{120, 40}) {
+		t.Fatalf("row 1: %v %v %v", a, b, ok)
+	}
+	a, b, ok = Divider(gr, p, 4, inner) // y 100: in the bottom cuts
+	if !ok || a[0] <= 20 || b[0] >= 120 {
+		t.Fatalf("row 4 not kept out of the cut corners: %v %v", a, b)
+	}
+	if _, _, ok = Divider(gr, p, 7, inner); ok {
+		t.Fatal("a row past the inside has a divider")
+	}
+}

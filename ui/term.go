@@ -312,6 +312,26 @@ func resetStatusClickState() {
 	statusClickState.areas = nil
 }
 
+// The dial's x on the status screen (row, its columns): a click there
+// cancels the dial.
+var statusCancel struct {
+	sync.Mutex
+	row, from, to int
+}
+
+func setStatusCancel(row, from, to int) {
+	statusCancel.Lock()
+	statusCancel.row, statusCancel.from, statusCancel.to = row, from, to
+	statusCancel.Unlock()
+}
+
+// statusCancelHit reports whether a click is on the dial's x.
+func statusCancelHit(col, row int) bool {
+	statusCancel.Lock()
+	defer statusCancel.Unlock()
+	return statusCancel.row > 0 && row == statusCancel.row && col >= statusCancel.from && col <= statusCancel.to
+}
+
 // statusCopyButton is the button's label when msg is the copyable status
 // ("" when it is not).
 func statusCopyButton(msg string) string {
@@ -1044,8 +1064,14 @@ func renderTermFrames() {
 			kind = "call (too small)"
 			data = renderConnectionScreen(cols, rows, lang.T(lang.LinkActive)+"\n"+lang.T(lang.TooSmall))
 		}
+	} else if HomeShown() {
+		setSelfMenu(false)          // the call's menu goes with the call
+		updateNoiseAnimation(false) // and its panes' noise: no redraws for it
+		kind = "home"
+		data = renderHomeScreen(cols, rows)
 	} else {
 		setSelfMenu(false) // the call's menu goes with the call
+		updateNoiseAnimation(false)
 		kind = "status: " + currentStatusMessage()
 		data = renderConnectionScreen(cols, rows, currentStatusMessage())
 	}
@@ -1064,6 +1090,7 @@ func renderTermFrames() {
 const (
 	screenStatus byte = 'S'
 	screenChat   byte = 'C'
+	screenHome   byte = 'H'
 )
 
 // beginScreen reports whether the terminal must be fully cleared before
@@ -1337,7 +1364,7 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	cursor := " "
-	if inputCursorVisible(time.Now()) {
+	if !menuOpen() && inputCursorVisible(time.Now()) { // not while a menu takes the keys
 		cursor = "▏"
 		if framed() {
 			cursor = "█"
@@ -1368,7 +1395,7 @@ func renderChatScreen(cols, rows int) string {
 
 	if framed() {
 		// The frame takes a row above the chat and one below the input.
-		writeChatFrame(&out, hud, chatTop-1, frameLeft, frameCols, inputRow-chatTop+3)
+		writeChatFrame(&out, hud, chatTop-1, frameLeft, frameCols, inputRow-chatTop+3, 0)
 	}
 	if hud != nil {
 		// Written last, over the margins and the rows the chat clears.
@@ -1470,7 +1497,7 @@ func writeChatPane(out *strings.Builder, frame *codec.TextFrame, updatedAt time.
 	}
 	if pixelMode {
 		// The window draws the frame itself, fitted to the pane.
-		writePixelPane(out, frame, top, left, slot.cols, slot.rows, frameType == remoteFrameType)
+		writePixelPane(out, frame, top, left, slot.cols, slot.rows, frameType == remoteFrameType, 0)
 	} else if frame != nil && frame.Cols == slot.cols && frame.Rows == slot.rows {
 		writeTextFrameRegion(out, frame, top, left, 0, 0, frame.Cols, frame.Rows, &paneCache)
 	} else {
@@ -1866,6 +1893,16 @@ func buildStatusScreen(cols, rows int, message string) string {
 		lines = append(lines, "", label)
 		buttonLine = len(lines) - 1
 	}
+	// While a call is dialled, x under a line cancels it, as a menu's x
+	// (Enter, a click, Esc): on the chosen block, red.
+	cancelLine := -1
+	if dialCancel.get() != nil && !ChatConnected() {
+		if !pixelMode {
+			lines = append(lines, "") // the line's own row
+		}
+		lines = append(lines, "x")
+		cancelLine = len(lines) - 1
+	}
 
 	// The lines go one under another from the same column, the block of
 	// them centred.
@@ -1883,6 +1920,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 		startRow = 1
 	}
 
+	cancelFrom, cancelTo := 0, -1
 	var out strings.Builder
 	writeFramePrefix(&out, true)
 	appendBorderClear(&out, cols, rows)
@@ -1892,7 +1930,24 @@ func buildStatusScreen(cols, rows int, message string) string {
 			gfxBegin()
 			gfxBorder()
 		}
-		writePixelStatusFrame(&out, h, blockCols, len(lines), startRow, cols, rows)
+		divider := -1
+		if cancelLine >= 0 {
+			divider = cancelLine
+		}
+		fTop, fLeft, fCols, _ := writePixelStatusFrame(&out, h, blockCols, len(lines), startRow, cols, rows, divider)
+		cancelFrom, cancelTo = fLeft, fLeft+fCols-1 // the window: the content's columns
+		if !pixelMode {
+			cancelFrom, cancelTo = fLeft+1, fLeft+fCols-2 // inside the frame's lines
+			if cancelLine >= 0 && fCols > 0 && termHUD {
+				row := startRow + cancelLine - 1 // the line's own row, joined to the sides
+				for c := cancelFrom; c <= cancelTo; c++ {
+					h.set(row, c, '─', ChatAccent())
+				}
+				h.tee(row, fLeft, true, ChatAccent())
+				h.tee(row, fLeft+fCols-1, false, ChatAccent())
+			}
+		}
+		_ = fTop
 		if termHUD {
 			hudWindowBorder(h, cols, rows)
 			if gfxHUD {
@@ -1903,8 +1958,20 @@ func buildStatusScreen(cols, rows int, message string) string {
 	}
 
 	var clickRects []statusClickRect
+	setStatusCancel(0, 0, 0)
 	for i, line := range lines {
 		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if i == cancelLine {
+			row := startRow + i
+			from, to := cancelFrom, cancelTo
+			if to < from { // no frame: the x alone, centred
+				from, to = 1+(cols-1)/2, 1+(cols-1)/2
+			}
+			homePut(&out, row, from, cols, strings.Repeat(" ", to-from+1), homeChosen(ChatAccent()))
+			homePut(&out, row, from+(to-from)/2, cols, "x", homeChosen(ChatAccent())) // chosen: its block's text colour
+			setStatusCancel(row, from, to)
 			continue
 		}
 		row := startRow + i

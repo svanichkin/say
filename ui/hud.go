@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"slices"
 	"strings"
 )
@@ -10,12 +9,14 @@ import (
 // The window's frames in a terminal, drawn with lines: the layout of the
 // window (wider margins, a frame round each video pane and round the chat,
 // the captions on one bracketed line with the ping between them, a border
-// round the screen), each frame a rounded box of box-drawing lines
-// (╭─╮│╰╯) in the window's colours. The window's own shapes (cut corners,
-// plates, hazard stripes) in blocks and quarter blocks broke up into steps
-// in a terminal's font; they stay the window's and the HUD image's
-// (graphics.go). The whole screen is black, as the window is. Only with
-// 24-bit colour: the accents are the window's.
+// round the screen), each frame a box of box-drawing lines in the
+// window's colours, as the window's frame from the same seed: its cut
+// corners rounded or square, its plates heavy lines, its stripes dashed,
+// its rails double (homeframe.go). The window's shapes themselves in
+// blocks and quarter blocks broke up into steps in a terminal's font; they
+// stay the window's and the HUD image's (graphics.go). The whole screen is
+// black, as the window is. Only with 24-bit colour: the accents are the
+// window's.
 var termHUD bool
 
 // framed reports whether the interface has the window's frames: in the
@@ -210,95 +211,25 @@ func flipQuarters(r rune, across bool) rune {
 	return quarters[f]
 }
 
-// hudWindowBorder draws the screen's border: a rounded box of lines round
-// the whole screen in orange (╭─╮│╰╯).
+// hudWindowBorder draws the screen's border round the whole screen in
+// orange, as the window draws its own (borderLines).
 func hudWindowBorder(h *hudCanvas, cols, rows int) {
 	if cols < 12 || rows < 6 {
 		return
 	}
-	hudLines(h, 1, 1, cols, rows, hudOrange)
-}
-
-// hudLines draws a rounded box of lines (╭─╮│╰╯) as the rect of cells top,
-// left, cols x rows: its outermost cells, in colour c.
-func hudLines(h *hudCanvas, top, left, cols, rows int, c [3]int) {
-	right, bottom := left+cols-1, top+rows-1
-	for col := left + 1; col < right; col++ {
-		h.set(top, col, '─', c)
-		h.set(bottom, col, '─', c)
-	}
-	for r := top + 1; r < bottom; r++ {
-		h.set(r, left, '│', c)
-		h.set(r, right, '│', c)
-	}
-	h.set(top, left, '╭', c)
-	h.set(top, right, '╮', c)
-	h.set(bottom, left, '╰', c)
-	h.set(bottom, right, '╯', c)
-}
-
-// hudPlate is a stretch of an edge drawn thick, as the window's armour
-// plates: cells [from, to) along it, hazard-striped or solid.
-type hudPlate struct {
-	from, to int
-	striped  bool
-}
-
-// hudPlates places the plates along an edge n cells long, from the frame's
-// random source, at most most of them and a cell at least from each end.
-func hudPlates(rng *rand.Rand, n, most int) []hudPlate {
-	if n < 10 {
-		return nil
-	}
-	var ps []hudPlate
-	count := 1 + rng.IntN(most)
-	seg := (n - 2) / count
-	for i := range count {
-		l := max(4, seg/3+rng.IntN(max(1, seg/3)))
-		if l >= seg {
-			continue
-		}
-		from := 1 + i*seg + rng.IntN(seg-l)
-		ps = append(ps, hudPlate{from: from, to: from + l, striped: rng.IntN(3) == 0})
-	}
-	return ps
-}
-
-// hudCuts are how deep a frame's corners are cut (top left, top right,
-// bottom right, bottom left), in cells, as the window cuts them: two big
-// and two small crosswise, or all four alike; less on the chat, whose text
-// is close to them.
-func hudCuts(rng *rand.Rand, chat bool) [4]int {
-	big, small := 2+rng.IntN(2), 1
-	var k [4]int
-	switch rng.IntN(3) {
-	case 0:
-		k = [4]int{big, small, big, small}
-	case 1:
-		k = [4]int{small, big, small, big}
-	default:
-		m := 1 + rng.IntN(2)
-		k = [4]int{m, m, m, m}
-	}
-	if chat {
-		for i := range k {
-			k[i] = min(k[i], 2)
-		}
-	}
-	return k
+	self, _, _ := FrameSeeds() // the window's border is from ours too
+	borderLines(self).draw(h, 1, 1, cols, rows, hudOrange)
 }
 
 // hudBox frames the rect of cells top, left, cols x rows (its outermost
-// cells are the frame) in colour c: a rounded box of lines (hudLines). The
-// window's frames (their cut corners, plates and hazard stripes from seed,
-// mirrored on the peer's pane) are the window's and the HUD image's only:
-// in characters they were blocks that a terminal's font breaks up into
-// steps, lines read as frames.
+// cells are the frame) in colour c, as the window frames it from seed
+// (frameLines: mirrored on the peer's pane, the chat's with its small
+// cuts).
 func hudBox(h *hudCanvas, top, left, cols, rows int, c [3]int, seed uint64, mirror, chat bool) {
 	if cols < 6 || rows < 4 {
 		return
 	}
-	hudLines(h, top, left, cols, rows, c)
+	frameLinesOf(seed, chat, mirror).draw(h, top, left, cols, rows, c)
 }
 
 // hudBracket draws a bracketed row in orange, as the window draws its
@@ -352,6 +283,26 @@ func hudBracket(b *strings.Builder, row, left, width int, spans ...[2]int) {
 func (h *hudCanvas) blank() {
 	for k := range h.cells {
 		h.cells[k] = hudCell{r: ' ', fg: hudFg}
+	}
+}
+
+// tee turns the frame's side at row, col (its left side, or its right) into
+// a T for a thin line meeting it from inside (├ ┤ by the side's weight), in
+// colour c.
+func (h *hudCanvas) tee(row, col int, leftSide bool, c [3]int) {
+	cell, ok := h.cells[[2]int{row, col}]
+	if !ok {
+		return
+	}
+	for w, v := range vLines {
+		if cell.r == v {
+			t := rightTs[w]
+			if leftSide {
+				t = leftTs[w]
+			}
+			h.set(row, col, t, c)
+			return
+		}
 	}
 }
 

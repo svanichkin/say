@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/contacts"
 	"github.com/svanichkin/say/dbg"
 	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/gui"
@@ -334,15 +335,33 @@ func run() (err error) {
 	ui.SetStatusMessage(initialStatus)
 	defer func() {
 		if err != nil {
+			ui.ShowHome(false) // the reason, not the menu
 			ui.SetStatusMessage(lang.T(lang.Failure) + "\n" + err.Error())
 		} else {
 			ui.SetStatusMessage("")
 		}
 	}()
 
+	// The address book: the home screen's, and callers' names. Waiting for
+	// calls, the home screen shows at once, while the node comes up (our
+	// address on it once it is known; a call made before it is up waits).
+	// A call by an address given on the command line goes there first; the
+	// home screen comes after it.
+	homeSide := newHomeApp(opts.ConfigPath, opts.ContactsDir, "", opts.ListenPort)
+	ui.SetHangup(homeSide.hangup)
+	ui.SetHome(homeSide.root, homeSide.paste, appCancel)
+	if opts.Mode != conf.ModeClient {
+		ui.ShowHome(true)
+	}
+
 	transport, err := network.SetupTransport(opts.Transport, conf.Verbose, opts.ConfigPath)
 	if err != nil {
 		return err
+	}
+	if addr := strings.TrimSpace(transport.LocalAddr()); addr != "" {
+		ui.SetAccentAddresses(addr, "")
+		homeSide.setSelf(addr)
+		ui.HomeRefresh()
 	}
 	defer transport.Close()
 	if transport.Kind() == network.TransportYggdrasil {
@@ -383,6 +402,23 @@ func run() (err error) {
 		logs.LogV("[p2p] UDP bound on %s", udpAddr.String())
 	}
 
+	homeSide.setSelf(localAddr)
+	// Our card goes to whoever we talk to, and theirs comes to us, into the
+	// book (a known address's additions written, an unknown one's card
+	// waiting to be confirmed). The chat is only what people write.
+	tcpsignal.SetCards(homeSide.store.MyCard, func(host string, card []byte) {
+		homeSide.store.Received(host, card)
+	})
+	if opts.FriendName != "" {
+		d, ok := homeSide.lookup(opts.FriendName)
+		if !ok {
+			return fmt.Errorf("%q is not in the contacts", opts.FriendName)
+		}
+		if opts.DialAddr == "" {
+			opts.DialAddr = d.Addr()
+		}
+	}
+
 	var mediaFactory tcpsignal.MediaSessionFactory
 	if udpConn != nil {
 		mediaFactory = func(peerHost string, remote *net.UDPAddr, peer tcpsignal.PeerInfo) (tcpsignal.MediaSession, error) {
@@ -391,6 +427,7 @@ func run() (err error) {
 			// the log: a LAN peer means multicast found a direct link.
 			udptransport.ResetAudioSettings()
 			ui.SetAccentAddresses(localAddr, peerHost)
+			homeSide.noted(peerHost)
 			if transport.IsLocalPeer(peerHost) {
 				log.Printf("[p2p] peer %s is in the local network (direct link)", peerHost)
 			} else {
@@ -413,117 +450,48 @@ func run() (err error) {
 		}
 	}
 
-	_, contactsFromCfg, loadErr := conf.LoadFriendsFromConfig(opts.ConfigPath)
-	if loadErr != nil {
-		log.Printf("[cfg] couldn't read friends from %s: %v", opts.ConfigPath, loadErr)
-	}
-	friends := make([]conf.Friend, 0)
-	contactsDir := opts.ContactsDir
-	if contactsDir == "" {
-		contactsDir = contactsFromCfg
-	}
-	if contactsDir != "" {
-		if contactFriends, err := conf.LoadFriendsFromContacts(contactsDir); err != nil {
-			log.Printf("[contacts] %v", err)
-		} else if len(contactFriends) > 0 {
-			logs.LogV("[contacts] %d entries from %s", len(contactFriends), contactsDir)
-			friends = mergeFriendLists(friends, contactFriends)
-		}
-	}
-	if opts.FriendName != "" {
-		if opts.Mode != conf.ModeClient {
-			log.Printf("[contacts] friend %q ignored in listen mode", opts.FriendName)
+	// Calls are taken and made from the home screen. One by an address on
+	// the command line redials while the line drops, until hung up; then
+	// the home screen. Its port may be taken (a server of the same
+	// machine): it calls out all the same.
+	tcp, err := transport.ListenTCP(opts.ListenPort)
+	if err == nil {
+		stopServer, serr := tcpsignal.StartSignalServerTCP(tcp, homeSide.nameOf, opts.ListenPort, termSync, mediaFactory)
+		if serr != nil {
+			err = serr
 		} else {
-			addr := lookupFriendAddress(friends, opts.FriendName)
-			if addr == "" {
-				return fmt.Errorf("friend %q not found in contacts", opts.FriendName)
-			}
-			if opts.DialAddr == "" {
-				opts.DialAddr = addr
-			}
+			defer stopServer()
 		}
 	}
-
-	var (
-		cancelAutodial context.CancelFunc
-		autodialErrCh  chan error
-	)
-
-	if opts.DialAddr == "" {
-		tcp, err := transport.ListenTCP(opts.ListenPort)
-		if err != nil {
+	if err != nil {
+		if opts.DialAddr == "" {
 			return fmt.Errorf("listen failed: %w", err)
 		}
-		stopServer, err := tcpsignal.StartSignalServerTCP(tcp, friends, opts.ListenPort, termSync, mediaFactory)
-		if err != nil {
-			return fmt.Errorf("listen failed: %w", err)
-		}
-		defer stopServer()
-		if localAddr != "" {
-			log.Printf("[hint] %s", formatSayHint(opts.Transport, localAddr, opts.ListenPort))
-		}
-	} else {
+		log.Printf("[p2p] not taking calls: listen failed: %v", err)
+	} else if localAddr != "" {
+		log.Printf("[hint] %s", formatSayHint(opts.Transport, localAddr, opts.ListenPort))
+	}
+	homeSide.setDial(func(ctx context.Context, d contacts.Device) error {
+		return dialOnce(ctx, d, termSync, mediaFactory, transport.DialTCP)
+	})
+	// Who of the contacts is online: asked now and then (presence.go).
+	go homeSide.watchPresence(appCtx, func(host string, port int) bool {
+		return tcpsignal.Probe(host, port, transport.DialTCP, presenceTimeout)
+	})
+	if opts.DialAddr != "" {
 		host, port, err := conf.ParseDialTarget(opts.DialAddr, opts.ListenPort)
 		if err != nil {
 			return fmt.Errorf("dial target: %w", err)
 		}
-		autodialErrCh = make(chan error, 1)
-		dialCtx, cancel := context.WithCancel(appCtx)
-		cancelAutodial = cancel
-		go func() {
-			autodialErrCh <- autodial(dialCtx, host, port, termSync, mediaFactory, transport.DialTCP)
-		}()
+		homeSide.place(contacts.Device{Host: host, Port: port}, func(ctx context.Context, d contacts.Device) error {
+			return autodial(ctx, d.Host, d.Port, termSync, mediaFactory, transport.DialTCP)
+		})
 	}
 
-	select {
-	case <-appCtx.Done():
-		log.Println("shutting down")
-		if cancelAutodial != nil {
-			cancelAutodial()
-			if err := <-autodialErrCh; err != nil && !errors.Is(err, context.Canceled) {
-				return err
-			}
-		}
-		return nil
-	case err := <-autodialErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-		return nil
-	}
-}
-
-func lookupFriendAddress(friends []conf.Friend, name string) string {
-	for _, f := range friends {
-		if strings.EqualFold(f.Name, name) {
-			return strings.TrimSpace(f.Address)
-		}
-	}
-	return ""
-}
-
-func mergeFriendLists(base, extra []conf.Friend) []conf.Friend {
-	if len(extra) == 0 {
-		return base
-	}
-	merged := make([]conf.Friend, 0, len(base)+len(extra))
-	seen := make(map[string]struct{}, len(base)+len(extra))
-	appendUnique := func(list []conf.Friend) {
-		for _, f := range list {
-			key := strings.ToLower(strings.TrimSpace(f.Name))
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			merged = append(merged, f)
-		}
-	}
-	appendUnique(base)
-	appendUnique(extra)
-	return merged
+	<-appCtx.Done()
+	log.Println("shutting down")
+	homeSide.hangup()
+	return nil
 }
 
 // initLogSink opens the log file. role ("client" or "server") is part of the
@@ -714,6 +682,71 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			}
 		}
 		attempt++
+	}
+}
+
+// dialOnce makes a call from the home screen: a few tries while the line
+// cannot be reached, then the call until either side hangs up or it drops
+// (no redial: the home screen is back). ctx ends it at any time (Esc).
+func dialOnce(ctx context.Context, d contacts.Device, termSync *tcpsignal.TermSizeSync, mediaFactory tcpsignal.MediaSessionFactory, dial tcpsignal.TCPDialFunc) error {
+	const tries = 3
+	target := formatPeerAddr(d.Host, d.Port)
+	for attempt := 1; ; attempt++ {
+		if attempt == 1 {
+			ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.Punching))
+		} else {
+			ui.SetStatusMessage(lang.T(lang.Redial) + "\n" + target + "\n" + lang.T(lang.Attempt, attempt))
+		}
+		type dialResult struct {
+			stop func() error
+			done <-chan struct{}
+			err  error
+		}
+		dialed := make(chan dialResult, 1)
+		go func() {
+			stop, done, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), d.Host, d.Port, termSync, mediaFactory, dial)
+			dialed <- dialResult{stop, done, err}
+		}()
+		var res dialResult
+		select {
+		case <-ctx.Done():
+			go func() {
+				if r := <-dialed; r.err == nil {
+					r.stop()
+				}
+			}()
+			return ctx.Err()
+		case res = <-dialed:
+		}
+		if res.err == nil {
+			log.Printf("[p2p] dial established to %s", target)
+			select {
+			case <-ctx.Done():
+				res.stop()
+			case <-res.done:
+				res.stop()
+			}
+			log.Printf("[p2p] the call with %s is over", target)
+			return nil
+		}
+		var incompatible *tcpsignal.IncompatibleError
+		switch {
+		case errors.As(res.err, &incompatible):
+			ui.SetStatusMessage(res.err.Error())
+			return res.err
+		case errors.Is(res.err, tcpsignal.ErrPeerBusy):
+			ui.SetStatusMessage(lang.T(lang.LineBusy) + "\n" + target)
+			return res.err
+		case attempt >= tries:
+			ui.SetStatusMessage(lang.T(lang.NoCarrier) + "\n" + target + "\n" + res.err.Error())
+			return res.err
+		}
+		log.Printf("[p2p] dial %s failed: %v", target, res.err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
 	}
 }
 

@@ -53,6 +53,28 @@ func Line(a, c Pt, width float64) []Pt {
 	return []Pt{{a[0] + nx, a[1] + ny}, {c[0] + nx, c[1] + ny}, {c[0] - nx, c[1] - ny}, {a[0] - nx, a[1] - ny}}
 }
 
+// Divider is a line across a frame's inside along the top of row (of its
+// rect, 0-based): between it and the row above, taking none. It goes as the
+// inner line, from the inner line's left side to its right one at that
+// height (a cut corner kept out). It reports false where the height misses
+// the inside.
+func Divider(gr Grid, p Rect, row int, inner []Pt) (a, b Pt, ok bool) {
+	y := float64(gr.OY + (p.Row+row)*gr.CH)
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for i := range inner {
+		q, r := inner[i], inner[(i+1)%len(inner)]
+		if (q[1] <= y) == (r[1] <= y) {
+			continue // the edge does not cross the row's height
+		}
+		x := q[0] + (y-q[1])*(r[0]-q[0])/(r[1]-q[1])
+		lo, hi = math.Min(lo, x), math.Max(hi, x)
+	}
+	if lo >= hi {
+		return a, b, false
+	}
+	return Pt{lo, y}, Pt{hi, y}, true
+}
+
 // Loop is a closed polyline through ps, width wide.
 func Loop(ps []Pt, width float64) [][]Pt {
 	out := make([][]Pt, 0, len(ps))
@@ -144,6 +166,20 @@ func BorderOf(w, h, cw int, seed uint64) (Border, bool) {
 		}
 	}
 	return b, true
+}
+
+// BorderStretches are the plates BorderOf lays on the border's top line
+// (side 0) and bottom one (side 2), from..to along each (0..1), for the
+// border drawn in characters.
+func BorderStretches(seed uint64) []Stretch {
+	rng := rand.New(rand.NewPCG(seed, 0xb0d3))
+	var out []Stretch
+	for _, side := range []int{0, 2} {
+		for _, pl := range edgePlates(rng, 1) { // where they go is the same for any length
+			out = append(out, Stretch{Side: side, From: pl.from, To: pl.to, Striped: pl.striped})
+		}
+	}
+	return out
 }
 
 // edgePlate is a plate on the top or bottom line: from..to along it, its

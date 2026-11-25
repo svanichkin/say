@@ -243,6 +243,45 @@ func Generate(seed uint64, chat bool) Style {
 	return st
 }
 
+// Stretch is a stretch of a frame's side (0 top, 1 right, 2 bottom, 3
+// left), From..To along it (0..1, left to right, top to bottom): what a
+// frame drawn in characters takes from the window's.
+type Stretch struct {
+	Side     int
+	From, To float64
+	Striped  bool // hazard stripes cut in it
+}
+
+// Cuts are how deep the frame's corners are cut, in cells: top left, top
+// right, bottom right, bottom left.
+func (st Style) Cuts() [4]float64 { return st.cuts }
+
+// Plates are the stretches of the armour plates (some striped).
+func (st Style) Plates() []Stretch { return stretches(st.plates) }
+
+// Rails are the stretches where the gap between the two lines is filled.
+func (st Style) Rails() []Stretch { return stretches(st.rails) }
+
+// Steps are the stretches where the silhouette steps out (or in, a
+// recess) with diagonal shoulders.
+func (st Style) Steps() []Stretch {
+	var out []Stretch
+	for s, steps := range st.steps {
+		for _, e := range steps {
+			out = append(out, Stretch{Side: s, From: e.from, To: e.to})
+		}
+	}
+	return out
+}
+
+func stretches(ps []plate) []Stretch {
+	out := make([]Stretch, len(ps))
+	for i, p := range ps {
+		out[i] = Stretch{Side: int(p.side), From: p.from, To: p.to, Striped: p.stripes}
+	}
+	return out
+}
+
 var (
 	styleMu    sync.Mutex
 	styleCache = map[styleKey]Style{}
@@ -319,6 +358,16 @@ func steppedContour(x0, y0, x1, y1 float64, c [4]float64, steps [4][]edgeStep, u
 	ps = append(ps, edge(bottom, c[3], c[2])...)
 	ps = append(ps, Pt{x0 + c[3], y1}, Pt{x0, y1 - c[3]})
 	return append(ps, edge(left, c[0], c[3])...)
+}
+
+// ContentFrameOf lays out the frame round content at p (a menu's items, the
+// status, the chat: p is their rows): half a row of room above them and
+// below, every such frame in the window alike; otherwise as FrameOf.
+func ContentFrameOf(gr Grid, p Rect, remote bool, caption string, st Style) Frame {
+	g := gr
+	g.OY -= gr.CH / 2
+	p.Rows++
+	return FrameOf(g, p, remote, caption, st)
 }
 
 // FrameOf lays out the frame of the pane (or chat) at p in device pixels;

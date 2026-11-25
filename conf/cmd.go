@@ -1,11 +1,8 @@
 package conf
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/svanichkin/say/lang"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,12 +25,6 @@ var colorFilterSet = func() map[string]struct{} {
 	}
 	return m
 }()
-
-// Friend represents a contact from config: Name + Yggdrasil IPv6 address
-type Friend struct {
-	Name    string `json:"name"`
-	Address string `json:"address"` // Ygg IPv6 like: 200:...:....:....
-}
 
 const ()
 
@@ -133,119 +124,6 @@ func ParseDialTarget(raw string, defPort int) (string, int, error) {
 	return strings.Trim(s, "[]"), defPort, nil
 }
 
-// LoadFriendsFromConfig currently only extracts the optional "contacts_dir" value.
-// Inline friend definitions have been deprecated in favor of filesystem contacts.
-func LoadFriendsFromConfig(cfgPath string) ([]Friend, string, error) {
-	if cfgPath == "" {
-		return nil, "", nil
-	}
-	b, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return nil, "", err
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return nil, "", err
-	}
-	var contactsDir string
-	if v, ok := raw["contacts_dir"]; ok && v != nil {
-		if s, ok := v.(string); ok {
-			contactsDir = strings.TrimSpace(s)
-		}
-	}
-	return nil, contactsDir, nil
-}
-
-// LoadFriendsFromContacts recursively scans the provided directory for friend folders.
-// Each folder that contains a file named "say" contributes a friend entry where the
-// folder name is treated as the friend name and the file contents hold the IPv6 address.
-func LoadFriendsFromContacts(root string) ([]Friend, error) {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return nil, nil
-	}
-	resolved, err := resolvePathAllowingHome(root)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("contacts path %q is not a directory", resolved)
-	}
-	var friends []Friend
-	seen := make(map[string]struct{})
-	err = filepath.WalkDir(resolved, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !strings.EqualFold(d.Name(), "say") {
-			return nil
-		}
-		friendFolder := filepath.Dir(path)
-		friendName := filepath.Base(friendFolder)
-		if friendName == "" {
-			return filepath.SkipDir
-		}
-		addFriend := func(name, addr string) {
-			key := normalizeFriendKey(name)
-			if key == "" || addr == "" {
-				return
-			}
-			if _, ok := seen[key]; ok {
-				return
-			}
-			seen[key] = struct{}{}
-			friends = append(friends, Friend{Name: name, Address: addr})
-		}
-		if !d.IsDir() {
-			addr, err := readAddressFile(path)
-			if err != nil {
-				return err
-			}
-			addFriend(friendName, addr)
-			return nil
-		}
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err
-		}
-		var devices []fs.DirEntry
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			devices = append(devices, entry)
-		}
-		if len(devices) == 0 {
-			return filepath.SkipDir
-		}
-		if len(devices) == 1 {
-			addr, err := readAddressFile(filepath.Join(path, devices[0].Name()))
-			if err != nil {
-				return err
-			}
-			addFriend(friendName, addr)
-			return filepath.SkipDir
-		}
-		for _, entry := range devices {
-			addr, err := readAddressFile(filepath.Join(path, entry.Name()))
-			if err != nil {
-				return err
-			}
-			label := fmt.Sprintf("%s/%s", friendName, entry.Name())
-			addFriend(label, addr)
-		}
-		return filepath.SkipDir
-	})
-	if err != nil {
-		return nil, err
-	}
-	return friends, nil
-}
-
 // HostnameOr returns the system hostname or the provided default string on failure.
 func HostnameOr(def string) string {
 	h, err := os.Hostname()
@@ -306,7 +184,6 @@ const (
 // the final configuration path. It performs only argument parsing and normalization.
 
 type flagParseState struct {
-	contactsOverride bool
 }
 
 // ParseCLI parses command-line flags into an AppOptions structure and resolves
@@ -383,20 +260,6 @@ func ParseCLI() (*AppOptions, error) {
 		return nil, fmt.Errorf("config path error: %w", err)
 	}
 	opts.ConfigPath = resolvedCfg
-	var contactsFromCfg string
-	if _, cfgDir, err := LoadFriendsFromConfig(resolvedCfg); err == nil {
-		contactsFromCfg = strings.TrimSpace(cfgDir)
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	if opts.ContactsDir != "" {
-		if state.contactsOverride {
-			persistContactsDir(resolvedCfg, opts.ContactsDir)
-		}
-	} else if contactsFromCfg != "" {
-		opts.ContactsDir = contactsFromCfg
-	}
-	effectiveContactsDir := opts.ContactsDir
 	if pendingArg != "" {
 		if pendingDial {
 			if opts.DialAddr != "" {
@@ -407,16 +270,7 @@ func ParseCLI() (*AppOptions, error) {
 				return nil, err
 			}
 		} else {
-			if effectiveContactsDir == "" {
-				return nil, fmt.Errorf("friend %q requires contacts_dir", pendingArg)
-			}
-			friendsPreview, err := LoadFriendsFromContacts(effectiveContactsDir)
-			if err != nil {
-				return nil, err
-			}
-			if !friendExistsByName(friendsPreview, pendingArg) {
-				return nil, fmt.Errorf("friend %q not found in contacts", pendingArg)
-			}
+			// A name in the contacts: main looks it up.
 			friendName = pendingArg
 			if err := opts.setMode(ModeClient); err != nil {
 				return nil, err
@@ -582,62 +436,6 @@ func fileExists(path string) bool {
 	return false
 }
 
-func readAddressFile(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	addr := strings.TrimSpace(string(b))
-	return addr, nil
-}
-
-func normalizeFriendKey(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
-}
-
-func resolvePathAllowingHome(path string) (string, error) {
-	if strings.HasPrefix(path, "~/") {
-		h, err := os.UserHomeDir()
-		if err == nil {
-			path = filepath.Join(h, path[2:])
-		}
-	}
-	return filepath.Abs(path)
-}
-
-func persistContactsDir(configPath, contactsDir string) {
-	if contactsDir == "" || configPath == "" {
-		return
-	}
-	data := map[string]any{}
-	content, err := os.ReadFile(configPath)
-	if err == nil && len(content) > 0 {
-		_ = json.Unmarshal(content, &data)
-	}
-	if prev, ok := data["contacts_dir"].(string); ok && prev == contactsDir {
-		return
-	}
-	data["contacts_dir"] = contactsDir
-	b, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(configPath, append(b, '\n'), 0o644)
-}
-
-func friendExistsByName(friends []Friend, name string) bool {
-	target := normalizeFriendKey(name)
-	if target == "" {
-		return false
-	}
-	for _, f := range friends {
-		if normalizeFriendKey(f.Name) == target {
-			return true
-		}
-	}
-	return false
-}
-
 func collectDashPrefixedArgs(args []string) ([]string, map[int]struct{}) {
 	consumed := make(map[int]struct{})
 	if len(args) == 0 {
@@ -757,13 +555,7 @@ func applyFlagTokens(tokens []string, opts *AppOptions, state *flagParseState) e
 			if !hasValue || value == "" {
 				return fmt.Errorf("-contacts requires a value")
 			}
-			opts.ContactsDir = value
-			if state != nil {
-				state.contactsOverride = true
-			}
-			if err := opts.setMode(ModeClient); err != nil {
-				return err
-			}
+			opts.ContactsDir = value // the contacts folder, kept for next time
 		case "port":
 			if !hasValue || value == "" {
 				return fmt.Errorf("-port requires a value")

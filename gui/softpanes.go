@@ -80,6 +80,8 @@ func (s *softPixels) update(base *softRenderer, panes []Pane, brackets []Bracket
 	for _, p := range panes {
 		c, seed := self, selfSeed
 		switch {
+		case p.Menu:
+			c, seed = [3]int{int(p.Colour.R), int(p.Colour.G), int(p.Colour.B)}, p.Seed
 		case p.Chat:
 			c, seed = chat, chatSeed
 		case p.Remote:
@@ -89,6 +91,7 @@ func (s *softPixels) update(base *softRenderer, panes []Pane, brackets []Bracket
 			Rect: hud.Rect{Row: p.Row, Col: p.Col, Cols: p.Cols, Rows: p.Rows}, Remote: p.Remote, Chat: p.Chat,
 			Colour: color.RGBA{uint8(c[0]), uint8(c[1]), uint8(c[2]), 255}, Seed: seed,
 			Caption: strings.Repeat("0", utf8.RuneCountInString(p.Caption)), // the plate follows the length
+			Divider: p.Divider, Content: p.Content,
 		})
 	}
 	for _, b := range brackets {
@@ -124,7 +127,7 @@ func (s *softPixels) update(base *softRenderer, panes []Pane, brackets []Bracket
 			sp.p.Caption = p.Caption
 			dirty = append(dirty, sp.label)
 		}
-		if p.Chat || s.in.Frame == nil {
+		if p.Chat || p.Menu || s.in.Frame == nil {
 			continue
 		}
 		f := s.in.Frame(p.Frame)
@@ -159,12 +162,15 @@ func (s *softPixels) layout(gr hud.Grid, scene hud.Scene, panes []Pane) {
 	for i, p := range panes {
 		hp := scene.Panes[i]
 		fr := hud.FrameOf(gr, hp.Rect, p.Remote, hp.Caption, hud.StyleOf(hp.Seed, p.Chat))
+		if p.Content {
+			fr = hud.ContentFrameOf(gr, hp.Rect, p.Remote, hp.Caption, hud.StyleOf(hp.Seed, p.Chat))
+		}
 		sp := &softPane{p: p, colour: hp.Colour,
 			bounds: image.Rect(p.Col*s.cw, p.Row*s.ch, (p.Col+p.Cols)*s.cw, (p.Row+p.Rows)*s.ch)}
 		if o := old[[2]int{p.Row, p.Col}]; o != nil && o.bounds == sp.bounds {
 			sp.frame, sp.video, sp.vw, sp.vh, sp.place = o.frame, o.video, o.vw, o.vh, o.place
 		}
-		if !p.Chat {
+		{ // what is inside is cut to the inner line (the video, a menu's cells)
 			sp.mask = polygonMask(fr.Inner, sp.bounds)
 		}
 		if fr.Label != nil {
@@ -192,6 +198,26 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 		copy(s.out[o:o+r.Dx()*softBytes], base.pix[o:o+r.Dx()*softBytes])
 	}
 	for _, sp := range in {
+		if sp.mask != nil {
+			// What is inside a frame cut to its inner line, as the video
+			// is: the cells past it are the background's.
+			pr := sp.bounds.Intersect(r)
+			for y := pr.Min.Y; y < pr.Max.Y; y++ {
+				for x := pr.Min.X; x < pr.Max.X; x++ {
+					m := int(sp.mask.Pix[(y-sp.bounds.Min.Y)*sp.mask.Stride+x-sp.bounds.Min.X])
+					if m == 255 {
+						continue
+					}
+					o := (y*s.w + x) * softBytes
+					s.out[o] = blend(defaultBg.B, s.out[o], m)
+					s.out[o+1] = blend(defaultBg.G, s.out[o+1], m)
+					s.out[o+2] = blend(defaultBg.R, s.out[o+2], m)
+				}
+			}
+		}
+		if sp.p.Menu {
+			continue
+		}
 		if sp.video == nil || sp.mask == nil {
 			continue
 		}

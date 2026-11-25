@@ -22,6 +22,17 @@ type Pane struct {
 	Colour       color.RGBA
 	Seed         uint64 // the frame's style (see StyleOf)
 	Caption      string // the caption's plate is drawn for it (its text is not)
+	Divider      int    // a line across it along the top of row Divider-1 of its rect (0: none)
+	Content      bool   // its rect is content's (a menu, the status, the chat): ContentFrameOf
+}
+
+// paneFrame lays out a pane's frame: content's with half a row round it.
+func paneFrame(gr Grid, p Pane) Frame {
+	st := StyleOf(p.Seed, p.Chat)
+	if p.Content {
+		return ContentFrameOf(gr, p.Rect, p.Remote, p.Caption, st)
+	}
+	return FrameOf(gr, p.Rect, p.Remote, p.Caption, st)
 }
 
 // Scene is what the HUD draws on a screen.
@@ -35,7 +46,9 @@ type Scene struct {
 
 // Inner is the outline of a pane's video (its frame's inner line).
 func (p Pane) Inner(gr Grid) []Pt {
-	return FrameOf(gr, p.Rect, p.Remote, "", StyleOf(p.Seed, p.Chat)).Inner
+	q := p
+	q.Caption = ""
+	return paneFrame(gr, q).Inner
 }
 
 const (
@@ -203,7 +216,7 @@ func (r *raster) fill(dst *image.RGBA, polys [][]Pt, scale float64, p paint) {
 
 // frame draws a pane's frame as the window's frameShapes does.
 func (r *raster) frame(gr Grid, p Pane) {
-	fr := FrameOf(gr, p.Rect, p.Remote, p.Caption, StyleOf(p.Seed, p.Chat))
+	fr := paneFrame(gr, p)
 	c := p.Colour
 	u := float64(gr.CW)
 	inner, outer, trace := Widths(u)
@@ -211,6 +224,12 @@ func (r *raster) frame(gr Grid, p Pane) {
 	dim = append(dim, fr.Rails...)
 	dim = append(dim, Loop(fr.Inner, inner)...)
 	dimGlow = append(dimGlow, Loop(fr.Inner, inner*2)...)
+	if p.Divider > 0 {
+		if a, b, ok := Divider(gr, p.Rect, p.Divider-1, fr.Inner); ok {
+			dim = append(dim, Line(a, b, inner))
+			dimGlow = append(dimGlow, Line(a, b, inner*2))
+		}
+	}
 	bright = append(bright, Loop(fr.Outer, outer)...)
 	glow = append(glow, Loop(fr.Outer, outer*2)...)
 	for _, path := range fr.Traces {

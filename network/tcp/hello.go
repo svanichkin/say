@@ -50,11 +50,17 @@ import (
 //	   flag (codec/frames.go)
 //	14 a still band's heartbeat is the smooth frame's three bytes alone
 //	   (network/udp/video_smooth.go), not a coded frame
+//	15 each side sends its own card once after the handshake (frame 0x12,
+//	   network/tcp/card.go); a peer of 14 ignores it, so 14 is still talked to
+//	16 PING in place of HELLO asks whether Say runs there: PONG, the version
+//	   and the protocol answer it and the connection closes, no call begun
+//	   (network/tcp/presence.go); a peer of 14 or 15 answers it as a peer too
+//	   old, an answer all the same, and is still talked to
 //
-// Only peers of the current protocol are accepted: the video formats of
+// Peers from MinProtocolVersion on are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 14
+	ProtocolVersion    = 16
 	MinProtocolVersion = 14
 )
 

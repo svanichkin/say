@@ -18,6 +18,14 @@
 *.tiv
 *.jpg
 .*
+# Claude Code's project setup (subagents, hooks) is the project's; its local
+# state is not.
+!.claude/
+!.claude/settings.json
+!.claude/agents/*.md
+!.claude/hooks/*
+.claude/*.lock
+.claude/settings.local.json
 
 # Test binary, built with `go test -c`
 *.test

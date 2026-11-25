@@ -5,6 +5,7 @@ package gui
 import (
 	"bufio"
 	_ "embed"
+	"github.com/svanichkin/say/keys"
 	"image"
 	"os"
 	"strconv"
@@ -199,6 +200,10 @@ func readKeys(in Input) func() {
 				if in.Key != nil {
 					in.Key(0x7f)
 				}
+			case plan9Keys[c] != 0: // the arrows, Esc
+				if in.Key != nil {
+					in.Key(plan9Keys[c])
+				}
 			case c >= 0x20 && (c < 0xe000 || c > 0xf8ff): // not Plan 9's arrows and the like
 				if in.Key != nil {
 					in.Key(c)
@@ -211,6 +216,10 @@ func readKeys(in Input) func() {
 		ctl.Close()
 	}
 }
+
+// plan9Keys are Plan 9's keyboard runes (keyboard.h: Kup, Kdown, Kleft,
+// Kright, Kesc) as the interface's keys.
+var plan9Keys = map[rune]rune{0xF00E: keys.Up, 0x80: keys.Down, 0xF011: keys.Left, 0xF012: keys.Right, 0x1b: keys.Esc}
 
 // quiet sends what Say prints to standard output and error to /dev/null:
 // written to the window's console, rio would draw it over the picture. The

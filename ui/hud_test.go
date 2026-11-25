@@ -41,9 +41,12 @@ func TestTermHUDDrawsTheWindowsFrames(t *testing.T) {
 		for _, left := range []int{videoLeft, peerLeft} {
 			top, bottom := canvasTop-1, canvasTop+vs.selfSlot.rows
 			right := left + vs.selfSlot.cols
-			// A rounded box of lines.
-			if at(top, left-1) != '╭' || at(top, right) != '╮' || at(bottom, left-1) != '╰' || at(bottom, right) != '╯' {
-				t.Fatalf("%dx%d: no rounded corners on the pane at column %d", cols, rows, left)
+			// A box of lines, its corners rounded where the window cuts
+			// them deep, square where shallow.
+			corner := func(r rune, round, square rune) bool { return r == round || r == square }
+			if !corner(at(top, left-1), '╭', '┌') || !corner(at(top, right), '╮', '┐') ||
+				!corner(at(bottom, left-1), '╰', '└') || !corner(at(bottom, right), '╯', '┘') {
+				t.Fatalf("%dx%d: no corners on the pane at column %d", cols, rows, left)
 			}
 			mid := left + vs.selfSlot.cols/2
 			if at(top, mid) == 0 || at(bottom, mid) == 0 || at(canvasTop+vs.selfSlot.rows/2, left-1) == 0 {

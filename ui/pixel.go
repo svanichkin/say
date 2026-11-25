@@ -177,17 +177,34 @@ func ChatAccent() [3]int {
 	return accentPresets[3]
 }
 
-// writePixelChat marks the chat (the conversation and the input line) for
-// the window to frame: OSC 5579 with its rect, 1-based cells.
-func writePixelChat(out *strings.Builder, top, left, cols, rows int) {
-	fmt.Fprintf(out, "\x1b]5579;%d;%d;%d;%d\x07", top, left, cols, rows)
+// writePixelChat marks the chat (the conversation and the input line, or
+// the status) for the window to frame: OSC 5579 with its content's rect,
+// 1-based cells, and c: the frame half a row round it, as round all content.
+func writePixelChat(out *strings.Builder, top, left, cols, rows, divider int) {
+	if divider > 0 { // a line across, along the top of its row divider (1-based): x below it
+		fmt.Fprintf(out, "\x1b]5579;%d;%d;%d;%d;c;%d\x07", top, left, cols, rows, divider)
+		return
+	}
+	fmt.Fprintf(out, "\x1b]5579;%d;%d;%d;%d;c\x07", top, left, cols, rows)
+}
+
+// writePixelMenu marks a column of the home screen for the window to frame
+// as it frames its panes (OSC 5581): its items' rect (1-based top, left,
+// then cols, rows; the top may be above the screen), the frame's seed, its
+// colour, and the row (1-based in the rect, 0 none) a line goes across
+// the top of: + and < and x below it.
+func writePixelMenu(out *strings.Builder, top, left, cols, rows int, seed uint64, c [3]int, divider int) {
+	fmt.Fprintf(out, "\x1b]5581;%d;%d;%d;%d;%d;%d;%d;%d;%d\x07", top, left, cols, rows, seed, c[0], c[1], c[2], divider)
 }
 
 // writeChatFrame frames the chat's rect (1-based cells): marked for the
 // window, or drawn in characters in a terminal (at).
-func writeChatFrame(out *strings.Builder, h *hudCanvas, top, left, cols, rows int) {
+func writeChatFrame(out *strings.Builder, h *hudCanvas, top, left, cols, rows, divider int) {
 	if pixelMode {
-		writePixelChat(out, top, left, cols, rows)
+		// The content's rows: the window frames them half a row out, as
+		// every frame round content (hud.ContentFrameOf); divider: the
+		// content's row (1-based) a line goes across the top of.
+		writePixelChat(out, top+1, left, cols, rows-2, divider)
 		return
 	}
 	_, _, seed := FrameSeeds()
@@ -230,21 +247,25 @@ func statusHeading(msg string) string {
 }
 
 // statusPadCols is the room left and right of the status text in its frame.
-const statusPadCols = 4
+const statusPadCols = 3
 
 // writePixelStatusFrame puts the status lines (say "…", connecting and the
 // like), nLines of them width wide from startRow, in a frame of the chat's
 // kind: some room round the text, and no wider or taller than the window.
-func writePixelStatusFrame(out *strings.Builder, h *hudCanvas, width, nLines, startRow, cols, rows int) {
+// It returns the frame's rect (its lines' cells in a terminal, the content's
+// columns in the window); divider is the line (0-based) a line goes across
+// the top of in the window (-1 none; a terminal draws its own).
+func writePixelStatusFrame(out *strings.Builder, h *hudCanvas, width, nLines, startRow, cols, rows, divider int) (top, left, frameCols, frameRows int) {
 	const padCols, padRows, minCols = statusPadCols, 1, 30
-	frameCols := min(max(minCols, width+2*padCols), cols-2*termSide)
-	frameRows := min(nLines+2*padRows, rows-2*termBorder)
+	frameCols = min(max(minCols, width+2*padCols), cols-2*termSide)
+	frameRows = min(nLines+2*padRows, rows-2*termBorder)
 	if frameCols < 4 || frameRows < 1 {
-		return
+		return 0, 0, 0, 0
 	}
-	left := 1 + (cols-frameCols)/2
-	top := max(1, startRow-padRows)
-	writeChatFrame(out, h, top, left, frameCols, frameRows)
+	left = 1 + (cols-frameCols)/2
+	top = max(1, startRow-padRows)
+	writeChatFrame(out, h, top, left, frameCols, frameRows, divider+1)
+	return top, left, frameCols, frameRows
 }
 
 // Accents returns our accent colour and the peer's.
@@ -376,8 +397,8 @@ func PixelFrame(id uint64) *codec.TextFrame {
 
 // writePixelPane marks a video pane in the output: OSC 5577 with its rect
 // (1-based cells), the id of its frame and whose it is (L ours, R the
-// peer's).
-func writePixelPane(out *strings.Builder, frame *codec.TextFrame, top, left, cols, rows int, remote bool) {
+// peer's), and, for a menu in it, the row a line goes across the top of.
+func writePixelPane(out *strings.Builder, frame *codec.TextFrame, top, left, cols, rows int, remote bool, divider int) {
 	pixelFrames.Lock()
 	if pixelFrames.frames == nil {
 		pixelFrames.frames = map[uint64]*codec.TextFrame{}
@@ -390,6 +411,10 @@ func writePixelPane(out *strings.Builder, frame *codec.TextFrame, top, left, col
 	kind := "L"
 	if remote {
 		kind = "R"
+	}
+	if divider > 0 { // a line across, along the top of its row divider (1-based): a menu's
+		fmt.Fprintf(out, "\x1b]5577;%d;%d;%d;%d;%d;%s;%d\x07", top, left, cols, rows, id, kind, divider)
+		return
 	}
 	fmt.Fprintf(out, "\x1b]5577;%d;%d;%d;%d;%d;%s\x07", top, left, cols, rows, id, kind)
 }
