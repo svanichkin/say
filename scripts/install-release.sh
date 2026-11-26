@@ -95,6 +95,10 @@ main() {
 		binary_name="say"
 	fi
 
+	# Linux on x86-64 with AVX2 takes the build for it (x86-64-v3).
+	if [ "$os" = "linux" ] && [ "$arch" = "amd64" ] && grep -qw avx2 /proc/cpuinfo 2>/dev/null; then
+		arch="amd64-v3"
+	fi
 	archive_name="say-${os}-${arch}.${archive_ext}"
 	download_url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
 

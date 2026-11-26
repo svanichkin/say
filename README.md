@@ -41,7 +41,9 @@ Download your system's build from
 - **Windows**: `say-windows-amd64.tar.gz`. A double click opens the window,
   and `say` typed in a console works in it.
 - **Linux** (amd64, arm64), **FreeBSD**, **OpenBSD**, **NetBSD** (amd64) and
-  **Plan 9** (amd64, 386, arm): a `say` binary.
+  **Plan 9** (amd64, 386, arm): a `say` binary. On Linux, `amd64` runs on any
+  x86-64 CPU and `amd64-v3` is faster on one with AVX2 (the install script
+  picks).
 
 You can also use the install script, which puts `say` on your `PATH`:
 

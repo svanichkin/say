@@ -49,17 +49,30 @@ jobs:
         run: SKIP_CROSS=1 bash scripts/check.sh
 
   build_linux:
-    name: Build Linux
+    name: Build Linux (${{ matrix.name }})
     # Native runners: cgo (miniaudio) needs a C compiler for the target.
     runs-on: ${{ matrix.os }}
     needs: build_check
     strategy:
       fail-fast: false
       matrix:
+        # amd64 twice: for any x86-64 CPU (v1: the C code too, not
+        # ubuntu-latest's GCC, which builds for x86-64-v3 and marks the
+        # binary so: older CPUs refuse it, issue 14), and for CPUs with AVX2
+        # (v3: Go's code and miniaudio's). The install script picks.
         include:
           - arch: amd64
-            os: ubuntu-latest
+            name: amd64
+            os: ubuntu-24.04
+            goamd64: v1
+            cflags: -O2 -march=x86-64 -mtune=generic
+          - arch: amd64
+            name: amd64-v3
+            os: ubuntu-24.04
+            goamd64: v3
+            cflags: -O2 -march=x86-64-v3
           - arch: arm64 # PinePhone and other ARM boards
+            name: arm64
             os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -81,19 +94,24 @@ jobs:
         with:
           go-version: '1.x'
 
-      - name: Build linux/${{ matrix.arch }}
+      - name: Build linux/${{ matrix.name }}
+        env:
+          GOAMD64: ${{ matrix.goamd64 }}
+          CGO_CFLAGS: ${{ matrix.cflags }}
         run: |
           export GOOS=linux
           export GOARCH=${{ matrix.arch }}
           export CGO_ENABLED=1
+          [ -n "$GOAMD64" ] || unset GOAMD64
+          [ -n "$CGO_CFLAGS" ] || unset CGO_CFLAGS
           go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o say .
-          tar czvf say-linux-${{ matrix.arch }}.tar.gz say
+          tar czvf say-linux-${{ matrix.name }}.tar.gz say
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: say-linux-${{ matrix.arch }}
-          path: say-linux-${{ matrix.arch }}.tar.gz
+          name: say-linux-${{ matrix.name }}
+          path: say-linux-${{ matrix.name }}.tar.gz
 
   build_windows:
     name: Build Windows
