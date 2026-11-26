@@ -279,6 +279,7 @@ jobs:
             ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+            git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
             export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
@@ -301,6 +302,7 @@ jobs:
             ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+            git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
             export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
@@ -315,7 +317,7 @@ jobs:
         with:
           envs: 'BABE_SSH_KEY REF OS'
           usesh: true
-          prepare: /usr/sbin/pkg_add go git
+          prepare: /usr/sbin/pkg_add pkgin; pkgin -y install go git
           run: |
             mkdir -p ~/.ssh
             printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
@@ -323,6 +325,7 @@ jobs:
             ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+            git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
             export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
