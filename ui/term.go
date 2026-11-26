@@ -1034,8 +1034,23 @@ func renderTermFrames() {
 	if havePeerViewport {
 		broadcastViewportSize(peerCols, peerRows)
 	}
-	var data string
-	kind := "call"
+	data, kind := screenData(cols, rows)
+	if lastScreenLogged.Swap(kind) != kind { // DEBUG-TEMP: what the screen shows, when it changes
+		log.Printf("[debug] screen %dx%d: %s", cols, rows, kind)
+	}
+	if data != "" {
+		if termHUD {
+			data = onBlack(data)
+		}
+		data += gfxOutput(cols, rows, strings.Contains(data, "\x1b[2J"))
+		enqueueFrame(&device.TerminalFrame{Data: data})
+	}
+}
+
+// screenData is the screen as it is now, cols x rows: the call, home or
+// the status, and which of them (for the log).
+func screenData(cols, rows int) (data, kind string) {
+	kind = "call"
 	if ChatConnected() {
 		data = renderChatScreen(cols, rows)
 		if data == "" {
@@ -1055,16 +1070,7 @@ func renderTermFrames() {
 		kind = "status: " + currentStatusMessage()
 		data = renderConnectionScreen(cols, rows, currentStatusMessage())
 	}
-	if lastScreenLogged.Swap(kind) != kind { // DEBUG-TEMP: what the screen shows, when it changes
-		log.Printf("[debug] screen %dx%d: %s", cols, rows, kind)
-	}
-	if data != "" {
-		if termHUD {
-			data = onBlack(data)
-		}
-		data += gfxOutput(cols, rows, strings.Contains(data, "\x1b[2J"))
-		enqueueFrame(&device.TerminalFrame{Data: data})
-	}
+	return data, kind
 }
 
 const (

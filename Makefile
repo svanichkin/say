@@ -8,9 +8,14 @@ VERSION ?= $(shell git describe --tags --dirty --always 2>/dev/null)
 # GOTAGS=debug makes a debug build (see README, "Debug build").
 GOTAGS ?=
 BUILD_FLAGS := -tags "$(GOTAGS)"
-ifneq ($(strip $(VERSION)),)
-	BUILD_FLAGS += -ldflags "-X main.version=$(VERSION)"
+# A release build has no debugging information (a third of the size; a
+# crash still names its functions); a debug build keeps it for a debugger.
+LDFLAGS := -X main.version=$(VERSION)
+ifeq ($(filter debug,$(GOTAGS)),)
+	BUILD_FLAGS += -trimpath
+	LDFLAGS += -s -w
 endif
+BUILD_FLAGS += -ldflags "$(LDFLAGS)"
 
 HOST_OS := $(shell $(GO) env GOOS)
 HOST_ARCH := $(shell $(GO) env GOARCH)
@@ -31,7 +36,7 @@ TARGETS := \
 	plan9/386 \
 	plan9/arm
 
-.PHONY: build debug app notarize icons install-desktop run test tidy fmt clean build-all $(TARGETS:%=build-%)
+.PHONY: build debug app notarize shots icons install-desktop run test tidy fmt clean build-all $(TARGETS:%=build-%)
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -61,6 +66,13 @@ install-desktop:
 # its window. GOTAGS=debug for a debug build.
 app: build
 	sh scripts/macos-app.sh $(HOST_BIN) "$(VERSION)" $(BIN_DIR)
+
+# shots: the documentation's screenshots into docs/images, the terminal's
+# and the window's (shots_test.go): again after the interface changed.
+# SELF and PEER are the two cameras' pictures (not in the repository).
+shots:
+	$(GO) test -count=1 -run TestShots . -args -shots docs/images -self "$(SELF)" -peer "$(PEER)"
+	$(GO) test -count=1 -run TestShots . -args -shots docs/images -self "$(SELF)" -peer "$(PEER)" -gui
 
 # notarize: Say.app signed with the Developer ID, notarized by Apple, the
 # ticket stapled, packed into bin/Say-macos.zip (scripts/notarize.sh).

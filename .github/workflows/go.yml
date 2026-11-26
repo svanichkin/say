@@ -85,7 +85,7 @@ jobs:
           export GOOS=linux
           export GOARCH=${{ matrix.arch }}
           export CGO_ENABLED=1
-          go build -v -o say .
+          go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o say .
           tar czvf say-linux-${{ matrix.arch }}.tar.gz say
 
       - name: Upload artifact
@@ -127,7 +127,7 @@ jobs:
           CGO_CFLAGS: -Wno-stringop-overread
         run: |
           go env
-          go build -v -o say.exe .
+          go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o say.exe .
           ls -la
           tar czvf say-windows-amd64.tar.gz say.exe
 
@@ -139,8 +139,8 @@ jobs:
 
   build_darwin:
     name: Build macOS
-    # Both architectures here: their binaries, and Say.app made of the two
-    # (universal), signed with the Developer ID and notarized when the
+    # Both architectures here: their binaries (the terminal utility) and a
+    # Say.app of each, signed with the Developer ID and notarized when the
     # secrets are there (as LVNC's):
     #   DEVELOPER_ID_P12           base64 of the "Developer ID Application" certificate and key (.p12)
     #   DEVELOPER_ID_P12_PASSWORD  its password
@@ -176,16 +176,17 @@ jobs:
       - name: Build darwin/amd64 and darwin/arm64
         run: |
           for arch in amd64 arm64; do
-            GOOS=darwin GOARCH=$arch CGO_ENABLED=1 go build -v -ldflags "-X main.version=$GITHUB_REF_NAME" -o say-$arch .
-            cp say-$arch say
-            tar czvf say-darwin-$arch.tar.gz say
+            mkdir -p bin-$arch
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=1 go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o bin-$arch/say .
+            tar czvf say-darwin-$arch.tar.gz -C bin-$arch say
           done
-          lipo -create -output say say-amd64 say-arm64
 
-      - name: Make Say.app
+      - name: Make Say.app for each
         run: |
           go run ./cmd/sayicon -out assets/icon -gui "$RUNNER_TEMP/gui-icon"
-          sh scripts/macos-app.sh say "$GITHUB_REF_NAME" dist
+          for arch in amd64 arm64; do
+            sh scripts/macos-app.sh bin-$arch/say "$GITHUB_REF_NAME" dist-$arch
+          done
 
       - name: Import the signing certificate
         if: env.HAS_CERT == 'true'
@@ -223,13 +224,17 @@ jobs:
           else
             export SAY_SIGN_ONLY=1
           fi
-          bash scripts/notarize.sh dist/Say.app
+          for arch in amd64 arm64; do
+            bash scripts/notarize.sh dist-$arch/Say.app
+          done
           rm -f "$RUNNER_TEMP/notary.p8"
 
       - name: Pack Say.app
         run: |
-          [ -f dist/Say-macos.zip ] || ditto -c -k --keepParent dist/Say.app dist/Say-macos.zip
-          mv dist/Say-macos.zip say-macos-universal.zip
+          for arch in amd64 arm64; do
+            [ -f dist-$arch/Say-macos.zip ] || ditto -c -k --keepParent dist-$arch/Say.app dist-$arch/Say-macos.zip
+            mv dist-$arch/Say-macos.zip say-macos-$arch.zip
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -238,7 +243,8 @@ jobs:
           path: |
             say-darwin-amd64.tar.gz
             say-darwin-arm64.tar.gz
-            say-macos-universal.zip
+            say-macos-amd64.zip
+            say-macos-arm64.zip
 
   build_plan9:
     name: Build Plan 9
@@ -274,7 +280,7 @@ jobs:
           export GOOS=plan9
           export GOARCH=${{ matrix.arch }}
           export CGO_ENABLED=0
-          go build -v -o say .
+          go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o say .
           tar czvf say-plan9-${{ matrix.arch }}.tar.gz say
 
       - name: Upload artifact

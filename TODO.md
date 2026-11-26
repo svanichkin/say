@@ -184,3 +184,24 @@ works in this terminal; on Plan 9, what vt passes.
 7. Tray, hidden window, single start, autostart, `say://`.
 8. Encrypted history, keychain, biometrics.
 9. macOS Contacts.
+
+## Messages
+
+- The chat shows who wrote each message: the sender's nickname (from their
+  card, else their name) before the text, ours too.
+- A messages folder, chosen in the settings: the messages of a call are
+  written there as they come and go, and Say sends what appears there (a file
+  dropped in by another program goes to the peer).
+
+## Group calls
+
+- Calling from a call: someone called during a call joins it once they
+  answer. The handshake gives the new member the addresses of those already
+  in the call; they exchange keys, then one side of each new pair calls the
+  other. Each member then sends their stream to the others they are paired
+  with and takes theirs, a star of pairs, no server in the middle.
+- The interface: calling someone from within a call (the contacts and the
+  address field reachable from the call view), the members shown, and taking
+  out of the call a member we called and who joined.
+- The chat goes to every member, not to one peer; with the senders' names
+  (Messages, above).
