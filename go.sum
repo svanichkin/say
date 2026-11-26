@@ -57,6 +57,8 @@ github.com/svanichkin/Babe v0.2.2 h1:l7Ou74yXjrdZ3OZpH2eJ4znJDuHPYZPWzvKNoCG1Ps8
 github.com/svanichkin/Babe v0.2.2/go.mod h1:RuYQum1v9XcQrpP0EqUrPmEPnn/aWUTRAgvVu7VGW2A=
 github.com/svanichkin/gocam v0.4.0 h1:DhiOmhx9/gGKpF0CRPmdyCccpf+TpBkgYpMNnDMSfYo=
 github.com/svanichkin/gocam v0.4.0/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
+github.com/svanichkin/gocam v0.4.1 h1:whoP1zmmdNUiGLXkhQgcx8dSMNDicXO45dG0ZrJmpTk=
+github.com/svanichkin/gocam v0.4.1/go.mod h1:H4/ET2fSIT1Y64oG38sdXcupBc9ZeNBZtcjr0vtICos=
 github.com/svanichkin/ygg v0.6.6 h1:LmJADEochEjf8DVnjze/DEAGAmDRE46uRETqOUURtjc=
 github.com/svanichkin/ygg v0.6.6/go.mod h1:JayB2Ia3RCVFWZHRTyfyi+ijExQmcGsdv+CgqqbIvj4=
 github.com/thesyncim/gopus v0.2.2 h1:Ib8mmsLBon6ylXVk6p7fLxuZNnBzfPA4wT4GBzfWqCI=
