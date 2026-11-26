@@ -40,7 +40,8 @@ Download your system's build from
   utility alone.
 - **Windows**: `say-windows-amd64.tar.gz`. A double click opens the window,
   and `say` typed in a console works in it.
-- **Linux** (amd64, arm64) and **Plan 9** (amd64, 386, arm): a `say` binary.
+- **Linux** (amd64, arm64), **FreeBSD**, **OpenBSD**, **NetBSD** (amd64) and
+  **Plan 9** (amd64, 386, arm): a `say` binary.
 
 You can also use the install script, which puts `say` on your `PATH`:
 
