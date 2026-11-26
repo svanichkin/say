@@ -280,7 +280,7 @@ jobs:
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
             git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
-            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
+            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin:$(ls -d /usr/pkg/go*/bin 2>/dev/null | tail -1) GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
 
@@ -303,7 +303,7 @@ jobs:
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
             git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
-            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
+            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin:$(ls -d /usr/pkg/go*/bin 2>/dev/null | tail -1) GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
 
@@ -326,7 +326,7 @@ jobs:
             git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
             git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
             git config --global --add safe.directory '*' # the checkout is the runner's, not this machine's user's
-            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
+            export PATH=$PATH:/usr/local/go/bin:/usr/pkg/bin:$(ls -d /usr/pkg/go*/bin 2>/dev/null | tail -1) GOPRIVATE=github.com/svanichkin/Babe GOTOOLCHAIN=auto CGO_ENABLED=1
             go build -v -trimpath -ldflags "-s -w -X main.version=$REF" -o say .
             tar czvf say-$OS-amd64.tar.gz say
 
