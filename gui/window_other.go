@@ -11,3 +11,9 @@ func Available() bool { return false }
 func Run(app func() error, in Input) error {
 	return errors.New("the pixel window (-gui) is not available on this system yet")
 }
+
+// HideWindow and ShowWindow do nothing here (no window to hide).
+func HideWindow() {}
+
+// ShowWindow: see HideWindow.
+func ShowWindow() {}

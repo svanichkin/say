@@ -38,7 +38,10 @@ type renderer struct {
 	shapes     map[uint32]*ebiten.Image
 	paneImgs   map[[2]int]*paneImage
 	scan       *ebiten.Image // the effect's scan lines (scanImage)
+	dots       *ebiten.Image // a tile of the text windows' dots (dotImage)
+	dotsOf     int           // the cells' width it is for
 	scanOf     effectScan
+	scanCW     int // the cells' width scan was made for (the grid follows it)
 	white      *ebiten.Image
 
 	static     *ebiten.Image // the cells and the text, redrawn when they change
@@ -107,7 +110,7 @@ func (g *game) Draw(dst *ebiten.Image) {
 		g.drawnVersion, g.drawnW, g.drawnH = version, b.Dx(), b.Dy()
 		g.prepareGlow(b.Dx(), b.Dy())
 		if changed || g.r.static == nil {
-			g.drawStatic(b.Dx(), b.Dy(), cols, cells)
+			g.drawStatic(b.Dx(), b.Dy(), cols, cells, panes)
 		}
 		dst.Fill(defaultBg)
 		g.drawPanes(dst, panes)
@@ -468,7 +471,7 @@ func alongOutline(ol []pt, at float64) (x, y, dx, dy float64, ok bool) {
 // drawStatic redraws the cells and the text into their own layer (and
 // their glow into its own): a frame where only the video changed just lays
 // it over the video.
-func (g *game) drawStatic(w, h, cols int, cells []Cell) {
+func (g *game) drawStatic(w, h, cols int, cells []Cell, panes []Pane) {
 	r := &g.r
 	gw, gh := r.glow.Bounds().Dx(), r.glow.Bounds().Dy()
 	r.static = grown(r.static, w, h)
@@ -478,6 +481,7 @@ func (g *game) drawStatic(w, h, cols int, cells []Cell) {
 	glow := r.glow
 	r.glow = r.staticGlow // their glow goes to its own layer
 	g.drawCells(r.static, cols, cells)
+	g.drawDots(r.static, cols, cells, panes) // under the text (dots.go)
 	g.drawText(r.static, cols, cells)
 	r.glow = glow
 }

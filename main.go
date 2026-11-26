@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/svanichkin/say/network"
 	tcpsignal "github.com/svanichkin/say/network/tcp"
 	udptransport "github.com/svanichkin/say/network/udp"
+	"github.com/svanichkin/say/tones"
 	"github.com/svanichkin/say/ui"
 	"golang.org/x/term"
 )
@@ -47,7 +49,7 @@ func main() {
 		app := run
 		run = func() error {
 			return gui.Run(app, gui.Input{
-				Key: ui.KeyInput, Paste: ui.PasteInput, Click: ui.ClickAt, Interrupt: ui.Interrupt,
+				Key: ui.KeyInput, Paste: ui.PasteInput, Click: ui.ClickAt, Hover: ui.HoverAt, Interrupt: ui.Interrupt,
 				Resized: ui.RequestRedraw, Detail: ui.StepVideoDetail,
 				Frame: ui.PixelFrame, FrameRGB: ui.FrameRGB, FrameRGBRow: ui.FrameRGBRow, FrameY: ui.FrameY,
 				Accents: ui.Accents, Chat: ui.ChatAccent, Brick: ui.BrickColour, Mono: ui.AccentMono, Seeds: ui.FrameSeeds, Latency: ui.PeerLatencySnapshot,
@@ -333,6 +335,7 @@ func run() (err error) {
 		log.SetOutput(logs.Tap(io.Discard))
 	}
 	ui.SetStatusMessage(initialStatus)
+	device.WarmTones(tones.Rate) // a call's ring starts at once
 	defer func() {
 		if err != nil {
 			ui.ShowHome(false) // the reason, not the menu
@@ -349,7 +352,18 @@ func run() (err error) {
 	// home screen comes after it.
 	homeSide := newHomeApp(opts.ConfigPath, opts.ContactsDir, "", opts.ListenPort)
 	ui.SetHangup(homeSide.hangup)
-	ui.SetHome(homeSide.root, homeSide.paste, appCancel)
+	// The window's close button hides it (gui), and so does x on the first
+	// column: Say goes on, waiting for calls; a call coming in shows it
+	// again. Cmd+Q, Ctrl+C quit; in a terminal (and Plan 9's window) x does.
+	quit := appCancel
+	if ui.PixelMode() {
+		ui.SetShowWindow(gui.ShowWindow)
+		if runtime.GOOS != "plan9" {
+			quit = gui.HideWindow
+		}
+	}
+	ui.SetHome(homeSide.root, homeSide.paste, quit)
+	homeSide.initTray(trayPath(os.Args[1:]), appCancel) // Say's icon in the Dock or the tray (tray.go)
 	if opts.Mode != conf.ModeClient {
 		ui.ShowHome(true)
 	}
@@ -607,14 +621,20 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 		// each) and take no context: run them aside so Ctrl-C does not wait
 		// for them. A connection that still comes up afterwards is hung up.
 		type dialResult struct {
-			stop func() error
-			done <-chan struct{}
-			err  error
+			stop   func() error
+			done   <-chan struct{}
+			hungUp func() bool
+			err    error
 		}
 		dialed := make(chan dialResult, 1)
+		ring := &ringer{}
 		go func() {
-			stop, done, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), host, port, termSync, mediaFactory, dial)
-			dialed <- dialResult{stop, done, err}
+			stop, done, hungUp, err := tcpsignal.StartSignalClientTCP(ctx, conf.HostnameOr("me"), host, port, termSync, mediaFactory, dial, func() {
+				ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.RingingThere))
+				ring.start() // it rings there
+			})
+			ring.end()
+			dialed <- dialResult{stop, done, hungUp, err}
 		}()
 		var res dialResult
 		dialStarted := time.Now() // DEBUG-TEMP
@@ -643,6 +663,10 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 				return ctx.Err()
 			case <-connDone:
 				stopClient()
+				if res.hungUp() { // hung up, not lost: no redial, the home screen
+					log.Printf("[p2p] %s hung up: the call is over", target)
+					return nil
+				}
 				log.Printf("[p2p] connection to %s lost", target)
 				// DEBUG-TEMP: why is in the "control stream ... ended" line just before.
 				log.Printf("[debug] redial: the call lasted %v; dialing again now", time.Since(established).Round(time.Millisecond))
@@ -656,6 +680,11 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 			// Redialing cannot help until one side is updated.
 			log.Printf("[p2p] %s: %v", target, err)
 			ui.SetStatusMessage(err.Error())
+			return err
+		}
+		if errors.Is(err, tcpsignal.ErrDeclined) || errors.Is(err, tcpsignal.ErrNoAnswer) {
+			// Not taken: no redial.
+			log.Printf("[p2p] %s: %v", target, err)
 			return err
 		}
 		if errors.Is(err, tcpsignal.ErrPeerBusy) {
@@ -691,21 +720,25 @@ func autodial(ctx context.Context, host string, port int, termSync *tcpsignal.Te
 func dialOnce(ctx context.Context, d contacts.Device, termSync *tcpsignal.TermSizeSync, mediaFactory tcpsignal.MediaSessionFactory, dial tcpsignal.TCPDialFunc) error {
 	const tries = 3
 	target := formatPeerAddr(d.Host, d.Port)
+	ring := &ringer{}
+	ring.start() // from the first moment of «Вызов» to the answer, or the end
+	defer ring.end()
 	for attempt := 1; ; attempt++ {
-		if attempt == 1 {
-			ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.Punching))
-		} else {
-			ui.SetStatusMessage(lang.T(lang.Redial) + "\n" + target + "\n" + lang.T(lang.Attempt, attempt))
-		}
+		// One call to the user: its tries are not shown (a mesh route is
+		// often found only on the second).
+		ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.Punching))
 		type dialResult struct {
-			stop func() error
-			done <-chan struct{}
-			err  error
+			stop   func() error
+			done   <-chan struct{}
+			hungUp func() bool
+			err    error
 		}
 		dialed := make(chan dialResult, 1)
 		go func() {
-			stop, done, err := tcpsignal.StartSignalClientTCP(conf.HostnameOr("me"), d.Host, d.Port, termSync, mediaFactory, dial)
-			dialed <- dialResult{stop, done, err}
+			stop, done, hungUp, err := tcpsignal.StartSignalClientTCP(ctx, conf.HostnameOr("me"), d.Host, d.Port, termSync, mediaFactory, dial, func() {
+				ui.SetStatusMessage(lang.T(lang.Dialing) + "\n" + target + "\n" + lang.T(lang.RingingThere))
+			})
+			dialed <- dialResult{stop, done, hungUp, err}
 		}()
 		var res dialResult
 		select {
@@ -719,6 +752,7 @@ func dialOnce(ctx context.Context, d contacts.Device, termSync *tcpsignal.TermSi
 		case res = <-dialed:
 		}
 		if res.err == nil {
+			ring.end() // answered: the call's sound
 			log.Printf("[p2p] dial established to %s", target)
 			select {
 			case <-ctx.Done():
@@ -734,8 +768,7 @@ func dialOnce(ctx context.Context, d contacts.Device, termSync *tcpsignal.TermSi
 		case errors.As(res.err, &incompatible):
 			ui.SetStatusMessage(res.err.Error())
 			return res.err
-		case errors.Is(res.err, tcpsignal.ErrPeerBusy):
-			ui.SetStatusMessage(lang.T(lang.LineBusy) + "\n" + target)
+		case failed(res.err): // busy, declined, unanswered: the home screen at once
 			return res.err
 		case attempt >= tries:
 			ui.SetStatusMessage(lang.T(lang.NoCarrier) + "\n" + target + "\n" + res.err.Error())
@@ -748,6 +781,39 @@ func dialOnce(ctx context.Context, d contacts.Device, termSync *tcpsignal.TermSi
 		case <-time.After(time.Duration(attempt) * time.Second):
 		}
 	}
+}
+
+// ringer plays the ring for the caller: start begins it (once), end stops
+// it for good; either may come from another goroutine, end before start.
+type ringer struct {
+	mu   sync.Mutex
+	stop func()
+	done bool
+}
+
+func (r *ringer) start() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.done && r.stop == nil {
+		r.stop = device.PlayTone(tones.Ring(), tones.Rate, true)
+	}
+}
+
+func (r *ringer) end() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.done = true
+	if r.stop != nil {
+		r.stop()
+		r.stop = nil
+	}
+}
+
+// failed reports whether a call was not taken there: the line busy, the
+// call declined or unanswered. No redial: the home screen comes back at
+// once.
+func failed(err error) bool {
+	return errors.Is(err, tcpsignal.ErrPeerBusy) || errors.Is(err, tcpsignal.ErrDeclined) || errors.Is(err, tcpsignal.ErrNoAnswer)
 }
 
 func appVersion() string {

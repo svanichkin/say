@@ -37,11 +37,14 @@ func sendCard(conn net.Conn) {
 	}
 	data := mine()
 	if len(data) == 0 || len(data) > maxCard {
+		log.Printf("[p2p] our card not sent: we have none (%d bytes)", len(data))
 		return
 	}
 	if err := writeFrameSafe(conn, frameCard, data); err != nil {
 		log.Printf("[p2p] our card not sent: %v", err)
+		return
 	}
+	log.Printf("[p2p] our card sent")
 }
 
 // receiveCard hands a peer's card on, aside (writing it is the book's);

@@ -50,3 +50,44 @@ func TestCallKeys(t *testing.T) {
 		t.Fatal("typing is not the chat's, or the menu stayed")
 	}
 }
+
+// The pointer over a video view shows its menu, leaving it hides the menu
+// it showed; a menu opened by keys stays.
+func TestHoverMenus(t *testing.T) {
+	SetChatActions(func(string) {}, func(string) {})
+	defer func() { SetChatActions(nil, nil); setSelfMenu(false); HoverAt(0, 0) }()
+	cols, rows := 120, 40
+	broadcastTermSize(cols, rows)
+	renderChatScreen(cols, rows)
+	var self, peer [2]int
+	for r := 1; r <= rows; r++ {
+		for c := 1; c <= cols; c++ {
+			switch viewportForPoint(c, r) {
+			case viewportSelf:
+				self = [2]int{c, r}
+			case viewportPeer:
+				peer = [2]int{c, r}
+			}
+		}
+	}
+	if self == ([2]int{}) || peer == ([2]int{}) {
+		t.Fatal("no views on the screen")
+	}
+	HoverAt(self[0], self[1])
+	if !selfMenuOpen() {
+		t.Fatal("over our view: no menu")
+	}
+	HoverAt(peer[0], peer[1])
+	if !peerMenuOpen() {
+		t.Fatal("over the peer's view: not its menu")
+	}
+	HoverAt(0, 0)
+	if menuOpen() {
+		t.Fatal("out of the window: the menu stayed")
+	}
+	callKey(keys.Left) // by keys: the pointer moving off does not close it
+	HoverAt(1, 1)
+	if !selfMenuOpen() {
+		t.Fatal("a menu opened by keys closed")
+	}
+}

@@ -250,7 +250,7 @@ func writeMenu(out *strings.Builder, top, left int, slot slotSize, items []menuI
 		text = truncateWidth(text, max(1, slot.cols-2*homePadCols()))
 		x := left + (slot.cols-displayWidth(text))/2
 		if i == cur {
-			homePut(out, row, left, right, blank, homeChosen(accent))
+			homePut(out, row, left, right, blank, homeChosen(homePlate(it, accent)))
 		}
 		homePut(out, row, x, right, text, style)
 		putTick(out, it, text, row, x, right, style, i == cur)

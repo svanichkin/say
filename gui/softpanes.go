@@ -46,6 +46,8 @@ type softPane struct {
 	video   []byte           // it rasterised (RGBA, vw x vh)
 	vw, vh  int
 	place   image.Rectangle // where the picture goes in the pane
+	dotBox  image.Rectangle // a text window's: the box round its inner line (dots.go)
+	dotMask *image.Alpha    // inside the inner line, over dotBox
 }
 
 func newSoftPixels(in Input, f *softFont, cw, ch int) *softPixels {
@@ -173,6 +175,10 @@ func (s *softPixels) layout(gr hud.Grid, scene hud.Scene, panes []Pane) {
 		{ // what is inside is cut to the inner line (the video, a menu's cells)
 			sp.mask = polygonMask(fr.Inner, sp.bounds)
 		}
+		if textPane(p) { // the dots behind the text, to the inner line
+			sp.dotBox = polyBounds(fr.Inner).Intersect(image.Rect(0, 0, s.w, s.h))
+			sp.dotMask = polygonMask(fr.Inner, sp.dotBox)
+		}
 		if fr.Label != nil {
 			sp.label = polygonBounds(fr.Label).Intersect(image.Rect(0, 0, s.w, s.h))
 			sp.labelAt = image.Pt(int(math.Round(fr.LabelX)), int(math.Round(fr.LabelY)))
@@ -196,6 +202,25 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 	for y := r.Min.Y; y < r.Max.Y; y++ {
 		o := (y*s.w + r.Min.X) * softBytes
 		copy(s.out[o:o+r.Dx()*softBytes], base.pix[o:o+r.Dx()*softBytes])
+	}
+	step, row, size := dotGrid(s.cw)
+	for _, sp := range s.panes { // the text windows' dots, on the background only
+		if sp.dotMask == nil {
+			continue
+		}
+		dr := sp.dotBox.Intersect(r)
+		for y := dr.Min.Y; y < dr.Max.Y; y++ {
+			for x := dr.Min.X; x < dr.Max.X; x++ {
+				if !dotAt(x, y, step, row, size) || sp.dotMask.Pix[(y-sp.dotBox.Min.Y)*sp.dotMask.Stride+x-sp.dotBox.Min.X] != 255 {
+					continue
+				}
+				o := (y*s.w + x) * softBytes
+				if s.out[o] == defaultBg.B && s.out[o+1] == defaultBg.G && s.out[o+2] == defaultBg.R {
+					g := paneDotGrey(sp.p)
+					s.out[o], s.out[o+1], s.out[o+2] = g, g, g
+				}
+			}
+		}
 	}
 	for _, sp := range in {
 		if sp.mask != nil {
@@ -223,11 +248,13 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 		}
 		pr := sp.place.Intersect(r)
 		sc, scanOn := currentScan()
+		step, row, size := dotGrid(s.cw)
+		lift := int(sc.dots * 256)
 		for y := pr.Min.Y; y < pr.Max.Y; y++ {
 			vy := (y - sp.place.Min.Y) * sp.vh / sp.place.Dy()
 			// The effect's scan lines, in the screen's pixels.
 			keep := 256
-			if scanOn && (y-sp.place.Min.Y)%sc.period < sc.dark {
+			if scanOn && sc.dots == 0 && (y-sp.place.Min.Y)%sc.period < sc.dark {
 				keep = int(256 * (1 - scanAlpha(sc, (y-sp.place.Min.Y)%sc.period)))
 			}
 			for x := pr.Min.X; x < pr.Max.X; x++ {
@@ -237,10 +264,16 @@ func (s *softPixels) compose(base *softRenderer, r image.Rectangle) {
 				}
 				vx := (x - sp.place.Min.X) * sp.vw / sp.place.Dx()
 				v := sp.video[(vy*sp.vw+vx)*4:]
+				c := [3]int{int(v[2]) * keep >> 8, int(v[1]) * keep >> 8, int(v[0]) * keep >> 8}
+				if scanOn && sc.dots > 0 && dotAt(x, y, step, row, size) { // the grid's dot: toward mid grey
+					for i := range c {
+						c[i] += (128 - c[i]) * lift >> 8
+					}
+				}
 				o := (y*s.w + x) * softBytes
-				s.out[o] = blend(s.out[o], byte(int(v[2])*keep>>8), m)
-				s.out[o+1] = blend(s.out[o+1], byte(int(v[1])*keep>>8), m)
-				s.out[o+2] = blend(s.out[o+2], byte(int(v[0])*keep>>8), m)
+				s.out[o] = blend(s.out[o], byte(c[0]), m)
+				s.out[o+1] = blend(s.out[o+1], byte(c[1]), m)
+				s.out[o+2] = blend(s.out[o+2], byte(c[2]), m)
 			}
 		}
 	}

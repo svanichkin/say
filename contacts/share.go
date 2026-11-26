@@ -24,20 +24,41 @@ type Pending struct {
 	file string
 }
 
-// MyCard is our own card as sent in a call (nil: we have none).
+// MyCard is our own card as sent in a call. Without one, a card of this
+// device alone, its nickname the computer's name: the peer has something
+// to confirm all the same.
 func (s *Store) MyCard() []byte {
 	me := s.Snapshot().Me
 	if me == nil {
-		return nil
+		me = &Person{Nick: hostName()}
 	}
 	c := &card{}
 	c.set("VERSION", "3.0")
-	p := &Person{Given: me.Given, Family: me.Family, Middle: me.Middle, Nick: me.Nick, fn: me.Name(), c: c, Devices: me.Devices}
+	p := &Person{Given: me.Given, Family: me.Family, Middle: me.Middle, Nick: me.Nick, fn: me.Name(), c: c,
+		Devices: append([]Device(nil), me.Devices...)}
+	// The card sent always has this device, the one calling: the peer keeps
+	// a card from an unknown address only with that address on it (a card
+	// in the system's book, or one that did not keep it, may lack it).
+	s.mu.Lock()
+	s.putHere(p)
+	s.mu.Unlock()
 	writeNames(c, p)
 	writeDevices(c, p)
 	var b strings.Builder
 	c.write(&b)
 	return []byte(b.String())
+}
+
+// hostName is the computer's name, its local domain off ("Say" without one).
+func hostName() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "Say"
+	}
+	for _, d := range []string{".local", ".lan", ".home"} {
+		h = strings.TrimSuffix(h, d)
+	}
+	return h
 }
 
 // maxPending is how many received cards wait at most: calls from many
@@ -104,18 +125,25 @@ func (s *Store) Received(from string, data []byte) (name, label string) {
 			known = q
 		}
 		s.mu.Unlock()
+		log.Printf("[contacts] card from %s: %s's, what it adds written", from, known.Display(display))
 		return known.Display(display), label
 	}
 	full := len(s.pending) >= maxPending
 	s.mu.Unlock()
 	name = p.Display(display)
-	if !sent || full {
-		return name, label // not kept: not its own device's card, or too many waiting
+	switch {
+	case !sent:
+		log.Printf("[contacts] card from %s (%s) not kept: it has no device at that address", from, name)
+		return name, label
+	case full:
+		log.Printf("[contacts] card from %s (%s) not kept: %d cards wait already", from, name, maxPending)
+		return name, label
 	}
 	if err := s.savePending(from, data); err != nil {
 		log.Printf("[contacts] a received card not kept: %v", err)
 		return name, label
 	}
+	log.Printf("[contacts] card from %s (%s): waits to be confirmed", from, name)
 	s.mu.Lock()
 	s.pending = s.loadPending()
 	s.publishLocked()

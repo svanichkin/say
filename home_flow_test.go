@@ -91,8 +91,13 @@ func TestHomeChangeFolder(t *testing.T) {
 func TestMyCard(t *testing.T) {
 	dir := t.TempDir()
 	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), dir, "200::1", 7000)
-	if cards := a.pickMeMenu(); cards[0].Key != "+" {
-		t.Fatalf("an empty folder: %+v", cards[0])
+	// An empty folder: our card made at start (the computer's name), + for
+	// another.
+	if me := a.store.Snapshot().Me; me == nil || me.Nick == "" {
+		t.Fatalf("an empty folder: no card made: %+v", me)
+	}
+	if got := keysOf(a.pickMeMenu()); !strings.Contains(got, "+") {
+		t.Fatalf("an empty folder's cards: %s", got)
 	}
 	form := a.createMeMenu()
 	if len(form) != 6 { // names and the nickname, then < and x
@@ -106,8 +111,14 @@ func TestMyCard(t *testing.T) {
 	if got := a.contactsMenu()[0].Text; got != "Sergey" {
 		t.Fatalf("the contacts' first line is %q", got)
 	}
-	if cards := a.pickMeMenu(); cards[0].Text != "Sergey" || !cards[0].Tick {
-		t.Fatalf("our card in the list: %q", cards[0].Text)
+	ticked := ""
+	for _, c := range a.pickMeMenu() {
+		if c.Tick {
+			ticked = c.Text
+		}
+	}
+	if ticked != "Sergey" {
+		t.Fatalf("our card in the list: %q", ticked)
 	}
 	folder := a.folderMenu()
 	if folder[0].Text != tilde(dir) || folder[1].Key != "card" || folder[2].Key != "label" || folder[3].Key != "display" {
@@ -277,7 +288,7 @@ func TestNewPerson(t *testing.T) {
 	}
 }
 
-// A person's menu: a call to each device, then editing: names, the devices
+// A person's menu: a call to each device; editing (from the settings): names, the devices
 // (each opening to its label and address; an address erased removes it),
 // + for another, written once its address is in.
 func TestEditPerson(t *testing.T) {
@@ -286,15 +297,29 @@ func TestEditPerson(t *testing.T) {
 		"item1.URL:say:[201::1]\nitem1.X-ABLabel:home\nitem2.URL:say:[201::2]:7001\nitem2.X-ABLabel:phone\nEND:VCARD\n")
 	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), dir, "200::1", 7777)
 	menu := a.personMenu("BOB")
-	if len(menu) != 5 || menu[0].Text != lang.T(lang.HomeCallOn, "home") || menu[1].Text != lang.T(lang.HomeCallOn, "phone") || menu[2].Key != "edit" {
+	if len(menu) != 4 || menu[0].Text != lang.T(lang.HomeCallOn, "home") || menu[1].Text != lang.T(lang.HomeCallOn, "phone") || !menu[2].Back {
 		t.Fatalf("Bob's menu: %q %q %q", menu[0].Text, menu[1].Text, menu[2].Key)
 	}
+	// Edited from the settings: under how names show, the cards.
+	folder := a.folderMenu()
+	at := -1
+	for i, it := range folder {
+		if it.Key == "display" {
+			at = i
+		}
+	}
+	if at < 0 || folder[at+1].Key != "editall" {
+		t.Fatalf("the folder's settings: %s", keysOf(folder))
+	}
+	if got := keysOf(folder[at+1].Open()); got != "me p:BOBBob Smith + < x" { // our card made at start, Bob, + to add one
+		t.Fatalf("the cards to edit: %s", got)
+	}
 	form := a.editPersonMenu("BOB")
-	if got := keysOf(form); got != "given family middle nick dev:0 dev:1 + < x" || form[5].Text != "phone" {
+	if got := keysOf(form); got != "given family middle nick dev:0 dev:1 + del < x" || form[5].Text != "phone" {
 		t.Fatalf("the form: %s (%q)", got, form[5].Text)
 	}
-	if phone := form[5].Open(); phone[1].Field.Value != "[201::2]:7001" {
-		t.Fatalf("the phone's address shown as %q", phone[1].Field.Value)
+	if phone := form[5].Open(); phone[1].Field.Value != "[201::2]:7001" || keysOf(phone) != "label addr del < x" {
+		t.Fatalf("the phone: %s, its address shown as %q", keysOf(phone), phone[1].Field.Value)
 	}
 	form[0].Field.Set("Robert")
 	form[4].Open()[1].Field.Set("") // the home's address erased: it goes
@@ -303,9 +328,9 @@ func TestEditPerson(t *testing.T) {
 		t.Fatalf("after editing: %q %+v", p.Given, p.Devices)
 	}
 	form = a.editPersonMenu("BOB")
-	form[len(form)-3].Do() // +
+	form[len(form)-4].Do() // +
 	form = a.editPersonMenu("BOB")
-	if got := keysOf(form); got != "given family middle nick dev:0 dev:1 + < x" {
+	if got := keysOf(form); got != "given family middle nick dev:0 dev:1 + del < x" {
 		t.Fatalf("the form after +: %s", got)
 	}
 	block := form[5].Open()
@@ -315,7 +340,7 @@ func TestEditPerson(t *testing.T) {
 	if len(p.Devices) != 2 || p.Devices[1] != (contacts.Device{Label: "work", Host: "202::3", Port: 7002}) {
 		t.Fatalf("the new device: %+v", p.Devices)
 	}
-	if got := keysOf(a.editPersonMenu("BOB")); got != "given family middle nick dev:0 dev:1 + < x" {
+	if got := keysOf(a.editPersonMenu("BOB")); got != "given family middle nick dev:0 dev:1 + del < x" {
 		t.Fatalf("after writing it: %s", got)
 	}
 }
@@ -373,7 +398,140 @@ func TestDialTyped(t *testing.T) {
 func TestMyAddress(t *testing.T) {
 	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), t.TempDir(), "200::1", 7001)
 	col := a.myAddressMenu()
-	if col[0].Text != "[200::1]:7001" || col[0].Do == nil || col[1].Text != lang.T(lang.HomeCopy) || col[1].Flash != lang.T(lang.HomeCopied) {
-		t.Fatalf("my address: %+v / %+v", col[0], col[1])
+	if col[0].Text != "[200::1]:7001" || col[0].Do == nil || !col[0].Start || col[0].Flash != lang.T(lang.HomeCopied) || len(col) != 3 {
+		t.Fatalf("my address: %+v", col)
+	}
+}
+
+// − under the line, red, reads "Delete forever" after a first press (the
+// menu's Confirm) and deletes on the second; moving off takes the first
+// press back.
+func TestDeleteTwice(t *testing.T) {
+	deleted := 0
+	ui.SetHome(func() []ui.HomeItem {
+		return []ui.HomeItem{{Key: "a", Text: "A"}, deleteItem(func() { deleted++ }), back(), closeItem()}
+	}, nil, func() {})
+	ui.ShowHome(true)
+	defer func() { ui.SetHome(nil, nil, nil); ui.ShowHome(false) }()
+	it := deleteItem(nil)
+	if it.Text != "−" || !it.Danger || !it.Bottom || it.Confirm != lang.T(lang.HomeDeleteForever) {
+		t.Fatalf("the delete: %+v", it)
+	}
+	pressKeys(t, keys.Down, '\r')
+	if deleted != 0 {
+		t.Fatal("deleted on the first press")
+	}
+	pressKeys(t, keys.Up, keys.Down, '\r') // moved off and back: a first press again
+	if deleted != 0 {
+		t.Fatal("deleted after moving off")
+	}
+	pressKeys(t, '\r')
+	if deleted != 1 {
+		t.Fatalf("deleted %d after the second press", deleted)
+	}
+}
+
+// A device asked and not answering is grey (Off) and not called, and so is
+// this device (shown); one not asked yet, or answering, is called.
+func TestOfflineDeviceNotCalled(t *testing.T) {
+	dir := t.TempDir()
+	writeCard(t, filepath.Join(dir, "bob.vcf"), "BEGIN:VCARD\nVERSION:3.0\nUID:BOB\nN:Smith;Bob;;;\nFN:Bob Smith\n"+
+		"item1.URL:say:[201::1]\nitem1.X-ABLabel:home\nitem2.URL:say:[201::2]\nitem2.X-ABLabel:phone\n"+
+		"item3.URL:say:[200::1]\nitem3.X-ABLabel:laptop\nEND:VCARD\n")
+	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), dir, "200::1", 7777)
+	if m := a.personMenu("BOB"); m[0].Off || m[1].Off || len(m) != 5 || !m[2].Off || !m[0].Offline || m[2].Offline {
+		t.Fatal("before anyone was asked: called, red; this device shown, not called, no dot")
+	}
+	a.askPresence(func(host string, _ int) bool { return host == "201::2" })
+	m := a.personMenu("BOB")
+	if !m[0].Off || m[1].Off || !m[0].Offline || m[1].Offline || !m[1].Online {
+		t.Fatalf("home off %v (red %v), phone off %v (green %v)", m[0].Off, m[0].Offline, m[1].Off, m[1].Online)
+	}
+	bob := a.store.Snapshot().ByUID("BOB")
+	if a.personOffline(bob, "200::1") {
+		t.Fatal("Bob red with his phone online")
+	}
+	a.askPresence(func(string, int) bool { return false })
+	if !a.personOffline(bob, "200::1") {
+		t.Fatal("Bob not red with nothing answering")
+	}
+	found := false
+	for _, it := range a.contactsMenu() {
+		if strings.HasPrefix(it.Key, "p:BOB") || it.Key == "me" && a.store.Snapshot().Me != nil && a.store.Snapshot().Me.UID == "BOB" {
+			found = true
+			if !it.Offline {
+				t.Fatalf("Bob in the list: %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Bob not in the list")
+	}
+	called := false
+	m[0].Do = func() { called = true }
+	ui.SetHome(func() []ui.HomeItem { return []ui.HomeItem{m[0], back(), closeItem()} }, nil, func() {})
+	ui.ShowHome(true)
+	defer func() { ui.SetHome(nil, nil, nil); ui.ShowHome(false) }()
+	pressKeys(t, '\r')
+	if called {
+		t.Fatal("an offline device was called")
+	}
+}
+
+// − in a card's form takes the person out: a card Say made is deleted, one
+// made elsewhere keeps all but its Say addresses; our own card has none.
+func TestRemovePerson(t *testing.T) {
+	dir := t.TempDir()
+	writeCard(t, filepath.Join(dir, "bob.vcf"), "BEGIN:VCARD\nVERSION:3.0\nUID:BOB\nN:Smith;Bob;;;\nFN:Bob Smith\nTEL:+100\n"+
+		"item1.URL:say:[201::1]\nitem1.X-ABLabel:home\nEND:VCARD\n")
+	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), dir, "200::1", 7777)
+	ann, err := a.store.Update("", func(p *contacts.Person) { // made by Say
+		p.Given, p.Devices = "Ann", []contacts.Device{{Host: "201::7", Port: 7777}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	del := func(uid string) {
+		for _, it := range a.editPersonMenu(uid) {
+			if it.Key == "del" {
+				it.Do()
+				return
+			}
+		}
+		t.Fatalf("no − for %s", uid)
+	}
+	del("BOB")
+	del(ann)
+	sn := a.store.Snapshot()
+	if bob := sn.ByUID("BOB"); bob == nil || len(bob.Devices) != 0 {
+		t.Fatalf("Bob: %+v", bob)
+	}
+	if sn.ByUID(ann) != nil {
+		t.Fatal("Ann's card kept")
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "bob.vcf"))
+	if !strings.Contains(string(data), "TEL") || strings.Contains(string(data), "201::1") {
+		t.Fatalf("Bob's file: %s", data)
+	}
+	for _, it := range a.editPersonMenu(sn.Me.UID) {
+		if it.Key == "del" {
+			t.Fatal("− on our own card")
+		}
+	}
+}
+
+// Where Say's icon lives: kept in its file, read back at the next start.
+func TestTrayChoiceKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c-tray.json")
+	a := newHomeApp(filepath.Join(t.TempDir(), "c.json"), t.TempDir(), "200::1", 7777)
+	a.initTray(path, nil)
+	if a.trayOn() {
+		t.Fatal("in the tray from the start")
+	}
+	a.setTray(true)
+	b := newHomeApp(filepath.Join(t.TempDir(), "c.json"), t.TempDir(), "200::1", 7777)
+	b.initTray(path, nil)
+	if !b.trayOn() {
+		t.Fatal("the tray choice not kept")
 	}
 }

@@ -186,22 +186,40 @@ func (g *game) clipPanes(dst *ebiten.Image, panes []Pane) {
 	bg.draw(dst, defaultBg, g.r.white)
 }
 
-// scanImage is a column of the scan lines' pattern: its first rows dark.
+// scanImage is a tile of the effect's pattern: the grid of dots, or a
+// column of the scan lines' (its first rows dark).
 func (g *game) scanImage(sc effectScan) *ebiten.Image {
 	r := &g.r
-	if r.scan != nil && r.scanOf == sc {
+	if r.scan != nil && r.scanOf == sc && r.scanCW == g.cw {
 		return r.scan
 	}
 	if r.scan != nil {
 		r.scan.Deallocate()
 	}
-	img := ebiten.NewImage(1, sc.period)
-	pix := make([]byte, 4*sc.period)
-	for y := range sc.dark {
-		pix[4*y+3] = byte(scanAlpha(sc, y) * 255) // black, premultiplied
+	var img *ebiten.Image
+	if sc.dots > 0 { // a tile of the text windows' grid, its dots mid grey at dots (premultiplied)
+		step, row, size := dotGrid(g.cw)
+		img = ebiten.NewImage(step, 2*row)
+		pix := make([]byte, 4*step*2*row)
+		a, grey := byte(sc.dots*255), byte(sc.dots*128)
+		for y := 0; y < 2*row; y++ {
+			for x := 0; x < step; x++ {
+				if dotAt(x, y, step, row, size) {
+					o := 4 * (y*step + x)
+					pix[o], pix[o+1], pix[o+2], pix[o+3] = grey, grey, grey, a
+				}
+			}
+		}
+		img.WritePixels(pix)
+	} else {
+		img = ebiten.NewImage(1, sc.period)
+		pix := make([]byte, 4*sc.period)
+		for y := range sc.dark {
+			pix[4*y+3] = byte(scanAlpha(sc, y) * 255) // black, premultiplied
+		}
+		img.WritePixels(pix)
 	}
-	img.WritePixels(pix)
-	r.scan, r.scanOf = img, sc
+	r.scan, r.scanOf, r.scanCW = img, sc, g.cw
 	return img
 }
 

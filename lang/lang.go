@@ -35,6 +35,8 @@ const (
 	SignalLost
 	Rerouting
 	LineBusy
+	IncomingCall
+	RingingThere
 	BusyRetry
 	NoCarrier
 	Retry
@@ -76,15 +78,14 @@ const (
 	HomeContacts
 	HomeDial
 	HomeMyAddress
-	HomeCopy
 	HomeCopied
 	HomeMe
 	HomeCallOn
-	HomeEditContact
 	HomePending
 	HomeConfirm
 	HomeAddTo
 	HomeDelete
+	HomeDeleteForever
 	HomeSettings
 	HomeFolder
 	HomeGiven
@@ -100,6 +101,12 @@ const (
 	HomeComputer
 	HomeNick
 	HomeDisplay
+	HomeEditContacts
+	HomeIcon
+	HomeInDock
+	HomeInTray
+	TrayOpen
+	TrayQuit
 	HomeShowGivenFamily
 	HomeShowFamilyGiven
 	HomeShowShort
@@ -129,6 +136,8 @@ var en = map[Key]string{
 	SignalLost:          "SIGNAL LOST",
 	Rerouting:           "Rerouting",
 	LineBusy:            "LINE BUSY",
+	IncomingCall:        "INCOMING CALL",
+	RingingThere:        "Ringing, waiting for an answer",
 	BusyRetry:           "On another call · retry in %d s",
 	NoCarrier:           "NO CARRIER",
 	Retry:               "Retry in %d s",
@@ -167,37 +176,42 @@ var en = map[Key]string{
 	MenuCam:             "Camera",
 	MenuPeerSound:       "Their sound",
 	MenuPeerVideo:       "Their video",
-	HomeContacts:        "contacts",
-	HomeDial:            "call an address",
-	HomeMyAddress:       "my address",
-	HomeCopy:            "copy",
-	HomeCopied:          "copied",
-	HomeMe:              "me",
-	HomeCallOn:          "call %s",
-	HomeEditContact:     "edit contact",
-	HomePending:         "unconfirmed",
-	HomeConfirm:         "confirm",
-	HomeAddTo:           "add to %s",
-	HomeDelete:          "delete",
-	HomeSettings:        "settings",
-	HomeFolder:          "contacts folder",
-	HomeGiven:           "first name",
-	HomeFamily:          "last name",
-	HomeMiddle:          "middle name",
-	HomeLabel:           "device label",
-	HomeAddress:         "address",
+	HomeContacts:        "Contacts",
+	HomeDial:            "Call an address",
+	HomeMyAddress:       "My address",
+	HomeCopied:          "Copied",
+	HomeMe:              "Me",
+	HomeCallOn:          "Call %s",
+	HomePending:         "Unconfirmed",
+	HomeConfirm:         "Confirm",
+	HomeAddTo:           "Add to %s",
+	HomeDelete:          "Delete",
+	HomeDeleteForever:   "Delete forever",
+	HomeSettings:        "Settings",
+	HomeFolder:          "Contacts folder",
+	HomeGiven:           "First name",
+	HomeFamily:          "Last name",
+	HomeMiddle:          "Middle name",
+	HomeLabel:           "Device label",
+	HomeAddress:         "Address",
 	HomeOSBook:          "OS address book",
-	HomeChooseFolder:    "choose a folder",
-	HomeMyCard:          "my card",
-	HomeThisLabel:       "this device's label",
-	HomeLaptop:          "laptop",
-	HomeComputer:        "computer",
-	HomeNick:            "nickname",
-	HomeDisplay:         "show contacts as",
-	HomeShowGivenFamily: "first last",
-	HomeShowFamilyGiven: "last first",
-	HomeShowShort:       "initials and last name",
-	HomeNoAccess:        "no access: System Settings → Privacy → Contacts",
+	HomeChooseFolder:    "Choose a folder",
+	HomeMyCard:          "My card",
+	HomeThisLabel:       "This device's label",
+	HomeLaptop:          "Laptop",
+	HomeComputer:        "Computer",
+	HomeNick:            "Nickname",
+	HomeDisplay:         "Show contacts as",
+	HomeEditContacts:    "Edit contacts",
+	HomeIcon:            "Say's icon",
+	HomeInDock:          "In the Dock",
+	HomeInTray:          "In the tray",
+	TrayOpen:            "Open Say",
+	TrayQuit:            "Quit",
+	HomeShowGivenFamily: "First last",
+	HomeShowFamilyGiven: "Last first",
+	HomeShowShort:       "Initials and last name",
+	HomeNoAccess:        "No access: System Settings → Privacy → Contacts",
 }
 
 func init() { tables["en"] = en }

@@ -236,8 +236,8 @@ func handleMouseEvent(evt mouseEvent) {
 		return
 	}
 
-	if !ChatConnected() && !HomeShown() && statusCancelHit(evt.col, evt.row) {
-		cancelDial() // the dial's x
+	if !ChatConnected() && !HomeShown() && statusClick(evt.col, evt.row) {
+		// the status screen's item: the dial's x, a ringing call's ✓ or x
 		return
 	}
 	if statusClickHandlePoint(evt.col, evt.row) {
@@ -256,6 +256,46 @@ func handleMouseEvent(evt mouseEvent) {
 	default:
 		return
 	}
+	RequestRedraw()
+}
+
+// hoverMenu is the video view whose menu the pointer opened (none: no
+// menu, or one opened by keys or a click).
+var hoverMenu struct {
+	sync.Mutex
+	opened viewportID
+}
+
+// HoverAt is the pointer over a cell (1-based; 0, 0: out of the window): on
+// a call's video view its menu shows, leaving the view hides the menu it
+// showed.
+func HoverAt(col, row int) {
+	if !ChatConnected() {
+		return
+	}
+	vp := viewportNone
+	if col > 0 && row > 0 {
+		vp = viewportForPoint(col, row)
+	}
+	hoverMenu.Lock()
+	opened := hoverMenu.opened
+	switch {
+	case vp == viewportSelf && !selfMenuOpen():
+		setSelfMenu(true)
+		hoverMenu.opened = viewportSelf
+	case vp == viewportPeer && !peerMenuOpen():
+		setPeerMenu(true)
+		hoverMenu.opened = viewportPeer
+	case vp == viewportNone && opened != viewportNone:
+		if menuOpen() {
+			setSelfMenu(false) // the menu it showed goes
+		}
+		hoverMenu.opened = viewportNone
+	default:
+		hoverMenu.Unlock()
+		return
+	}
+	hoverMenu.Unlock()
 	RequestRedraw()
 }
 

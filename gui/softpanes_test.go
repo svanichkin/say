@@ -102,3 +102,48 @@ func TestSoftPixelsComposeTheWindow(t *testing.T) {
 		png.Encode(f, img)
 	}
 }
+
+// A text window (the chat, the status) has the grey dots on its
+// background, to its inner line; outside it there are none.
+func TestSoftPixelsDotTheTextWindows(t *testing.T) {
+	font := testSoftFont(t)
+	in := Input{Chat: func() [3]int { return [3]int{200, 90, 255} }}
+	s := NewScreen(60, 20)
+	fmt.Fprint(s, "\x1b]5579;6;10;30;6;c\x07")
+	base := newSoftRenderer(font, 8, 16)
+	px := newSoftPixels(in, font, 8, 16)
+	s.View(func(cols, rows int, cells []Cell, panes []Pane, _ uint64) {
+		px.update(base, append([]Pane(nil), panes...), nil, base.draw(cols, rows, cells))
+	})
+	step, row, size := dotGrid(8)
+	count := func(r image.Rectangle) (n int) {
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			for x := r.Min.X; x < r.Max.X; x++ {
+				o := (y*px.w + x) * softBytes
+				if dotAt(x, y, step, row, size) && px.out[o] == dotGrey && px.out[o+1] == dotGrey && px.out[o+2] == dotGrey {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	if n := count(image.Rect(10*8, 6*16, 38*8, 11*16)); n < 100 {
+		t.Fatalf("%d dots in the window", n)
+	}
+	if n := count(image.Rect(0, 15*16, 60*8, 20*16)); n != 0 {
+		t.Fatalf("%d dots outside it", n)
+	}
+}
+
+// A grey-framed menu column (inactive) has fainter dots than an active one.
+func TestFaintDotsInInactiveColumns(t *testing.T) {
+	if g := paneDotGrey(Pane{Menu: true, Colour: color.RGBA{70, 70, 76, 255}}); g != dotGreyFaint {
+		t.Fatalf("an inactive column's dots: %d", g)
+	}
+	if g := paneDotGrey(Pane{Menu: true, Colour: color.RGBA{255, 128, 0, 255}}); g != dotGrey {
+		t.Fatalf("an active column's dots: %d", g)
+	}
+	if g := paneDotGrey(Pane{Chat: true}); g != dotGrey {
+		t.Fatalf("the status's dots: %d", g)
+	}
+}

@@ -31,7 +31,7 @@ TARGETS := \
 	plan9/386 \
 	plan9/arm
 
-.PHONY: build debug app icons install-desktop run test tidy fmt clean build-all $(TARGETS:%=build-%)
+.PHONY: build debug app notarize icons install-desktop run test tidy fmt clean build-all $(TARGETS:%=build-%)
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -61,6 +61,11 @@ install-desktop:
 # its window. GOTAGS=debug for a debug build.
 app: build
 	sh scripts/macos-app.sh $(HOST_BIN) "$(VERSION)" $(BIN_DIR)
+
+# notarize: Say.app signed with the Developer ID, notarized by Apple, the
+# ticket stapled, packed into bin/Say-macos.zip (scripts/notarize.sh).
+notarize: app
+	bash scripts/notarize.sh $(BIN_DIR)/Say.app
 
 run:
 	$(GO) run .

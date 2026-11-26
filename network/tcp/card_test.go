@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/svanichkin/say/ui"
 )
 
 // After the handshake the server sends its card (frame 0x12); a card frame
@@ -22,6 +25,10 @@ func TestCardsExchanged(t *testing.T) {
 	fmt.Fprintf(local, "HELLO peer\tproto=%d min=%d app=v2.0.0\n", ProtocolVersion, MinProtocolVersion)
 	local.SetReadDeadline(time.Now().Add(3 * time.Second))
 	br := bufio.NewReader(local)
+	if line, err := br.ReadString('\n'); err != nil || !strings.HasPrefix(line, ringReply+" ") {
+		t.Fatal(line, err)
+	}
+	ui.KeyInput('\r') // answered (ring.go)
 	if _, err := br.ReadString('\n'); err != nil {
 		t.Fatal(err)
 	}

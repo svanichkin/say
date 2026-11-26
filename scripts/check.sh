@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 export PATH=/opt/homebrew/bin:$PATH
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(. ./contacts ./ui ./lang ./conf ./network/tcp ./keys ./gui ./hud ./device ./mediactrl)
+	pkgs=(. ./contacts ./ui ./lang ./conf ./network/tcp ./keys ./gui ./hud ./device ./mediactrl ./tones)
 fi
 failed=0
 step() { # name, then the command; shows its first lines on failure

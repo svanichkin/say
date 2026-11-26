@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Say
+GenericName=Video call
+GenericName[ru]=Видеозвонок
+Comment=Peer-to-peer video calls over Yggdrasil, in the terminal
+Comment[ru]=Видеозвонки напрямую через Yggdrasil, в терминале
+Exec=say
+Icon=say
+Terminal=true
+Categories=Network;Chat;VideoConference;AudioVideo;
+Keywords=call;video;voice;chat;yggdrasil;p2p;

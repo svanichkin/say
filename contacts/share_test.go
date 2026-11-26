@@ -105,3 +105,31 @@ func TestReceivedChecked(t *testing.T) {
 		t.Fatalf("shown as %q, pending %d", name, len(s.Snapshot().Pending))
 	}
 }
+
+// With no card of our own, the card sent is this device alone, named as
+// the computer: never nothing.
+func TestMyCardWithoutOne(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "s.json"), t.TempDir(), "laptop", 7001, nil)
+	s.SetSelf("200::9")
+	p, err := parseShared(s.MyCard())
+	if err != nil || p.Nick != hostName() || len(p.Devices) != 1 || p.Devices[0].Host != "200::9" || p.Devices[0].Label != "laptop" {
+		t.Fatalf("the card sent: %+v (%v)", p, err)
+	}
+}
+
+// A folder without a card of ours gets one at start: the computer's name,
+// this device on it, marked ours.
+func TestMyCardMadeAtStart(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(filepath.Join(t.TempDir(), "s.json"), dir, "laptop", 7001, nil)
+	s.SetSelf("200::9")
+	me := s.Snapshot().Me
+	if me == nil || me.Nick != hostName() || !me.Has("200::9") {
+		t.Fatalf("our card: %+v", me)
+	}
+	s2 := NewStore(filepath.Join(t.TempDir(), "s.json"), dir, "laptop", 7001, nil) // a second start: kept, not made again
+	s2.SetSelf("200::9")
+	if n := len(s2.Snapshot().All); n != 1 || s2.Snapshot().Me == nil {
+		t.Fatalf("after a second start: %d cards, ours %v", n, s2.Snapshot().Me)
+	}
+}

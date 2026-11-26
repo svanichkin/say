@@ -56,11 +56,15 @@ import (
 //	   and the protocol answer it and the connection closes, no call begun
 //	   (network/tcp/presence.go); a peer of 14 or 15 answers it as a peer too
 //	   old, an answer all the same, and is still talked to
+//	17 a call rings before it is answered: to a caller of 17 the one called
+//	   replies RING, then OK (answered) or DECLINED; the caller waits up to
+//	   30 s and hangs up (network/tcp/ring.go); a caller of 14-16 is
+//	   answered OK at once, a peer of 14-16 called answers OK as before
 //
 // Peers from MinProtocolVersion on are accepted: the video formats of
 // older ones are gone.
 const (
-	ProtocolVersion    = 16
+	ProtocolVersion    = 17
 	MinProtocolVersion = 14
 )
 

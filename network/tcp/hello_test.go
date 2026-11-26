@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -68,7 +69,7 @@ func TestClientReportsIncompatibleServer(t *testing.T) {
 		remote.Write([]byte(fmt.Sprintf("INCOMPATIBLE srv\tproto=%d min=%d app=v9.0.0 codec=opus\n", ProtocolVersion+1, ProtocolVersion+1)))
 	}()
 	dial := func(string, int) (net.Conn, error) { return local, nil }
-	_, _, err := StartSignalClientTCP("me", "127.0.0.1", 1, nil, nil, dial)
+	_, _, _, err := StartSignalClientTCP(context.Background(), "me", "127.0.0.1", 1, nil, nil, dial, nil)
 	var inc *IncompatibleError
 	if !errors.As(err, &inc) {
 		t.Fatalf("got %v, want an IncompatibleError", err)

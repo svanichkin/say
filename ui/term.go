@@ -312,26 +312,6 @@ func resetStatusClickState() {
 	statusClickState.areas = nil
 }
 
-// The dial's x on the status screen (row, its columns): a click there
-// cancels the dial.
-var statusCancel struct {
-	sync.Mutex
-	row, from, to int
-}
-
-func setStatusCancel(row, from, to int) {
-	statusCancel.Lock()
-	statusCancel.row, statusCancel.from, statusCancel.to = row, from, to
-	statusCancel.Unlock()
-}
-
-// statusCancelHit reports whether a click is on the dial's x.
-func statusCancelHit(col, row int) bool {
-	statusCancel.Lock()
-	defer statusCancel.Unlock()
-	return statusCancel.row > 0 && row == statusCancel.row && col >= statusCancel.from && col <= statusCancel.to
-}
-
 // statusCopyButton is the button's label when msg is the copyable status
 // ("" when it is not).
 func statusCopyButton(msg string) string {
@@ -1028,7 +1008,7 @@ func startTermImgRenderer(parent context.Context) (func(), <-chan struct{}) {
 					continue
 				}
 				// Redraw when the cursor blinks, even if no video frame arrives.
-				blink := ChatConnected() && inputCursorVisible(time.Now())
+				blink := (ChatConnected() || homeFieldChosen()) && inputCursorVisible(time.Now())
 				if cols != lastCols || rows != lastRows || blink != lastBlink {
 					lastCols, lastRows, lastBlink = cols, rows, blink
 					render()
@@ -1364,11 +1344,8 @@ func renderChatScreen(cols, rows int) string {
 	}
 
 	cursor := " "
-	if !menuOpen() && inputCursorVisible(time.Now()) { // not while a menu takes the keys
-		cursor = "▏"
-		if framed() {
-			cursor = "█"
-		}
+	if !menuOpen() { // not while a menu takes the keys
+		cursor = inputCursor()
 	}
 	// Keep the end of a long input visible, with room for the cursor.
 	line := tailWidth(sanitizeLine(input), chatCols-1) + cursor
@@ -1893,15 +1870,18 @@ func buildStatusScreen(cols, rows int, message string) string {
 		lines = append(lines, "", label)
 		buttonLine = len(lines) - 1
 	}
-	// While a call is dialled, x under a line cancels it, as a menu's x
-	// (Enter, a click, Esc): on the chosen block, red.
-	cancelLine := -1
-	if dialCancel.get() != nil && !ChatConnected() {
+	// Its items under a line, as a menu's last ones (ring.go): x cancels a
+	// call being dialled, ✓ and x answer or decline one ringing.
+	acts, chosenAct := statusActions()
+	cancelLine := -1 // the first of them
+	if len(acts) > 0 {
 		if !pixelMode {
 			lines = append(lines, "") // the line's own row
 		}
-		lines = append(lines, "x")
-		cancelLine = len(lines) - 1
+		cancelLine = len(lines)
+		for _, a := range acts {
+			lines = append(lines, a.mark)
+		}
 	}
 
 	// The lines go one under another from the same column, the block of
@@ -1958,20 +1938,25 @@ func buildStatusScreen(cols, rows int, message string) string {
 	}
 
 	var clickRects []statusClickRect
-	setStatusCancel(0, 0, 0)
+	var items []statusItemAt
 	for i, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if i == cancelLine {
+		if k := i - cancelLine; cancelLine >= 0 && k >= 0 && k < len(acts) {
 			row := startRow + i
 			from, to := cancelFrom, cancelTo
-			if to < from { // no frame: the x alone, centred
+			if to < from { // no frame: the mark alone, centred
 				from, to = 1+(cols-1)/2, 1+(cols-1)/2
 			}
-			homePut(&out, row, from, cols, strings.Repeat(" ", to-from+1), homeChosen(ChatAccent()))
-			homePut(&out, row, from+(to-from)/2, cols, "x", homeChosen(ChatAccent())) // chosen: its block's text colour
-			setStatusCancel(row, from, to)
+			mid := from + (to-from)/2
+			if k == chosenAct { // chosen: on a block of its mark's colour, the mark the block's text's
+				homePut(&out, row, from, cols, strings.Repeat(" ", to-from+1), homeChosen(acts[k].colour)) // its mark's colour
+				homePut(&out, row, mid, cols, acts[k].mark, homeChosen(acts[k].colour))
+			} else { // the active menu's mark: its own colour
+				homePut(&out, row, mid, cols, acts[k].mark, homeNormal()+homeFg(acts[k].colour))
+			}
+			items = append(items, statusItemAt{row, from, to})
 			continue
 		}
 		row := startRow + i
@@ -1998,6 +1983,7 @@ func buildStatusScreen(cols, rows int, message string) string {
 		}
 	}
 	out.WriteString("\x1b[0m")
+	setStatusItems(items)
 
 	if len(clickRects) > 0 {
 		statusClickUpdateAreas(clickRects)

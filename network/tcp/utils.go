@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/svanichkin/say/logs"
@@ -150,7 +151,8 @@ type controlSession struct {
 	pacer     *adaptiveFilePacer
 	incoming  **incomingFile
 	peerLabel string
-	peerHost  string // the peer's address (its card is told where it came from)
+	peerHost  string       // the peer's address (its card is told where it came from)
+	peerBye   *atomic.Bool // set when the peer hangs up (not when the line drops)
 }
 
 // serveControlFrames parses the control stream until the connection closes.
@@ -197,6 +199,9 @@ func serveControlFrames(br *bufio.Reader, s controlSession) {
 			receiveLog(payload)
 		case frameBye:
 			log.Printf("[p2p] %s hung up", s.peerLabel)
+			if s.peerBye != nil {
+				s.peerBye.Store(true)
+			}
 			end("the peer hung up") // DEBUG-TEMP
 			return
 		case frameChat, frameFileStart, frameFileChunk, frameFileEnd, frameFileResult:

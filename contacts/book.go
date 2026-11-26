@@ -424,7 +424,7 @@ func (b *Book) Save(p *Person) error {
 		return nil
 	}
 	if p.c == nil {
-		p.c = &card{props: []prop{{name: "VERSION", value: "3.0"}, {name: "PRODID", value: "-//Say//Say//EN"}}}
+		p.c = &card{props: []prop{{name: "VERSION", value: "3.0"}, {name: "PRODID", value: sayProdID}}}
 	}
 	c := p.c
 	// The card as the file has it: by its UID, or by its name without one.
@@ -444,6 +444,9 @@ func (b *Book) Save(p *Person) error {
 	}
 	return writeFile(p.file, wasUID, wasFN, c)
 }
+
+// sayProdID marks the cards Say made (PRODID).
+const sayProdID = "-//Say//Say//EN"
 
 // Remove deletes the person's card (the file when it holds only that card).
 func (b *Book) Remove(p *Person) error {

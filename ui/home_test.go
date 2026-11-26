@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/svanichkin/say/keys"
@@ -113,7 +114,7 @@ func TestHomeMenu(t *testing.T) {
 		homeKey(r)
 	}
 	screen = rowsOf(renderHomeScreen(cols, rows), rows, cols)
-	if !strings.HasSuffix(strings.TrimRight(screen[mid], " │┃╏║"), " phone_") { // in its column's frame
+	if !strings.HasSuffix(strings.TrimRight(screen[mid], " │┃╏║"), " phone▏") { // in its column's frame, the cursor on (just typed)
 		t.Fatalf("the field being typed in: %q", screen[mid])
 	}
 	homeKey(keys.Down) // leaving it sets it
@@ -314,4 +315,38 @@ func cellIndex(row, sub string) int {
 		return -1
 	}
 	return utf8.RuneCountInString(row[:at])
+}
+
+// A field chosen shows what it holds and the chat's blinking cursor, no
+// placeholder (one not chosen shows its placeholder); on and off in turn.
+func TestHomeFieldCursor(t *testing.T) {
+	SetHome(func() []HomeItem {
+		return []HomeItem{
+			{Key: "dial", Field: &HomeField{Placeholder: "address to call"}},
+			{Key: "name", Field: &HomeField{Value: "Alice"}},
+		}
+	}, nil, nil)
+	ShowHome(true)
+	defer func() { SetHome(nil, nil, nil); ShowHome(false) }()
+	cols, rows := 80, 12
+	at := func(now time.Time) string { // the whole screen, a line
+		chatState.Lock()
+		chatState.typedAt = now
+		chatState.Unlock()
+		return strings.Join(rowsOf(renderHomeScreen(cols, rows), rows, cols), "\n")
+	}
+	if !homeFieldChosen() {
+		t.Fatal("a field chosen, no blink")
+	}
+	now := time.Now()
+	if on := at(now); !strings.Contains(on, "▏") || strings.Contains(on, "address to call") {
+		t.Fatalf("the empty field chosen: the cursor, no placeholder: %q", on)
+	}
+	if off := at(now.Add(-cursorBlinkPeriod)); strings.Contains(off, "▏") {
+		t.Fatalf("the cursor off: %q", off)
+	}
+	homeKey(keys.Down)
+	if on := at(time.Now()); !strings.Contains(on, "Alice▏") || !strings.Contains(on, "address to call") {
+		t.Fatalf("the field with a value chosen, the empty one its placeholder: %q", on)
+	}
 }

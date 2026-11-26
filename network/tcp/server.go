@@ -131,6 +131,16 @@ func serverHandleIncoming(conn net.Conn, owner *callOwner, nameOf func(host stri
 	// Deferred before the media session, so it runs after the session stops.
 	defer release()
 
+	// A caller of 17 on waits while the call rings (ring.go).
+	if rings(peer) {
+		if !awaitAnswer(conn, br, friendLabel+"\n"+strings.Trim(hostOnly, "[]")) {
+			log.Printf("[p2p] call from %s (%s) not answered", friendLabel, hostOnly)
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			fmt.Fprint(conn, helloLine(declinedReply, conf.HostnameOr("me")))
+			return
+		}
+	}
+
 	// Reply OK and keep the socket open (this is our P2P channel for future audio)
 	fmt.Fprint(conn, helloLine("OK", conf.HostnameOr("me")))
 	pacer := newAdaptiveFilePacer()

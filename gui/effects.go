@@ -140,18 +140,25 @@ func SetVideoEffect(name string) error {
 	return nil
 }
 
-// effectScans are the effects' scan lines, drawn over the panes on the
-// screen (the first dark rows of every period darkened, the first by alpha,
-// the others less and less: a soft line, not a hard one), so that
-// they are alike in every pane whatever its picture's size.
+// effectScans are the effects' patterns, drawn over the panes on the
+// screen, so that they are alike in every pane whatever its picture's size:
+// the text windows' grid of dots, lighter on the dark and darker on the
+// light (they were scan lines).
 var effectScans = map[string]effectScan{
-	"hologram": {period: 6, dark: 2, alpha: 0.15},
-	"crt":      {period: 4, dark: 2, alpha: 0.4},
+	"hologram": {dots: 0.6},
+	"crt":      {dots: 0.6},
 }
 
+// effectScan is the effect's pattern on the screen over the video: the
+// rhombic grid of dots the text windows have (dotGrid, anchored to the
+// window), each dot dots of the way to mid grey: lighter on the dark,
+// darker on the light (0.6: 30% of the way to white on black, to black
+// on white); or, dots 0, scan lines (the first dark rows of every
+// period, by alpha).
 type effectScan struct {
 	period, dark int
 	alpha        float32
+	dots         float32
 }
 
 // videoScan is the chosen effect's scan lines (nil: none).

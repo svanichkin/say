@@ -18,6 +18,7 @@ import (
 	"github.com/svanichkin/say/lang"
 	"github.com/svanichkin/say/logs"
 	tcpsignal "github.com/svanichkin/say/network/tcp"
+	"github.com/svanichkin/say/tones"
 	"github.com/svanichkin/say/ui"
 )
 
@@ -34,6 +35,10 @@ type homeApp struct {
 	browsed map[string][]string // the folder chooser's folders, read once while it is open
 
 	online map[string]bool // the devices whose Say answered last time, by host (presence.go)
+	asked  map[string]bool // the devices asked last time
+	tray   trayState       // Say's icon in the tray, its menu (tray.go)
+	// presenceKick asks now, not at the next round (askPresenceSoon).
+	presenceKick chan struct{}
 
 	// The forms' drafts, by form: they live while the form is open (it is
 	// built again after every change), a new one each time it is entered.
@@ -68,8 +73,12 @@ func (a *homeApp) newDraft(form string) func() {
 }
 
 func newHomeApp(configPath, contactsDir, self string, port int) *homeApp {
-	a := &homeApp{}
-	a.store = contacts.NewStore(contacts.SettingsPath(configPath), expandHome(contactsDir), kindLabel(), port, ui.HomeRefresh)
+	a := &homeApp{presenceKick: make(chan struct{}, 1)}
+	a.store = contacts.NewStore(contacts.SettingsPath(configPath), expandHome(contactsDir), kindLabel(), port, func() {
+		ui.HomeRefresh()
+		a.refreshTray()
+		a.askPresenceSoon() // the contacts came or changed: who of them is there
+	})
 	if self != "" {
 		a.store.SetSelf(self)
 	}
@@ -155,7 +164,10 @@ func (a *homeApp) place(d contacts.Device, dial func(ctx context.Context, d cont
 		a.calling = nil
 		a.mu.Unlock()
 		cancel()
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if failed(err) { // busy, declined, unanswered: the fail sound, home at once
+			device.PlayTone(tones.Fail(), tones.Rate, false)
+		}
+		if err != nil && !errors.Is(err, context.Canceled) && !failed(err) {
 			log.Printf("[p2p] call to %s: %v", d.Addr(), err)
 			time.Sleep(2 * time.Second) // the reason stays on the screen a moment
 		}
@@ -178,13 +190,6 @@ func (a *homeApp) paste(s string) {
 func back() ui.HomeItem      { return ui.HomeItem{Key: "<", Back: true} }
 func closeItem() ui.HomeItem { return ui.HomeItem{Key: "x", Close: true} }
 
-func tinted(it ui.HomeItem, addr string) ui.HomeItem {
-	if addr != "" {
-		it.Colour, it.Tinted = ui.AddressColour(addr), true
-	}
-	return it
-}
-
 // root is the first column: the contacts, an address to call, ours (to
 // copy), the settings, quit. The contacts
 // are where they were chosen, else the system's book or the usual folder
@@ -206,7 +211,7 @@ func (a *homeApp) root() []ui.HomeItem {
 }
 
 // myAddressMenu is this Say's address (as it is given to others: the port
-// only when it is not 7777) and copy (Enter on the address copies it too).
+// only when it is not 7777): Enter on it copies it.
 func (a *homeApp) myAddressMenu() []ui.HomeItem {
 	sn := a.store.Snapshot()
 	if sn.Self == "" {
@@ -215,8 +220,7 @@ func (a *homeApp) myAddressMenu() []ui.HomeItem {
 	addr := contacts.Device{Host: sn.Self, Port: sn.Port}.Shown()
 	copyIt := func() { device.CopyToClipboard(addr) }
 	return []ui.HomeItem{
-		tinted(ui.HomeItem{Key: "addr", Text: addr, Flash: lang.T(lang.HomeCopied), Do: copyIt}, sn.Self),
-		tinted(ui.HomeItem{Key: "copy", Text: lang.T(lang.HomeCopy), Flash: lang.T(lang.HomeCopied), Do: copyIt, Start: true}, sn.Self),
+		{Key: "addr", Text: addr, Flash: lang.T(lang.HomeCopied), Do: copyIt, Start: true},
 		back(), closeItem(),
 	}
 }
@@ -231,17 +235,13 @@ func (a *homeApp) dialTyped(v string) {
 	a.call(contacts.Device{Host: host, Port: port})
 }
 
-// contactsMenu: our card first (in our colour), the people, add one.
+// contactsMenu: our card first, the people, add one.
 func (a *homeApp) contactsMenu() []ui.HomeItem {
 	sn := a.store.Snapshot()
-	items := []ui.HomeItem{tinted(ui.HomeItem{Key: "me", Text: myName(sn), Online: a.personOnline(sn.Me, sn.Self), Open: a.myMenu}, sn.Self)}
+	items := []ui.HomeItem{{Key: "me", Text: myName(sn), Online: a.personOnline(sn.Me, sn.Self), Offline: a.personOffline(sn.Me, sn.Self), Open: a.myMenu}}
 	for _, p := range sortedPeople(sn, sn.People) {
 		p := p
-		colour := p.Devices[0].Host
-		if host := sn.LastHost[p.UID]; host != "" {
-			colour = host
-		}
-		it := tinted(ui.HomeItem{Key: "p:" + p.UID + p.Name(), Text: p.Display(sn.Display), Online: a.personOnline(p, sn.Self), Open: func() []ui.HomeItem { return a.personMenu(p.UID) }}, colour)
+		it := ui.HomeItem{Key: "p:" + p.UID + p.Name(), Text: p.Display(sn.Display), Online: a.personOnline(p, sn.Self), Offline: a.personOffline(p, sn.Self), Open: func() []ui.HomeItem { return a.personMenu(p.UID) }}
 		it.Start = p.UID != "" && p.UID == sn.Last
 		items = append(items, it)
 	}
@@ -249,7 +249,7 @@ func (a *homeApp) contactsMenu() []ui.HomeItem {
 		items = append(items, ui.HomeItem{Key: "pending", Text: lang.T(lang.HomePending) + " " + strconv.Itoa(n), Open: a.pendingMenu})
 	}
 	return append(items,
-		ui.HomeItem{Key: "+", Text: "+", Bottom: true, Open: a.newPersonMenu, Enter: a.newDraft("person"), Leave: a.savePerson},
+		a.addPersonItem(),
 		back(), closeItem())
 }
 
@@ -266,7 +266,7 @@ func (a *homeApp) pendingMenu() []ui.HomeItem {
 				text += " — " + d.Label
 			}
 		}
-		items = append(items, tinted(ui.HomeItem{Key: "pending:" + pd.From, Text: text, Open: func() []ui.HomeItem { return a.pendingCardMenu(pd) }}, pd.From))
+		items = append(items, ui.HomeItem{Key: "pending:" + pd.From, Text: text, Open: func() []ui.HomeItem { return a.pendingCardMenu(pd) }})
 	}
 	return append(items, back(), closeItem())
 }
@@ -281,10 +281,10 @@ func (a *homeApp) pendingCardMenu(pd *contacts.Pending) []ui.HomeItem {
 		}
 		ui.HomeBackTo("contacts")
 	}
-	items := []ui.HomeItem{tinted(ui.HomeItem{Key: "confirm", Text: lang.T(lang.HomeConfirm), Do: func() { done(a.store.Confirm(pd, "")) }}, pd.From)}
+	items := []ui.HomeItem{ui.HomeItem{Key: "confirm", Text: lang.T(lang.HomeConfirm), Do: func() { done(a.store.Confirm(pd, "")) }}}
 	for _, q := range sn.SameName(pd.Person) {
 		q := q
-		items = append(items, tinted(ui.HomeItem{Key: "into:" + q.UID, Text: lang.T(lang.HomeAddTo, q.Display(sn.Display)), Do: func() { done(a.store.Confirm(pd, q.UID)) }}, pd.From))
+		items = append(items, ui.HomeItem{Key: "into:" + q.UID, Text: lang.T(lang.HomeAddTo, q.Display(sn.Display)), Do: func() { done(a.store.Confirm(pd, q.UID)) }})
 	}
 	items = append(items, ui.HomeItem{Key: "delete", Text: lang.T(lang.HomeDelete), Do: func() {
 		a.store.Reject(pd)
@@ -322,7 +322,7 @@ func labelText(d contacts.Device) string {
 	return d.Label
 }
 
-// myMenu: our card, as anyone's (calls to our other devices, editing it);
+// myMenu: our card, as anyone's (calls to our other devices);
 // without one, choosing or making it.
 func (a *homeApp) myMenu() []ui.HomeItem {
 	sn := a.store.Snapshot()
@@ -332,8 +332,9 @@ func (a *homeApp) myMenu() []ui.HomeItem {
 	return a.personMenu(sn.Me.UID)
 }
 
-// personMenu: a call to each of the person's devices (not this one), then
-// editing the card.
+// personMenu: a call to each of the person's devices (this one shown, not
+// called, nor one not there); the
+// cards are edited from the settings (editContactsMenu).
 func (a *homeApp) personMenu(uid string) []ui.HomeItem {
 	sn := a.store.Snapshot()
 	p := sn.ByUID(uid)
@@ -342,17 +343,13 @@ func (a *homeApp) personMenu(uid string) []ui.HomeItem {
 	}
 	var items []ui.HomeItem
 	for _, d := range p.Devices {
-		if d.Host == sn.Self {
-			continue // this device: not called from itself
-		}
 		d := d
-		it := tinted(ui.HomeItem{Key: "call:" + d.Host, Text: lang.T(lang.HomeCallOn, labelText(d)), Online: a.deviceOnline(d.Host), Do: func() { a.call(d) }}, d.Host)
+		it := ui.HomeItem{Key: "call:" + d.Host, Text: lang.T(lang.HomeCallOn, labelText(d)), Online: a.deviceOnline(d.Host), Do: func() { a.call(d) },
+			Offline: d.Host != sn.Self && !a.deviceOnline(d.Host), // a red ● until it answers
+			Off:     d.Host == sn.Self || a.deviceOffline(d.Host)} // this device, or one not there: not called
 		it.Start = d.Host == sn.LastHost[uid]
 		items = append(items, it)
 	}
-	form := "edit:" + uid
-	items = append(items, ui.HomeItem{Key: "edit", Text: lang.T(lang.HomeEditContact), Open: func() []ui.HomeItem { return a.editPersonMenu(uid) },
-		Enter: a.newDraft(form), Leave: a.newDraft(form)})
 	return append(items, back(), closeItem())
 }
 
@@ -387,9 +384,9 @@ func (a *homeApp) editPersonMenu(uid string) []ui.HomeItem {
 	}
 	for i, d := range p.Devices {
 		host, here := d.Host, d.Host == sn.Self
-		items = append(items, tinted(ui.HomeItem{Key: "dev:" + strconv.Itoa(i), Text: deviceTitle(d), Open: func() []ui.HomeItem {
+		items = append(items, ui.HomeItem{Key: "dev:" + strconv.Itoa(i), Text: deviceTitle(d), Open: func() []ui.HomeItem {
 			return a.editDeviceMenu(uid, host, here)
-		}}, host))
+		}})
 	}
 	// Devices being added: written once their address is in (then they
 	// are the card's, at the same place in the list).
@@ -416,6 +413,13 @@ func (a *homeApp) editPersonMenu(uid string) []ui.HomeItem {
 		a.mu.Unlock()
 		ui.HomeOpenKey(key) // the new device, entered at once
 	}})
+	if sn.Me == nil || sn.Me.UID != uid { // − : the person out of Say (not our own card)
+		items = append(items, deleteItem(func() {
+			if err := a.store.Remove(uid); err != nil {
+				log.Printf("[contacts] %v", err)
+			}
+		}))
+	}
 	return append(items, back(), closeItem())
 }
 
@@ -429,8 +433,8 @@ func (a *homeApp) updater(uid string) func(f func(p *contacts.Person)) {
 }
 
 // editDeviceMenu: a card's device, its label and address (this device's
-// address is its own: shown, not edited). An address erased removes the
-// device.
+// address is its own: shown, not edited). − under the line removes the
+// device (pressed twice), as erasing its address does.
 func (a *homeApp) editDeviceMenu(uid, host string, here bool) []ui.HomeItem {
 	p := a.store.Snapshot().ByUID(uid)
 	var d contacts.Device
@@ -458,28 +462,38 @@ func (a *homeApp) editDeviceMenu(uid, host string, here bool) []ui.HomeItem {
 	}}}}
 	if here {
 		// This device's address: shown, not edited (it is this Say's own).
-		items = append(items, tinted(ui.HomeItem{Key: "addr", Text: d.Shown()}, host))
+		items = append(items, ui.HomeItem{Key: "addr", Text: d.Shown()})
 	} else {
-		items = append(items, ui.HomeItem{Key: "addr", Field: &ui.HomeField{Value: d.Shown(), Placeholder: lang.T(lang.HomeAddress), Set: func(v string) {
-			if v == "" { // erased: the device goes, back to the card
-				update(func(p *contacts.Person) {
-					kept := p.Devices[:0]
-					for _, x := range p.Devices {
-						if x.Host != host {
-							kept = append(kept, x)
-						}
+		remove := func() { // the device goes, back to the card
+			update(func(p *contacts.Person) {
+				kept := p.Devices[:0]
+				for _, x := range p.Devices {
+					if x.Host != host {
+						kept = append(kept, x)
 					}
-					p.Devices = kept
-				})
-				ui.HomeBackTo("given")
+				}
+				p.Devices = kept
+			})
+			ui.HomeBackTo("given")
+		}
+		items = append(items, ui.HomeItem{Key: "addr", Field: &ui.HomeField{Value: d.Shown(), Placeholder: lang.T(lang.HomeAddress), Set: func(v string) {
+			if v == "" { // erased: the device goes
+				remove()
 				return
 			}
 			if h, port, err := contacts.ParseAddr(v); err == nil { // [address]:port, the port where not 7777
 				device(func(d *contacts.Device) { d.Host, d.Port = h, port })
 			}
 		}}})
+		items = append(items, deleteItem(remove))
 	}
 	return append(items, back(), closeItem())
+}
+
+// deleteItem is − under the line, red: its first press makes it read
+// "Delete forever" (moving off takes that back), the second does del.
+func deleteItem(del func()) ui.HomeItem {
+	return ui.HomeItem{Key: "del", Text: "−", Bottom: true, Danger: true, Confirm: lang.T(lang.HomeDeleteForever), Do: del}
 }
 
 // newBlockMenu: a device being added to a card: its label, then its
@@ -667,12 +681,15 @@ func (a *homeApp) settingsMenu() []ui.HomeItem {
 			a.useFolder(sn.Dir)
 		}
 	}})
+	if it, ok := a.iconItem(); ok {
+		items = append(items, it)
+	}
 	return append(items, back(), closeItem())
 }
 
 // osMenu: our card in the system's address book, its label, how names show.
 func (a *homeApp) osMenu() []ui.HomeItem {
-	return append(append(a.myCardItems(), a.displayItem()), back(), closeItem())
+	return append(append(a.myCardItems(), a.displayItem(), a.editContactsItem()), back(), closeItem())
 }
 
 // useOS switches to the system's address book once the system lets Say
@@ -697,6 +714,36 @@ func (a *homeApp) useFolder(dir string) {
 // displayItem: how people are named in the list.
 func (a *homeApp) displayItem() ui.HomeItem {
 	return ui.HomeItem{Key: "display", Text: lang.T(lang.HomeDisplay), Open: a.displayMenu}
+}
+
+// editContactsItem: under how people are named, the cards to edit.
+func (a *homeApp) editContactsItem() ui.HomeItem {
+	return ui.HomeItem{Key: "editall", Text: lang.T(lang.HomeEditContacts), Open: a.editContactsMenu}
+}
+
+// addPersonItem is + under the line: a new person's form (the contacts,
+// the cards to edit).
+func (a *homeApp) addPersonItem() ui.HomeItem {
+	return ui.HomeItem{Key: "+", Text: "+", Bottom: true, Open: a.newPersonMenu, Enter: a.newDraft("person"), Leave: a.savePerson}
+}
+
+// editContactsMenu: our card first, then the people, each opening its
+// form; + adds one, as in the contacts.
+func (a *homeApp) editContactsMenu() []ui.HomeItem {
+	sn := a.store.Snapshot()
+	var items []ui.HomeItem
+	edit := func(key, text, uid string) ui.HomeItem {
+		form := "edit:" + uid
+		return ui.HomeItem{Key: key, Text: text, Open: func() []ui.HomeItem { return a.editPersonMenu(uid) },
+			Enter: a.newDraft(form), Leave: a.newDraft(form)}
+	}
+	if sn.Me != nil {
+		items = append(items, edit("me", myName(sn), sn.Me.UID))
+	}
+	for _, p := range sortedPeople(sn, sn.People) {
+		items = append(items, edit("p:"+p.UID+p.Name(), p.Display(sn.Display), p.UID))
+	}
+	return append(items, a.addPersonItem(), back(), closeItem())
 }
 
 // displayMenu is the ways to name people, the one chosen ticked; each shown
@@ -814,14 +861,14 @@ func (a *homeApp) thisLabelMenu() []ui.HomeItem {
 		}
 	}
 	return []ui.HomeItem{
-		tinted(ui.HomeItem{Key: "label", Start: true, Field: &ui.HomeField{Value: current, Placeholder: sn.Kind, Set: func(v string) {
+		ui.HomeItem{Key: "label", Start: true, Field: &ui.HomeField{Value: current, Placeholder: sn.Kind, Set: func(v string) {
 			if v == "" {
 				v = sn.Kind
 			}
 			if err := a.store.SetHereLabel(v); err != nil {
 				log.Printf("[contacts] this device's label: %v", err)
 			}
-		}}}, sn.Self),
+		}}},
 		back(), closeItem(),
 	}
 }
@@ -844,7 +891,7 @@ func (a *homeApp) folderMenu() []ui.HomeItem {
 	}}}
 	if sn.Source != "os" {
 		items = append(items, a.myCardItems()...)
-		items = append(items, a.displayItem())
+		items = append(items, a.displayItem(), a.editContactsItem())
 	}
 	return append(items, back(), closeItem())
 }

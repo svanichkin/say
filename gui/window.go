@@ -75,6 +75,7 @@ func Run(app func() error, in Input) error {
 	ebiten.SetWindowClosingHandled(true)
 	ebiten.SetRunnableOnUnfocused(true)
 	ebiten.SetScreenClearedEveryFrame(false)
+	catchQuit() // runs once the window's run loop does: its menu is there by then
 	if err := ebiten.RunGame(g); err != nil && !errors.Is(err, ebiten.Termination) {
 		return err
 	}
@@ -102,6 +103,7 @@ type game struct {
 	drawnAt        time.Time
 	drawnVersion   uint64
 	lastWinState   [2]bool // focused, minimized (DEBUG-TEMP)
+	hovered        [2]int  // the cell under the pointer (hover)
 	drawnW, drawnH int
 	dirty          bool
 
@@ -135,12 +137,20 @@ func (g *game) Update() error {
 		return ebiten.Termination
 	}
 	if ebiten.IsWindowBeingClosed() && !g.closing {
-		g.closing = true
-		g.closingAt = time.Now()
 		g.place.flush()
-		log.Printf("[gui] the window is being closed")
-		if g.in.Interrupt != nil {
-			g.in.Interrupt() // Say hangs up and stops; the window goes with it
+		if quitting() {
+			g.closing = true
+			g.closingAt = time.Now()
+			log.Printf("[gui] quitting")
+			if g.in.Interrupt != nil {
+				g.in.Interrupt() // Say hangs up and stops; the window goes with it
+			}
+		} else {
+			// The window's close button closes the window, not Say: it
+			// goes on, waiting for calls (one coming in shows the window
+			// again, so does its Dock icon); Cmd+Q, Ctrl+C quit.
+			log.Printf("[gui] the window closed: Say goes on")
+			HideWindow()
 		}
 	}
 	if g.closing && time.Since(g.closingAt) > closeWait {
@@ -167,9 +177,9 @@ func (g *game) keys() {
 	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl)
 	meta := ebiten.IsKeyPressed(ebiten.KeyMeta)
 	cmd := meta || (runtime.GOOS != "darwin" && ctrl)
-	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyC) {
+	if (ctrl && inpututil.IsKeyJustPressed(ebiten.KeyC)) || (meta && inpututil.IsKeyJustPressed(ebiten.KeyQ)) {
 		if g.in.Interrupt != nil {
-			g.in.Interrupt()
+			g.in.Interrupt() // Ctrl+C, Cmd+Q: Say quits
 		}
 		return
 	}
@@ -228,6 +238,7 @@ func repeated(k ebiten.Key) bool {
 }
 
 func (g *game) mouse() {
+	g.hover()
 	if !inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) || g.in.Click == nil {
 		return
 	}
@@ -242,6 +253,41 @@ func (g *game) mouse() {
 	}
 	g.in.Click(col+1, row+1)
 }
+
+// hover tells where the pointer is when it moves to another cell (0, 0:
+// out of the window).
+func (g *game) hover() {
+	if g.in.Hover == nil {
+		return
+	}
+	x, y := ebiten.CursorPosition()
+	cols, rows := g.screen.Size()
+	at := [2]int{}
+	if x >= g.ox && y >= g.oy {
+		if col, row := (x-g.ox)/g.cw, (y-g.oy)/g.ch; col < cols && row < rows {
+			at = [2]int{col + 1, row + 1}
+		}
+	}
+	if at != g.hovered {
+		g.hovered = at
+		g.in.Hover(at[0], at[1])
+	}
+}
+
+// quitting reports whether closing the window is quitting Say: Quit in the
+// Dock or the app menu, Cmd+Q (Alt+F4 on Windows closes the window, as its
+// button does).
+func quitting() bool {
+	return quitAsked() || ebiten.IsKeyPressed(ebiten.KeyMeta) && ebiten.IsKeyPressed(ebiten.KeyQ)
+}
+
+// HideWindow takes the window off the screen, Say going on, waiting for
+// calls (macOS: the app hidden, its Dock icon brings it back; Windows: to
+// the taskbar).
+func HideWindow() { hideApp() }
+
+// ShowWindow brings the window back, in front (a call coming in).
+func ShowWindow() { showApp() }
 
 // Layout makes the screen the window's size in device pixels and fits the
 // cell grid into it.

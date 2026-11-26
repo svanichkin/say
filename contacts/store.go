@@ -32,6 +32,7 @@ type Store struct {
 	sysMe    string          // the system's own card for us ("My Card")
 	pending  []*Pending      // the cards waiting to be confirmed (read on start and on change)
 	ensured  map[string]bool // our cards this Say's address was put on this run (once each)
+	madeMe   bool            // a card of ours was made this run (none was there)
 
 	snap    atomic.Pointer[Snapshot]
 	changed func() // a new snapshot
@@ -117,7 +118,8 @@ func (s *Store) meLocked() string {
 // card made or marked elsewhere), once a run per card: a card that does not
 // keep it is not written over and over. In a folder with no file marked
 // "me" (the mark lost: another program rewrote the file), the one card
-// with this Say's address, which Say put there, is marked again.
+// with this Say's address, which Say put there, is marked again; with no
+// such card either, one is made (the computer's name, this device).
 func (s *Store) ensureLocked() {
 	if s.sourceLocked() != "os" && s.book.Me == "" && s.self != "" && s.ready {
 		var ours []*Person
@@ -128,6 +130,25 @@ func (s *Store) ensureLocked() {
 		}
 		if len(ours) == 1 && s.book.SetMe(ours[0]) == nil {
 			log.Printf("[contacts] our card's file marked me again: %s", ours[0].Name())
+			s.publishLocked()
+		}
+		if len(ours) == 0 && !s.madeMe {
+			// No card of ours at all (a first start): one is made, the
+			// computer's name its nickname, this device on it; it is
+			// sent in calls and can be renamed as any.
+			s.madeMe = true
+			uid, err := s.updateLocked("", func(p *Person) {
+				p.Nick = hostName()
+				s.putHere(p)
+			})
+			if err == nil {
+				err = s.takeAsMeLocked(uid)
+			}
+			if err != nil {
+				log.Printf("[contacts] our card not made: %v", err)
+			} else {
+				log.Printf("[contacts] our card made: %s", hostName())
+			}
 			s.publishLocked()
 		}
 	}
@@ -480,6 +501,27 @@ func (s *Store) takeAsMeLocked(uid string) error {
 	}
 	s.readLocked()
 	return err
+}
+
+// Remove takes a person out of Say: a card Say made (in a folder) is
+// deleted; any other, made elsewhere (the system's book, or a folder kept
+// with other programs), loses its Say addresses only, the rest of it kept.
+func (s *Store) Remove(uid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.book.ByUID(uid)
+	if p == nil {
+		return errors.New("no such card")
+	}
+	if !s.book.os && p.c != nil && p.c.get("PRODID") == sayProdID {
+		if err := s.book.Remove(p); err != nil {
+			return err
+		}
+	} else if _, err := s.updateLocked(uid, func(q *Person) { q.Devices = nil }); err != nil {
+		return err
+	}
+	s.readLocked()
+	return nil
 }
 
 // CreateMe makes a card of ours (or, uid set, changes the one made): its

@@ -300,6 +300,16 @@ go build -tags debug .                       # without make
 build). Started from it (a double click, Launchpad) Say opens its window; the
 bare `say` is the terminal utility and works in a terminal, however started.
 
+`make notarize` signs it with the Developer ID and the hardened runtime
+(camera, microphone, contacts: `scripts/say.entitlements`), has Apple notarize
+it, staples the ticket and packs `bin/Say-macos.zip`, which opens on any Mac
+without the "unidentified developer" warning. Once, the notary's API key into
+the keychain: `xcrun notarytool store-credentials say-notary --key
+AuthKey_<ID>.p8 --key-id <ID> --issuer <issuer ID>`. A tag `v*.*.*` does the
+same on GitHub (`.github/workflows/go.yml`, secrets `DEVELOPER_ID_P12`,
+`DEVELOPER_ID_P12_PASSWORD`, `NOTARY_KEY`, `NOTARY_KEY_ID`, `NOTARY_ISSUER_ID`)
+and releases `say-macos-universal.zip`.
+
 ### Plan 9 window
 
 Started in a rio window of its own (not in `vt`; drawterm too), Say draws
@@ -383,17 +393,34 @@ address pasted is called at once.
   nickname, first and last name, last and first name, or initials and last
   name (S.S.Vanichkin), each shown as your own name looks in it, the one
   chosen ticked; a card without what the choice takes shows its name.
-- Then the first column is **contacts**, **call an address** (a field: type
-  an address, Enter calls it; not an address, it blinks), **my address**
-  (this Say's, `[address]:port` with the port only when it is not 7777, and
-  **copy**), **settings** and `x`. The contacts
-  are your own card (first, in your colour; "me" until there is one), the people, and `+` to add one.
+- Then the first column is **Contacts**, **Call an address** (a field: type
+  an address, Enter calls it; not an address, it blinks), **My address**
+  (this Say's, `[address]:port` with the port only when it is not 7777:
+  Enter or a click copies it), **Settings** and `x`: in the window `x`, as
+  the window's own close button, hides the window, Say going on and waiting
+  for calls (a call coming in shows it again, so does the Dock); Cmd+Q or
+  Ctrl+C quit; in a terminal `x` quits. **Settings → Say's icon**: **In the
+  Dock**, or **In the tray** (macOS: the menu bar, no Dock icon; kept in
+  `config-tray.json`), whose menu has the contacts, a green or red ● before
+  each, each opening to its devices to call, then **Open Say** and **Quit**.
+  Windows' notification area is to come. Every item begins with
+  a capital, as the call view's menu does. A field chosen shows what it
+  holds and a blinking cursor, as the chat's input; its placeholder only
+  when it is not chosen. The chosen line's block is its text's colour (red
+  on `x`). The contacts
+  are your own card (first; "Me" until there is one), the people, and `+` to add one.
   A person opens to **call <label>** for each of their devices (your own
-  card: your other devices, not this one) and **edit contact**: the names,
+  card: your other devices, not this one). The cards are edited from the
+  settings: **Edit contacts**, under **Show contacts as**, lists your card
+  and the people, each opening to its form: the names,
   the devices, each opening to its label and address (`[address]:port`, the
   port only when it is not 7777; this device's address is its own, not
-  edited; an address erased removes the device), and `+`, which adds a
-  device and opens it, written once its address is in. A field is written
+  edited; an address erased removes the device, and so does `−` under the line, red: pressed once it reads **Delete forever**, pressed again it deletes; moving off it, or out of the menu, makes it `−` again; `+` is green), and `+`, which adds a
+  device and opens it, written once its address is in; under it `−` (pressed
+  twice, as a device's) takes the person out of Say: a card Say made is
+  deleted, one made elsewhere (the system's book, a folder shared with other
+  programs) loses its Say addresses only, all else kept; our own card has
+  none. **Edit contacts** has `+` too, as the contacts do. A field is written
   as it is left.
 - `+` in the contacts makes a person the same way (names, devices, `+`),
   but nothing is written while its form is open: leaving it makes the card,
@@ -402,7 +429,11 @@ address pasted is called at once.
 - **Cards in a call.** Right after the handshake each side sends its own
   card (protocol 15, frame 0x12): the names, the nickname, the devices with
   their labels and addresses, nothing else of the card; the chat is left to
-  what people write. A
+  what people write. The card sent always has the device calling on it.
+  With a folder of contacts and no card of its own, Say makes one when it
+  starts: the computer's name as its nickname, this device on it, to rename
+  as any card (with the system's address book, one of that device alone is
+  sent, nothing written there). A
   card from an address already in the book is that person's for sure (a mesh
   address comes from its key): what it adds, a second device, a nickname, is
   written to their card, nothing written over. A card from an address the
@@ -413,15 +444,28 @@ address pasted is called at once.
 - While a call is dialled, its screen has **x** under a line (on the chosen
   block, as a menu's): Enter, a click on it or Esc cancels the dial and
   Say is back on the home screen.
+- **A call rings before it is answered** (protocol 17). The one called sees
+  **INCOMING CALL**, who calls and their address, and under a line **✓**
+  (answer) and **x** (decline): ↑ and ↓ choose, Enter or a click does it,
+  Esc declines. The caller sees **Ringing, waiting for an answer**; declined,
+  or unanswered for 30 seconds, or the line busy (the one called in a call,
+  or another call ringing there), the caller is back on the home screen at
+  once. Hanging up while it rings takes it off the other screen. A Say of
+  protocol 14-16 is answered at once, as before, both ways.
 - A call made from the home screen tries three times, then the call goes on
-  until either side hangs up (the self view's menu has **x**, in red as the active menu's x) and Say
+  until either side hangs up (the self view's menu has **x**, in red as the active menu's x; in the window a view's menu shows while the pointer is over it, and goes as it leaves) and Say
   is back on the home screen.
 - **Who is online.** Every 30 seconds, while no call is on, Say asks each
   device in the contacts (but this one) whether Say runs there: PING in place
   of the handshake (protocol 16), answered PONG, no call begun and the line
   not taken; a device that has not answered in 5 seconds is not there. A
   person with a device that answered has a green ● before their name, and
-  so has that device's **call on** line. A Say of protocol 14 or 15 answers
+  so has that device's **call on** line. A device asked that has not
+  answered is not called (Enter makes it blink). The dot is red from the
+  start and turns green once the device answers, a person's when one of
+  theirs does; Say asks at once when it starts and when the contacts are
+  read. This device is shown on your card, not
+  called. A Say of protocol 14 or 15 answers
   PING as a peer too old: it counts as online all the same, and is still
   called. A mesh peer cannot say it came up, so asking is the only way.
 

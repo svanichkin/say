@@ -9,9 +9,9 @@ permissions:
   contents: write
   packages: write
 
-# Babe (the smooth video coder) is a private module: go fetches it with
-# BABE_TOKEN (a token that can read svanichkin/Babe), not through the
-# public proxy and checksum database.
+# Babe (the smooth video coder) is a private module: go fetches it over SSH
+# with BABE_SSH_KEY (the private half of a read-only deploy key of
+# svanichkin/Babe), not through the public proxy and checksum database.
 env:
   GOPRIVATE: github.com/svanichkin/Babe
 
@@ -24,7 +24,15 @@ jobs:
 
       - name: Access the private Babe module
         shell: bash
-        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+        env:
+          BABE_SSH_KEY: ${{ secrets.BABE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
+          chmod 600 ~/.ssh/babe
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
+          git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -34,8 +42,10 @@ jobs:
       - name: Build
         run: go build -v ./...
 
+      # The packages scripts/check.sh tests (the ones that are green), as
+      # before a release locally; the builds for other systems are the jobs.
       - name: Test
-        run: go test -v ./...
+        run: SKIP_CROSS=1 bash scripts/check.sh
 
   build_linux:
     name: Build Linux
@@ -55,7 +65,15 @@ jobs:
 
       - name: Access the private Babe module
         shell: bash
-        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+        env:
+          BABE_SSH_KEY: ${{ secrets.BABE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
+          chmod 600 ~/.ssh/babe
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
+          git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -85,7 +103,15 @@ jobs:
 
       - name: Access the private Babe module
         shell: bash
-        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+        env:
+          BABE_SSH_KEY: ${{ secrets.BABE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
+          chmod 600 ~/.ssh/babe
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
+          git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -113,37 +139,106 @@ jobs:
 
   build_darwin:
     name: Build macOS
+    # Both architectures here: their binaries, and Say.app made of the two
+    # (universal), signed with the Developer ID and notarized when the
+    # secrets are there (as LVNC's):
+    #   DEVELOPER_ID_P12           base64 of the "Developer ID Application" certificate and key (.p12)
+    #   DEVELOPER_ID_P12_PASSWORD  its password
+    #   NOTARY_KEY                 base64 of an App Store Connect API key (.p8)
+    #   NOTARY_KEY_ID              its key ID
+    #   NOTARY_ISSUER_ID           its issuer ID
+    # Without them Say.app is signed ad hoc.
     runs-on: macos-latest
     needs: build_check
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+    env:
+      HAS_CERT: ${{ secrets.DEVELOPER_ID_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.NOTARY_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Access the private Babe module
         shell: bash
-        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+        env:
+          BABE_SSH_KEY: ${{ secrets.BABE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
+          chmod 600 ~/.ssh/babe
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
+          git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.x'
 
-      - name: Build darwin/${{ matrix.arch }}
+      - name: Build darwin/amd64 and darwin/arm64
         run: |
-          export GOOS=darwin
-          export GOARCH=${{ matrix.arch }}
-          export CGO_ENABLED=1
-          go build -v -o say .
-          tar czvf say-darwin-${{ matrix.arch }}.tar.gz say
+          for arch in amd64 arm64; do
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=1 go build -v -ldflags "-X main.version=$GITHUB_REF_NAME" -o say-$arch .
+            cp say-$arch say
+            tar czvf say-darwin-$arch.tar.gz say
+          done
+          lipo -create -output say say-amd64 say-arm64
+
+      - name: Make Say.app
+        run: |
+          go run ./cmd/sayicon -out assets/icon -gui "$RUNNER_TEMP/gui-icon"
+          sh scripts/macos-app.sh say "$GITHUB_REF_NAME" dist
+
+      - name: Import the signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN" > /dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # The SHA-1, so the certificate's name never reaches the log.
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/ { print $2; exit }')"
+          if [ -z "$IDENTITY" ]; then echo "::error::no Developer ID Application identity in the .p12"; exit 1; fi
+          echo "::add-mask::$IDENTITY"
+          echo "SAY_SIGN_ID=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign and notarize Say.app
+        if: env.HAS_CERT == 'true'
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          SAY_NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          SAY_NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          if [ "$HAS_NOTARY" = true ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            export SAY_NOTARY_KEY="$RUNNER_TEMP/notary.p8"
+          else
+            export SAY_SIGN_ONLY=1
+          fi
+          bash scripts/notarize.sh dist/Say.app
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Pack Say.app
+        run: |
+          [ -f dist/Say-macos.zip ] || ditto -c -k --keepParent dist/Say.app dist/Say-macos.zip
+          mv dist/Say-macos.zip say-macos-universal.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: say-darwin-${{ matrix.arch }}
-          path: say-darwin-${{ matrix.arch }}.tar.gz
+          name: say-darwin
+          path: |
+            say-darwin-amd64.tar.gz
+            say-darwin-arm64.tar.gz
+            say-macos-universal.zip
 
   build_plan9:
     name: Build Plan 9
@@ -159,7 +254,15 @@ jobs:
 
       - name: Access the private Babe module
         shell: bash
-        run: git config --global url."https://x-access-token:${{ secrets.BABE_TOKEN }}@github.com/svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
+        env:
+          BABE_SSH_KEY: ${{ secrets.BABE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$BABE_SSH_KEY" > ~/.ssh/babe
+          chmod 600 ~/.ssh/babe
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global core.sshCommand "ssh -i $HOME/.ssh/babe -o IdentitiesOnly=yes"
+          git config --global url."git@github.com:svanichkin/Babe".insteadOf "https://github.com/svanichkin/Babe"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -197,7 +300,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          find . -name '*.tar.gz' | while read file; do
+          find . \( -name '*.tar.gz' -o -name '*.zip' \) | while read file; do
             echo "Checksum for $file"
             openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"
           done
@@ -210,5 +313,6 @@ jobs:
         with:
           files: |
             artifacts/**/*.tar.gz
+            artifacts/**/*.zip
             artifacts/**/*.sha256
           generate_release_notes: true

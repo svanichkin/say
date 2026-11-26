@@ -11,8 +11,9 @@
 *.rslsc
 *.zip
 *.json
-*say*
-!device/sayring.h
+# the binary (go build) and what a run leaves beside it
+/say
+/say-*
 *.log
 *.jpeg
 *.tiv
@@ -45,3 +46,6 @@ go.work.sum
 
 # 9front test VM (UTM bundle with disk image)
 vm/
+
+# Builds (make build, make app, Windows), their logs and configs
+bin/

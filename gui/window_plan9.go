@@ -232,3 +232,9 @@ func quiet() {
 	_, _ = syscall.Dup(int(null.Fd()), 1)
 	_, _ = syscall.Dup(int(null.Fd()), 2)
 }
+
+// HideWindow and ShowWindow do nothing here (no window to hide).
+func HideWindow() {}
+
+// ShowWindow: see HideWindow.
+func ShowWindow() {}

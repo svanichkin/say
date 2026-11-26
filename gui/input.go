@@ -12,6 +12,7 @@ type Input struct {
 	Key       func(r rune)       // a typed character; '\r' Enter, 0x7f Backspace
 	Paste     func(s string)     // pasted text
 	Click     func(col, row int) // a click on a cell (1-based)
+	Hover     func(col, row int) // the pointer moved to a cell (1-based; 0, 0: out of the window)
 	Interrupt func()             // Ctrl+C or the window closed
 	Resized   func()             // the screen changed size or font: redraw
 	Detail    func(delta int)    // Cmd+ / Cmd-: add or remove one detail step

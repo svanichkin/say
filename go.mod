@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/VoiceBlender/goamr-nb v1.1.0
 	github.com/danieldonoghue/govoip-dsp v0.1.0-rc.2
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gen2brain/malgo v0.11.27
 	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
 	github.com/hajimehoshi/ebiten/v2 v2.10.5
@@ -32,7 +33,6 @@ require (
 	github.com/ebitengine/gomobile v0.0.0-20260820040257-d11f821a26a6 // indirect
 	github.com/ebitengine/hideconsole v1.0.0 // indirect
 	github.com/ebitengine/purego v0.11.0 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/gologme/log v1.3.0 // indirect
 	github.com/google/btree v1.1.3 // indirect

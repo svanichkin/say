@@ -23,14 +23,13 @@ import (
 
 // HomeItem is a line of the home screen's menu.
 type HomeItem struct {
-	Key    string // keeps the item chosen when the menu is built again ("": Text)
-	Text   string
-	Colour [3]int // the chosen line's colour (none: ours)
-	Tinted bool   // Colour is set
-	Start  bool   // chosen when its column opens
-	Bottom bool   // with < and x, under the line (+)
-	Tick   bool   // the one chosen of its kind: a green ✓ before it
-	Online bool   // a person whose Say answers: a green ● before them
+	Key     string // keeps the item chosen when the menu is built again ("": Text)
+	Text    string
+	Start   bool // chosen when its column opens
+	Bottom  bool // with < and x, under the line (+)
+	Tick    bool // the one chosen of its kind: a green ✓ before it
+	Online  bool // a person whose Say answers: a green ● before them
+	Offline bool // asked, and nothing answered: a red ●
 	// Mark is a mark of its own before it, in MarkColour (a call view's
 	// menu: ✓ on, x off, → opens something else).
 	Mark       string
@@ -50,8 +49,16 @@ type HomeItem struct {
 	// filling): the device a person needs, its "+".
 	Need   string
 	Filled bool
-	Back   bool // "<": the column before
-	Close  bool // "x": back to the first column, or quit Say from it
+	// Danger: it deletes; red as x. Confirm: what it reads after a first
+	// press, which does nothing more; a second press does it. Moving off
+	// it, or the menu, takes the first press back.
+	Danger  bool
+	Confirm string
+	// Off: it cannot be done now (a device not online, this one): Enter
+	// makes it blink instead.
+	Off   bool
+	Back  bool // "<": the column before
+	Close bool // "x": back to the first column, or quit Say from it
 	// CloseTo: "x" goes back to the column with this item (where a long
 	// way down, the folders, began) instead of the first one.
 	CloseTo string
@@ -98,6 +105,7 @@ var home struct {
 	shown   bool
 	stack   []homeColumn
 	editing bool   // the chosen field has a value typed (edit), not yet set
+	armed   string // the item pressed once, to press again (HomeItem.Confirm): its fieldKey
 	editKey string // which field (its column and key)
 	pendKey string // a field set, its value not yet in the menu (until it is built again)
 	pendVal string
@@ -141,9 +149,21 @@ func ShowHome(on bool) {
 	RequestRedraw()
 }
 
+// homeFieldChosen reports whether the home screen's chosen item is a
+// field: its cursor blinks.
+func homeFieldChosen() bool {
+	if !HomeShown() {
+		return false
+	}
+	home.Lock()
+	defer home.Unlock()
+	it, ok := currentLocked()
+	return ok && it.Field != nil
+}
+
 // HomeShown reports whether the home screen is what the screen shows.
 func HomeShown() bool {
-	if ChatConnected() {
+	if ChatConnected() || ringingOn() {
 		return false
 	}
 	home.Lock()
@@ -318,6 +338,7 @@ func currentLocked() (HomeItem, bool) {
 
 // homeKey is a key while the home screen is shown.
 func homeKey(r rune) {
+	noteTyped() // the cursor shows while keys are pressed
 	home.Lock()
 	act := homeKeyLocked(r)
 	home.Unlock()
@@ -333,6 +354,9 @@ func homeKey(r rune) {
 func homeKeyLocked(r rune) func() {
 	if len(home.stack) == 0 {
 		return nil
+	}
+	if r != '\r' && r != '\n' {
+		home.armed = "" // moving off (or out): the first press taken back
 	}
 	top := &home.stack[len(home.stack)-1]
 	it, ok := currentLocked()
@@ -660,7 +684,12 @@ func activateLocked() func() {
 		if it.Enter != nil {
 			return it.Enter
 		}
+	case it.Off:
+		blinkLocked(map[string]bool{it.key(): true})
+	case it.Do != nil && it.Confirm != "" && home.armed != fieldKeyLocked(it):
+		home.armed = fieldKeyLocked(it) // pressed once: it reads its Confirm
 	case it.Do != nil:
+		home.armed = ""
 		if it.Flash != "" {
 			home.flashAt, home.flashText, home.flashTo = it.key(), "", time.Now().Add(1200*time.Millisecond)
 			time.AfterFunc(1300*time.Millisecond, RequestRedraw)
@@ -743,11 +772,16 @@ func homeClick(col, row int) {
 	home.Lock()
 	set := setFieldLocked() // a click leaves the field
 	var act func()
+	armed := home.armed
+	home.armed = "" // a click elsewhere takes a first press back
 	for _, a := range home.clicks {
 		if a.row != row || col < a.c0 || col > a.c1 {
 			continue
 		}
 		top := len(home.stack) - 1
+		if a.level == top && a.item == home.stack[top].cur {
+			home.armed = armed // on the item pressed once: pressed again
+		}
 		switch {
 		case a.level == top:
 			home.stack[top].cur = a.item
@@ -832,8 +866,8 @@ func renderHomeScreen(cols, rows int) string {
 	level := len(home.stack) - 1
 	cur := home.stack[level]
 	chosen, _ := currentLocked()
-	tint := homeTint(chosen)
-	block := homeChosen(tint)
+	tint := ChatAccent()                         // the frames and the chosen line of every window without video (CLAUDE.md, Интерфейс 9)
+	block := homeChosen(homePlate(chosen, tint)) // the chosen line's: its text's colour
 	// The blocks of the columns around the middle one, left and right, are
 	// grey, as faint text: only the middle one is what Enter does.
 	muted := homeChosen(homeFaintColour)
@@ -961,7 +995,7 @@ func homeMark(it HomeItem) string {
 		return it.Mark
 	case it.Tick:
 		return "✓"
-	case it.Online:
+	case it.Online, it.Offline:
 		return "●"
 	}
 	return ""
@@ -1047,10 +1081,21 @@ func putTick(out *strings.Builder, it HomeItem, text string, row, x, cols int, s
 		put("x", homeCloseColour)
 		return
 	}
+	if it.Danger {
+		put(text, homeCloseColour)
+		return
+	}
+	if it.Bottom && text == "+" { // adds: green
+		put("+", homeMarkColour)
+		return
+	}
 	if m := homeMark(it); m != "" && strings.HasPrefix(text, m+" ") {
 		c := homeMarkColour
-		if it.Mark != "" {
+		switch {
+		case it.Mark != "":
 			c = it.MarkColour
+		case it.Offline:
+			c = homeCloseColour
 		}
 		put(m, c)
 	}
@@ -1062,6 +1107,8 @@ func homeTextPlain(it HomeItem) string {
 		return "<"
 	case it.Close:
 		return "x"
+	case it.Confirm != "" && home.armed == fieldKeyLocked(it):
+		return it.Confirm
 	case home.flashAt != "" && it.key() == home.flashAt && time.Now().Before(home.flashTo):
 		if home.flashText != "" {
 			return home.flashText
@@ -1076,14 +1123,22 @@ func homeTextPlain(it HomeItem) string {
 }
 
 // homeLine is an item's text and style: chosen in the middle column it is
-// on its colour, a space either side (a field being edited with its cursor).
+// on its block (homePlate). A field chosen there shows what is typed and
+// the chat's blinking cursor, no placeholder.
 func homeLine(it HomeItem, chosen, middle bool, tint [3]int) (string, string) {
 	text := homeText(it)
-	if chosen && middle && it.Field != nil && home.editing && home.editKey == fieldKeyLocked(it) {
-		return home.edit + "_", homeChosen(tint)
+	if chosen && middle && it.Field != nil { // no placeholder: what is typed and the cursor
+		value := it.Field.Value + it.Field.Suffix
+		if home.editing && home.editKey == fieldKeyLocked(it) {
+			value = home.edit
+		}
+		return value + inputCursor(), homeChosen(homePlate(it, tint))
+	}
+	if chosen && middle {
+		return text, homeChosen(homePlate(it, tint)) // on its block: where the others are
 	}
 	if chosen {
-		return text, homeChosen(tint) // on its block: where the others are
+		return text, homeChosen(tint)
 	}
 	if middle && framed() {
 		// The active menu's text is its frame's colour inverted
@@ -1094,29 +1149,43 @@ func homeLine(it HomeItem, chosen, middle bool, tint [3]int) (string, string) {
 	return text, homeNormal()
 }
 
+// homePlate is the colour of the chosen line's block in an active menu:
+// its mark's colour where it has one (a red ● red, a green ✓ or ● green;
+// CLAUDE.md, Интерфейс 9), else its text's: x's and −'s red, +'s green, the other items'
+// their frame's colour inverted (BrickColour); a terminal without frames,
+// whose text is its own colour, the frame's.
+func homePlate(it HomeItem, tint [3]int) [3]int {
+	switch {
+	case it.Close, it.Danger, it.Offline:
+		return homeCloseColour
+	case it.Bottom && it.Text == "+":
+		return homeMarkColour
+	case it.Mark != "":
+		return it.MarkColour // a call view's ✓, x, →
+	case it.Tick, it.Online:
+		return homeMarkColour
+	case framed():
+		return BrickColour(tint)
+	}
+	return tint
+}
+
 // homeColumnWidth is the widest item of a column (the padding is round it).
 func homeColumnWidth(items []HomeItem) int {
 	w := 0
 	for _, it := range items {
 		w = max(w, displayWidth(homeText(it)))
 	}
+	for _, it := range items {
+		if it.Field != nil { // a field's cursor, chosen
+			w = max(w, displayWidth(homeText(it))+1)
+		}
+	}
 	if home.editing {
 		w = max(w, displayWidth(home.edit)+1) // its cursor
 	}
 	return w
 }
-
-// homeTint is the chosen item's colour: its own, else ours.
-func homeTint(it HomeItem) [3]int {
-	if it.Tinted {
-		return it.Colour
-	}
-	self, _ := Accents()
-	return self
-}
-
-// AddressColour is the colour Say gives an address (its frame in a call).
-func AddressColour(addr string) [3]int { return accentPresets[addressColour(addr)] }
 
 func homePut(out *strings.Builder, row, col, cols int, text, style string) {
 	text = strings.Map(func(r rune) rune { // a name from a card is text, never a terminal's sequence
@@ -1178,7 +1247,7 @@ func homeChosen(c [3]int) string {
 
 // homeLightBg is the luma (luma's scale, 0..255000) above which a colour
 // is light: white text on it does not read.
-const homeLightBg = 145000
+const homeLightBg = 135000
 
 func homeFg(c [3]int) string {
 	if ansiColors() {

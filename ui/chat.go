@@ -42,6 +42,11 @@ type liveEntry struct {
 
 // SetChatActions installs the active call's message and file send handlers.
 func SetChatActions(onText, onFile func(string)) {
+	if onText != nil {
+		if f := showWindow.get(); f != nil {
+			f() // a call begins: a hidden window comes back (a peer of 14-16 does not ring)
+		}
+	}
 	chatState.Lock()
 	chatState.onText, chatState.onFile = onText, onFile
 	if onText == nil {
@@ -119,6 +124,25 @@ const cursorBlinkPeriod = 530 * time.Millisecond
 // cursor would not blink.
 var blinkEpoch = time.Now()
 
+// noteTyped restarts the cursor's blink: shown while keys are pressed.
+func noteTyped() {
+	chatState.Lock()
+	chatState.typedAt = time.Now()
+	chatState.Unlock()
+}
+
+// inputCursor is the input's cursor as its blink is now: the chat's and a
+// menu field's ("▏", a block in the window; a space when off).
+func inputCursor() string {
+	if !inputCursorVisible(time.Now()) {
+		return " "
+	}
+	if framed() {
+		return "█"
+	}
+	return "▏"
+}
+
 // inputCursorVisible reports the blink phase of the input cursor at now.
 func inputCursorVisible(now time.Time) bool {
 	chatState.RLock()
@@ -135,9 +159,8 @@ func chatKey(r rune) {
 		homeKey(r)
 		return
 	}
-	if (r == keys.Esc || (r == '\r' || r == '\n') && dialCancel.get() != nil) && !ChatConnected() {
-		cancelDial() // Esc, or Enter on its x, while a call is dialled: back home
-		return
+	if !HomeShown() && statusKey(r) {
+		return // the status screen's items: a dial's x, a ringing call's ✓ and x (ring.go)
 	}
 	if ChatConnected() && callKey(r) {
 		return // the windows and their menus (callkeys.go)
