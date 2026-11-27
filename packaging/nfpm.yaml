@@ -1,0 +1,41 @@
+# Say's .deb and .rpm (nfpm), built by the release workflow for each Linux
+# architecture: SAY_VERSION (no v), SAY_ARCH (amd64, arm64 or arm7: nfpm
+# names them for deb and rpm) come from the environment; the binary is
+# ./say, as the Linux build leaves it.
+name: say
+version: ${SAY_VERSION}
+arch: ${SAY_ARCH}
+platform: linux
+section: net
+priority: optional
+maintainer: s.vanichkin <svanichkin@users.noreply.github.com>
+description: |
+  Peer-to-peer video calls over Yggdrasil, in the terminal.
+  Calls go directly between two devices, with no server in between.
+homepage: https://github.com/svanichkin/say
+license: MIT
+# GNUstep has its own /usr/bin/say (text to speech).
+conflicts:
+  - gnustep-gui-runtime
+overrides:
+  deb:
+    recommends:
+      - libasound2t64 | libasound2
+      - libpulse0
+  rpm:
+    recommends:
+      - alsa-lib
+      - pulseaudio-libs
+contents:
+  - src: say
+    dst: /usr/bin/say
+    file_info:
+      mode: 0755
+  - src: packaging/linux/say.desktop
+    dst: /usr/share/applications/say.desktop
+  - src: gui/icon/icon-256.png
+    dst: /usr/share/icons/hicolor/256x256/apps/say.png
+  - src: gui/icon/icon-48.png
+    dst: /usr/share/icons/hicolor/48x48/apps/say.png
+  - src: LICENSE
+    dst: /usr/share/doc/say/copyright

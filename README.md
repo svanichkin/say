@@ -45,6 +45,29 @@ so the window and the terminal are the same Say, and it comes before the
 system's text-to-speech `/usr/bin/say`. `brew upgrade` brings new releases;
 `brew uninstall --cask say` removes both.
 
+On Windows with winget (built into Windows 10 and 11):
+
+```powershell
+winget install svanichkin.Say
+```
+
+It puts `say.exe` on your `PATH`: `say` in a console works in it, `say -gui`
+opens the window. There is no Start menu shortcut (winget's portable
+packages make none). `winget upgrade svanichkin.Say` brings new releases;
+`winget uninstall svanichkin.Say` removes it.
+
+On Debian, Ubuntu, Fedora and others with apt or dnf (amd64, arm64, armv7):
+
+```sh
+curl -fsSL https://svanichkin.github.io/packages/install.sh | sudo sh
+```
+
+It adds Say's signed package repository and installs `say` with a launcher
+in the desktop's menu; `sudo apt upgrade` / `sudo dnf upgrade` bring new
+releases, `sudo apt remove say` / `sudo dnf remove say` removes it. The
+package conflicts with GNUstep's `gnustep-gui-runtime`, which has its own
+`/usr/bin/say`.
+
 Download your system's build from
 [Releases](https://github.com/svanichkin/say/releases):
 
@@ -52,7 +75,7 @@ Download your system's build from
   (Intel) holds `Say.app`, signed and notarized. Move it to Applications.
   `say-darwin-arm64.tar.gz` and `say-darwin-amd64.tar.gz` hold the terminal
   utility alone.
-- **Windows**: `say-windows-amd64.tar.gz`. A double click opens the window,
+- **Windows**: `say-windows-amd64.zip` (or `.tar.gz`). A double click opens the window,
   and `say` typed in a console works in it.
 - **Linux** (amd64, arm64, armv7), **FreeBSD**, **OpenBSD**, **NetBSD** (amd64) and
   **Plan 9** (amd64, 386, arm): a `say` binary. On Linux, `amd64` runs on any

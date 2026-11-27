@@ -467,3 +467,88 @@ jobs:
           identifier: svanichkin.Say
           installers-regex: 'say-windows-amd64\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+  packages:
+    name: apt and dnf
+    # .deb and .rpm of each Linux build (packaging/nfpm.yaml), put into the
+    # signed apt and dnf repository svanichkin/packages (GitHub Pages; only
+    # the latest version is kept). PACKAGES_GPG_KEY signs it; WINGET_TOKEN
+    # (public_repo) pushes it.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: say-linux-*
+          path: ./artifacts
+
+      - uses: actions/checkout@v4
+        with:
+          repository: svanichkin/packages
+          token: ${{ secrets.WINGET_TOKEN }}
+          path: repo
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.x'
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils createrepo-c
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Packages
+        run: |
+          export SAY_VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p pkg
+          for a in amd64:amd64 arm64:arm64 armv7:arm7; do
+            build=${a%%:*}; export SAY_ARCH=${a#*:}
+            tar xzf artifacts/say-linux-$build/say-linux-$build.tar.gz say
+            $(go env GOPATH)/bin/nfpm package -f packaging/nfpm.yaml -p deb -t pkg/
+            $(go env GOPATH)/bin/nfpm package -f packaging/nfpm.yaml -p rpm -t pkg/
+            rm say
+          done
+          ls -la pkg
+
+      - name: Repository
+        env:
+          KEY: ${{ secrets.PACKAGES_GPG_KEY }}
+        run: |
+          export GNUPGHOME=$(mktemp -d)
+          printf '%s\n' "$KEY" | gpg --batch --import
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase '' "$@"; }
+          cd repo
+          rm -rf deb rpm
+          # apt: deb/dists/stable/main/binary-<arch>, the pool beside it
+          mkdir -p deb/pool
+          cp ../pkg/*.deb deb/pool/
+          for arch in amd64 arm64 armhf; do
+            d=deb/dists/stable/main/binary-$arch
+            mkdir -p $d
+            (cd deb && apt-ftparchive --arch $arch packages pool) > $d/Packages
+            gzip -9kf $d/Packages
+          done
+          apt-ftparchive -o APT::FTPArchive::Release::Origin=Say \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main \
+            -o "APT::FTPArchive::Release::Architectures=amd64 arm64 armhf" \
+            release deb/dists/stable > deb/dists/stable/Release
+          sign --clearsign -o deb/dists/stable/InRelease deb/dists/stable/Release
+          sign -abs -o deb/dists/stable/Release.gpg deb/dists/stable/Release
+          # dnf: rpm/<basearch>, each its own repository
+          for arch in x86_64 aarch64 armv7hl; do
+            mkdir -p rpm/$arch
+            cp ../pkg/*.$arch.rpm rpm/$arch/
+            createrepo_c rpm/$arch
+            sign --detach-sign --armor rpm/$arch/repodata/repomd.xml
+          done
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add -A
+          git commit -m "say $GITHUB_REF_NAME"
+          git push
