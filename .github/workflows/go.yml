@@ -74,6 +74,12 @@ jobs:
           - arch: arm64 # PinePhone and other ARM boards
             name: arm64
             os: ubuntu-24.04-arm
+          - arch: arm # 32-bit Raspberry Pi OS and other ARMv7 boards
+            name: armv7
+            os: ubuntu-24.04
+            goarm: '7'
+            cc: arm-linux-gnueabihf-gcc
+            cxx: arm-linux-gnueabihf-g++
     steps:
       - uses: actions/checkout@v4
 
@@ -94,11 +100,21 @@ jobs:
         with:
           go-version: '1.x'
 
+      - name: Cross compiler for linux/${{ matrix.name }}
+        if: matrix.cc != ''
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
       - name: Build linux/${{ matrix.name }}
         env:
           GOAMD64: ${{ matrix.goamd64 }}
+          GOARM: ${{ matrix.goarm }}
           CGO_CFLAGS: ${{ matrix.cflags }}
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
         run: |
+          [ -n "$GOARM" ] || unset GOARM
+          [ -n "$CC" ] || unset CC
+          [ -n "$CXX" ] || unset CXX
           export GOOS=linux
           export GOARCH=${{ matrix.arch }}
           export CGO_ENABLED=1
@@ -149,12 +165,16 @@ jobs:
           go build -v -trimpath -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" -o say.exe .
           ls -la
           tar czvf say-windows-amd64.tar.gz say.exe
+          # winget takes a .zip, not a .tar.gz
+          7z a say-windows-amd64.zip say.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: say-windows-amd64
-          path: say-windows-amd64.tar.gz
+          path: |
+            say-windows-amd64.tar.gz
+            say-windows-amd64.zip
 
   build_darwin:
     name: Build macOS
@@ -432,3 +452,18 @@ jobs:
             artifacts/**/*.zip
             artifacts/**/*.sha256
           generate_release_notes: true
+
+  winget:
+    name: winget
+    # A pull request to microsoft/winget-pkgs with the new version, from the
+    # fork svanichkin/winget-pkgs (needs WINGET_TOKEN: a classic token with
+    # public_repo). The package's first version went there by hand.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: svanichkin.Say
+          installers-regex: 'say-windows-amd64\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

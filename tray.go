@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/svanichkin/say/conf"
+	"github.com/svanichkin/say/contacts"
+	"github.com/svanichkin/say/device"
 	"github.com/svanichkin/say/gui"
 	"github.com/svanichkin/say/lang"
 	"github.com/svanichkin/say/ui"
@@ -18,7 +20,8 @@ import (
 // no Dock icon), chosen in the settings and kept beside the configuration
 // (config.json: config-tray.json). The tray's menu is the contacts, a
 // green or red ● before each, each opening to its devices to call (one not
-// there, or this one, not callable), then Open Say and Quit.
+// there, or this one, not callable), our address (chosen: copied), then
+// Open Say and Quit.
 
 // trayState is where the choice is kept, whether it is on, and what the
 // menu's IDs do.
@@ -123,6 +126,13 @@ func (a *homeApp) refreshTray() {
 	a.tray.mu.Lock()
 	quit := a.tray.quit
 	a.tray.mu.Unlock()
+	// Our address, as in the home menu's "My address": chosen, it is copied.
+	if sn.Self != "" {
+		addr := contacts.Device{Host: sn.Self, Port: sn.Port}.Shown()
+		items = append(items, gui.TrayItem{Title: lang.T(lang.HomeMyAddress), On: true, Sub: []gui.TrayItem{
+			{Title: addr, On: true, ID: add(func() { device.CopyToClipboard(addr) })},
+		}}, gui.TrayItem{})
+	}
 	items = append(items,
 		gui.TrayItem{Title: lang.T(lang.TrayOpen), On: true, ID: add(gui.ShowWindow)},
 		gui.TrayItem{},

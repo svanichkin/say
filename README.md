@@ -31,6 +31,20 @@ The same call in a terminal, the video drawn in text cells:
 
 ## Install
 
+On macOS with Homebrew, `Say.app` and the `say` command in one go:
+
+```sh
+brew tap svanichkin/tap
+brew trust svanichkin/tap   # newer Homebrew loads casks only from trusted taps
+brew install --cask svanichkin/tap/say
+```
+
+`Say.app` goes into `/Applications`; `say` in Homebrew's bin
+(`/opt/homebrew/bin` or `/usr/local/bin`) is a link to the program inside it,
+so the window and the terminal are the same Say, and it comes before the
+system's text-to-speech `/usr/bin/say`. `brew upgrade` brings new releases;
+`brew uninstall --cask say` removes both.
+
 Download your system's build from
 [Releases](https://github.com/svanichkin/say/releases):
 
@@ -40,7 +54,7 @@ Download your system's build from
   utility alone.
 - **Windows**: `say-windows-amd64.tar.gz`. A double click opens the window,
   and `say` typed in a console works in it.
-- **Linux** (amd64, arm64), **FreeBSD**, **OpenBSD**, **NetBSD** (amd64) and
+- **Linux** (amd64, arm64, armv7), **FreeBSD**, **OpenBSD**, **NetBSD** (amd64) and
   **Plan 9** (amd64, 386, arm): a `say` binary. On Linux, `amd64` runs on any
   x86-64 CPU and `amd64-v3` is faster on one with AVX2 (the install script
   picks).

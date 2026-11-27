@@ -15,6 +15,7 @@ detect_platform() {
 		darwin*) os="darwin" ;;
 		freebsd*) os="freebsd" ;;
 		openbsd*) os="openbsd" ;;
+		netbsd*) os="netbsd" ;;
 		msys*|mingw*|cygwin*) os="windows" ;;
 		*) echo "Unsupported OS: $raw_os" >&2; exit 1 ;;
 	esac
@@ -23,7 +24,7 @@ detect_platform() {
 	case "$raw_arch" in
 		x86_64|amd64) arch="amd64" ;;
 		aarch64|arm64) arch="arm64" ;;
-		armv7l|armv7) arch="armv7" ;;
+		armv7l|armv7|armv8l) arch="armv7" ;;
 		*) echo "Unsupported architecture: $raw_arch" >&2; exit 1 ;;
 	esac
 
@@ -107,6 +108,26 @@ main() {
 
 	echo "Downloading ${download_url}"
 	curl -fL "$download_url" -o "${tmpdir}/${archive_name}"
+
+	# The release keeps each archive's sha256 beside it: a broken or
+	# substituted download is not installed.
+	local want got
+	want="$(curl -fsSL "${download_url}.sha256" | awk '{print $1}')"
+	if command -v sha256sum >/dev/null 2>&1; then
+		got="$(sha256sum "${tmpdir}/${archive_name}" | awk '{print $1}')"
+	elif command -v shasum >/dev/null 2>&1; then
+		got="$(shasum -a 256 "${tmpdir}/${archive_name}" | awk '{print $1}')"
+	elif command -v sha256 >/dev/null 2>&1; then
+		got="$(sha256 -q "${tmpdir}/${archive_name}")"
+	fi
+	if [ -z "$want" ] || [ -z "${got:-}" ]; then
+		echo "Warning: the checksum could not be checked" >&2
+	elif [ "$want" != "$got" ]; then
+		echo "Checksum mismatch for ${archive_name}: expected ${want}, got ${got}" >&2
+		exit 1
+	else
+		echo "Checksum OK"
+	fi
 
 	if [ "$archive_ext" = "zip" ]; then
 		command -v unzip >/dev/null 2>&1 || { echo "unzip is required to extract Windows archives"; exit 1; }
