@@ -1,0 +1,56 @@
+name: winget
+
+# Keeps winget's svanichkin.Say at the latest release: after every release
+# build and once a day it compares the latest release with the versions in
+# microsoft/winget-pkgs, and when winget is behind (and no pull request for
+# that version is open) sends one from the fork svanichkin/winget-pkgs.
+# WINGET_TOKEN: a classic token with public_repo. Until the package's first
+# version is merged (a moderator approves it) there is nothing to update:
+# the daily run then sends the latest as soon as it is.
+
+on:
+  workflow_run:
+    workflows: [Build and Release Say]
+    types: [completed]
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  winget:
+    runs-on: windows-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Is winget behind
+        id: need
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          version=${tag#v}
+          if ! have=$(gh api repos/microsoft/winget-pkgs/contents/manifests/s/svanichkin/Say -q '.[].name' 2>/dev/null); then
+            echo "::warning::svanichkin.Say is not in winget-pkgs yet (its first version waits for a moderator)"
+            exit 0
+          fi
+          if printf '%s\n' "$have" | grep -qx "$version"; then
+            echo "winget has $version"
+            exit 0
+          fi
+          if [ -n "$(gh pr list --repo microsoft/winget-pkgs --state open --search "svanichkin.Say $version in:title" -q '.[].number' --json number)" ]; then
+            echo "a pull request for $version is open"
+            exit 0
+          fi
+          echo "winget has $(printf '%s ' $have), sending $version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - if: steps.need.outputs.tag != ''
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: svanichkin.Say
+          release-tag: ${{ steps.need.outputs.tag }}
+          installers-regex: 'say-windows-amd64\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

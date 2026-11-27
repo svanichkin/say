@@ -453,35 +453,6 @@ jobs:
             artifacts/**/*.sha256
           generate_release_notes: true
 
-  winget:
-    name: winget
-    # A pull request to microsoft/winget-pkgs with the new version, from the
-    # fork svanichkin/winget-pkgs (needs WINGET_TOKEN: a classic token with
-    # public_repo). The package's first version went there by hand.
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: release
-    runs-on: windows-latest
-    steps:
-      # Until the first version is merged (a moderator approves it), the
-      # package is not in winget-pkgs and the releaser refuses: skipped.
-      - name: Is the package in winget-pkgs
-        id: known
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh api repos/microsoft/winget-pkgs/contents/manifests/s/svanichkin/Say >/dev/null 2>&1; then
-            echo "yes=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::svanichkin.Say is not in winget-pkgs yet (its first version waits for a moderator): not updated"
-          fi
-      - if: steps.known.outputs.yes == 'true'
-        uses: vedantmgoyal9/winget-releaser@main
-        with:
-          identifier: svanichkin.Say
-          installers-regex: 'say-windows-amd64\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
-
   packages:
     name: apt and dnf
     # .deb and .rpm of each Linux build (packaging/nfpm.yaml), put into the
