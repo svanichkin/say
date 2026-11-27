@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"math/rand/v2"
+	"runtime/debug"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -70,8 +71,59 @@ type paneImage struct {
 	gpu    *gpuPane // its GPU images (drawGPU; nil: the CPU draws)
 }
 
+// free lets the pane's images go.
+func (pi *paneImage) free() {
+	pi.img.Deallocate()
+	if pi.gpu != nil {
+		pi.gpu.dispose()
+	}
+}
+
+// release frees every image the renderer keeps (all but white): the window
+// is hidden, and its layers, the panes' pictures and the caches would hold
+// GPU memory all the while. Each is made again when next drawn.
+func (r *renderer) release() {
+	for _, im := range []**ebiten.Image{&r.bgImg, &r.scan, &r.dots, &r.static, &r.staticGlow,
+		&r.hazard, &r.hazardH, &r.frameLayer, &r.frameGlow, &r.glow, &r.blurTmp, &r.blurred} {
+		if *im != nil {
+			(*im).Deallocate()
+			*im = nil
+		}
+	}
+	for _, im := range r.shapes {
+		im.Deallocate()
+	}
+	r.shapes = map[uint32]*ebiten.Image{}
+	for _, pi := range r.paneImgs {
+		pi.free()
+	}
+	r.paneImgs = nil
+	stencilRelease()
+	r.framesDrawn = framesKey{}
+	r.dotsOf, r.scanOf, r.scanCW = 0, effectScan{}, 0
+}
+
 func (g *game) Draw(dst *ebiten.Image) {
 	r := &g.r
+	// Hidden (closed to the tray, Cmd+H, minimized): nothing is drawn, and
+	// what the drawing keeps on the GPU goes until the window is back.
+	if g.hidden {
+		if !g.released {
+			r.release()
+			// One draw on the hidden screen: Ebiten carries out what was
+			// deallocated with the next commands it sends.
+			dst.Fill(defaultBg)
+			g.font = nil // the fonts too, and the memory Go keeps free goes back
+			dropUnifont()
+			debug.FreeOSMemory()
+			g.released = true
+			log.Printf("[gui] the window hidden: its images freed")
+		}
+		return
+	}
+	if g.released {
+		g.released, g.dirty, g.drawnW = false, true, 0 // all of it again
+	}
 	if r.white == nil {
 		r.white = ebiten.NewImage(1, 1)
 		r.white.Fill(color.White)
@@ -108,6 +160,10 @@ func (g *game) Draw(dst *ebiten.Image) {
 		changed := !same
 		g.dirty = false
 		g.drawnVersion, g.drawnW, g.drawnH = version, b.Dx(), b.Dy()
+		// Ebiten's images for antialiased draws: ours, twice the largest
+		// layer drawn so (grown rounds the window's size up).
+		const step = 256
+		stencilFor(2*((b.Dx()+step-1)/step*step), 2*((b.Dy()+step-1)/step*step))
 		g.prepareGlow(b.Dx(), b.Dy())
 		if changed || g.r.static == nil {
 			g.drawStatic(b.Dx(), b.Dy(), cols, cells, panes)
@@ -500,9 +556,9 @@ func (g *game) prepareGlow(w, h int) {
 			r.blurTmp.Deallocate()
 			r.blurred.Deallocate()
 		}
-		r.glow = ebiten.NewImage(gw, gh)
-		r.blurTmp = ebiten.NewImage(gw, gh)
-		r.blurred = ebiten.NewImage(gw, gh)
+		r.glow = newLayer(gw, gh)
+		r.blurTmp = newLayer(gw, gh)
+		r.blurred = newLayer(gw, gh)
 	}
 	r.glow.Clear()
 }

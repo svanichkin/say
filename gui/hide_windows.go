@@ -13,3 +13,6 @@ func showApp() {
 		ebiten.RestoreWindow()
 	}
 }
+
+// appHidden: on Windows hiding is minimizing, which Update sees itself.
+func appHidden() bool { return false }

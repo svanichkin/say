@@ -33,8 +33,28 @@ var unifontUpperZst []byte // beyond the BMP: emoji, old scripts
 // unifontPixels is Unifont's cell: a character is 8x16 of its pixels.
 const unifontPixels = 8
 
-// unifontSources reads the built-in Unifont (both files), once.
-var unifontSources = sync.OnceValue(readUnifont)
+var unifont struct {
+	sync.Mutex
+	sources []*text.GoTextFaceSource
+}
+
+// unifontSources reads the built-in Unifont when it is not in memory.
+func unifontSources() []*text.GoTextFaceSource {
+	unifont.Lock()
+	defer unifont.Unlock()
+	if unifont.sources == nil {
+		unifont.sources = readUnifont()
+	}
+	return unifont.sources
+}
+
+// dropUnifont lets the fonts go (the window hidden): some 20 MB parsed,
+// read again in a fraction of a second when the window is drawn.
+func dropUnifont() {
+	unifont.Lock()
+	unifont.sources = nil
+	unifont.Unlock()
+}
 
 func readUnifont() []*text.GoTextFaceSource {
 	dec, err := zstd.NewReader(nil)

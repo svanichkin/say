@@ -128,6 +128,9 @@ func (g *game) drawPanes(dst *ebiten.Image, panes []Pane) {
 	if g.r.paneImgs == nil {
 		g.r.paneImgs = map[[2]int]*paneImage{}
 	}
+	// The images of panes no longer there (the call ended, the layout
+	// changed) go, their GPU memory with them.
+	defer g.r.dropPaneImages(panes)
 	for _, p := range panes {
 		if p.Chat || p.Menu {
 			continue
@@ -163,6 +166,16 @@ func (g *game) drawPanes(dst *ebiten.Image, panes []Pane) {
 			}
 			dst.DrawTriangles(vs, is, g.scanImage(sc), &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest,
 				FillRule: ebiten.FillRuleNonZero, Address: ebiten.AddressRepeat})
+		}
+	}
+}
+
+// dropPaneImages frees the images of panes not among panes.
+func (r *renderer) dropPaneImages(panes []Pane) {
+	for key, pi := range r.paneImgs {
+		if !slices.ContainsFunc(panes, func(p Pane) bool { return !p.Chat && !p.Menu && p.Row == key[0] && p.Col == key[1] }) {
+			pi.free()
+			delete(r.paneImgs, key)
 		}
 	}
 }
@@ -341,7 +354,16 @@ func grown(img *ebiten.Image, w, h int) *ebiten.Image {
 		img.Deallocate()
 	}
 	const step = 256
-	return ebiten.NewImage((w+step-1)/step*step, (h+step-1)/step*step)
+	return newLayer((w+step-1)/step*step, (h+step-1)/step*step)
+}
+
+// newLayer makes an image as large as the window or a good part of it on a
+// texture of its own (unmanaged). Ebiten puts every image up to its maximum
+// texture size on shared atlases, which grow by doubling and are freed only
+// when nothing is left on them: the window's layers beside the font's
+// glyphs, which stay, kept hundreds of megabytes of GPU memory for good.
+func newLayer(w, h int) *ebiten.Image {
+	return ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), &ebiten.NewImageOptions{Unmanaged: true})
 }
 
 // shapeBatch gathers filled shapes of one colour into one draw. Every shape
@@ -479,14 +501,11 @@ func (g *game) frameImage(p Pane, tint color.RGBA) (img *ebiten.Image, vw, vh fl
 	}
 	if pi == nil || pi.pixels != pixels || pi.img.Bounds().Dx() != w || pi.img.Bounds().Dy() != h {
 		if pi != nil {
-			pi.img.Deallocate()
-			if pi.gpu != nil {
-				pi.gpu.dispose()
-			}
+			pi.free()
 		}
 		// Its own texture: drawn larger with the bilinear filter, the
 		// edges sample no other image's.
-		im := ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), &ebiten.NewImageOptions{Unmanaged: pixels})
+		im := newLayer(w, h) // a texture of its own (newLayer)
 		pi = &paneImage{img: im, pix: make([]byte, w*h*4), pixels: pixels}
 		r.paneImgs[key] = pi
 	}

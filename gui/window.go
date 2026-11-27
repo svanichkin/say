@@ -106,6 +106,8 @@ type game struct {
 	hovered        [2]int  // the cell under the pointer (hover)
 	drawnW, drawnH int
 	dirty          bool
+	hidden         bool // the window off the screen (Update): Draw draws nothing
+	released       bool // and its images were freed
 
 	r renderer
 }
@@ -118,7 +120,13 @@ func (g *game) setMetrics(scale float64) {
 	if scale <= 0 {
 		scale = 1
 	}
-	if scale == g.scale && g.font != nil {
+	if scale == g.scale {
+		// The font goes while the window is hidden (Draw) and comes back
+		// when it is drawn again.
+		if g.font == nil && !g.hidden {
+			g.font = newFonts(float64(g.cw))
+			g.dirty = true
+		}
 		return
 	}
 	g.scale = scale
@@ -162,6 +170,7 @@ func (g *game) Update() error {
 	if !g.closing {
 		g.place.update(time.Now())
 	}
+	g.hidden = appHidden() || ebiten.IsWindowMinimized()
 	g.keys()
 	g.mouse()
 	// DEBUG-TEMP: the window hidden or in the background can look like

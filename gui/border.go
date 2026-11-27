@@ -87,7 +87,7 @@ func hazardTexture(img *ebiten.Image, w, h, stripe int) *ebiten.Image {
 			pix[o+3] = 255
 		}
 	}
-	img = ebiten.NewImage(w, h)
+	img = newLayer(w, h)
 	img.WritePixels(pix)
 	return img
 }
