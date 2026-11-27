@@ -462,7 +462,21 @@ jobs:
     needs: release
     runs-on: windows-latest
     steps:
-      - uses: vedantmgoyal9/winget-releaser@main
+      # Until the first version is merged (a moderator approves it), the
+      # package is not in winget-pkgs and the releaser refuses: skipped.
+      - name: Is the package in winget-pkgs
+        id: known
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api repos/microsoft/winget-pkgs/contents/manifests/s/svanichkin/Say >/dev/null 2>&1; then
+            echo "yes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::svanichkin.Say is not in winget-pkgs yet (its first version waits for a moderator): not updated"
+          fi
+      - if: steps.known.outputs.yes == 'true'
+        uses: vedantmgoyal9/winget-releaser@main
         with:
           identifier: svanichkin.Say
           installers-regex: 'say-windows-amd64\.zip$'
